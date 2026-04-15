@@ -974,11 +974,10 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "request_web_login",
             "description": (
-                "MANDATORY when accessing any website that requires login. "
-                "Shows an interactive login card in the chat UI with iframe, credential form, and cookie/token input. "
-                "DO NOT screenshot the login page or ask the user to type credentials in chat — ALWAYS call this tool instead. "
-                "Triggers: login page detected, 401/403 response, redirect to /login or /signin, 'please sign in' text. "
-                "Returns authenticated session info (browser_session or masked credential placeholders)."
+                "Explicitly request the user to log into a website. "
+                "Shows an interactive login card (iframe, credential form, cookie/token). "
+                "Note: login walls encountered during browser navigation are handled automatically — "
+                "you only need this tool to proactively request login before navigating."
             ),
             "parameters": {
                 "type": "object",

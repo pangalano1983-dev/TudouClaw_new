@@ -839,6 +839,8 @@ class Agent:
     # Maps placeholder key (e.g. "CRED_abc123") → real credential value.
     # Used by request_web_login to keep passwords out of LLM context.
     _credential_vault: dict = field(default_factory=dict, repr=False)
+    # --- LoginGuard: transparent login-wall handler (lazy-init) ---
+    _login_guard: Any = field(default=None, repr=False)
 
     # ---- persistence serialisation ----
 
@@ -2371,28 +2373,6 @@ class Agent:
             "不要在回复里编造 /api/portal/attachment?path=... 链接;一句话说明文件"
             "做了什么就够,卡片自带文件名/大小/打开按钮。\n"
             "</file_display>"
-        )
-
-        # Web login guidance — tells agent when to use request_web_login
-        parts.append("")
-        parts.append(
-            "<web_login_protocol>\n"
-            "When you need to access a website that requires login/authentication:\n"
-            "  1. Do NOT take a screenshot of the login page and ask the user to type credentials in chat.\n"
-            "  2. Do NOT navigate to the login page and wait — the user cannot interact with your browser.\n"
-            "  3. ALWAYS use the request_web_login tool. It shows an interactive login card in the chat UI\n"
-            "     where the user can: (a) log in directly via an embedded iframe, (b) enter username/password,\n"
-            "     or (c) paste cookies/token.\n"
-            "  4. After calling request_web_login, WAIT for the result. It will return either:\n"
-            "     - login_method='browser_session': the user logged in via iframe, the browser session is\n"
-            "       now authenticated. Continue browsing the target URL directly.\n"
-            "     - login_method='credentials': username + masked password placeholders ({{CRED_xxx}}).\n"
-            "       Use these in subsequent tool calls — they are auto-substituted at execution time.\n"
-            "  5. Signs that you need request_web_login: login page, 401/403 response, 'please sign in' text,\n"
-            "     redirect to /login or /signin URL, CAPTCHA after authentication wall.\n"
-            "中文说明:当你需要访问需要登录的网站时,务必调用 request_web_login 工具,不要截图让用户\n"
-            "在聊天框里打字输入密码。该工具会在聊天界面弹出一个交互式登录卡片(含iframe/表单/Cookie三种方式)。\n"
-            "</web_login_protocol>"
         )
 
         # Project context files (change rarely — only when files are edited)
@@ -3950,6 +3930,34 @@ Write only the summary body. Do not include any preamble or prefix."""
         preview = result[:2000] + "\n...\n" + result[-500:]
         return f"[Result too large ({len(result)} chars), saved to {filepath}]\n\nPreview:\n{preview}"
 
+    # ------------------------------------------------------------------ #
+    # LoginGuard: transparent login-wall handling
+    # ------------------------------------------------------------------ #
+
+    def _get_login_guard(self):
+        """Lazy-init the LoginGuard singleton for this agent."""
+        if self._login_guard is None:
+            from .login_guard import LoginGuard
+            self._login_guard = LoginGuard()
+        return self._login_guard
+
+    def _execute_tool_guarded(
+        self, tool_name: str, arguments: dict, *, on_event: Any = None,
+    ) -> str:
+        """Execute a tool and run the result through LoginGuard.
+
+        If the tool result looks like a login page, the guard automatically
+        shows a login card, waits for the user, and retries the tool call.
+        The LLM receives the post-login result transparently.
+        """
+        result = tools.execute_tool(tool_name, arguments)
+        guard = self._get_login_guard()
+        return guard.guard(
+            self, tool_name, arguments, result,
+            retry_fn=lambda: tools.execute_tool(tool_name, arguments),
+            on_event=on_event,
+        )
+
     def _execute_tool_with_policy(self, tool_name: str, arguments: dict,
                                    on_event: Any = None) -> str:
         """Execute a tool, checking policy. May block for approval."""
@@ -3977,13 +3985,13 @@ Write only the summary body. Do not include any preamble or prefix."""
         # Scheduled / background task: skip approval (already authorized at creation)
         if getattr(self, '_scheduled_context', False):
             with self._sandbox_scope():
-                result = tools.execute_tool(tool_name, arguments)
+                result = self._execute_tool_guarded(tool_name, arguments, on_event=on_event)
             return result
 
         # Agent-level exec_policy: 'full' = auto-approve all tools
         if self.profile.exec_policy == "full":
             with self._sandbox_scope():
-                result = tools.execute_tool(tool_name, arguments)
+                result = self._execute_tool_guarded(tool_name, arguments, on_event=on_event)
             return result
 
         from .auth import get_auth
@@ -3993,7 +4001,7 @@ Write only the summary body. Do not include any preamble or prefix."""
         # Check if this agent auto-approves this tool
         if tool_name in self.profile.auto_approve_tools:
             with self._sandbox_scope():
-                result = tools.execute_tool(tool_name, arguments)
+                result = self._execute_tool_guarded(tool_name, arguments, on_event=on_event)
             auth.audit("tool_executed", actor=self.name, target=tool_name,
                        detail=result[:200])
             return result
@@ -4100,7 +4108,7 @@ Write only the summary body. Do not include any preamble or prefix."""
             logger.debug("pre_tool middleware skipped: %s", _mw_err)
 
         with self._sandbox_scope():
-            result = tools.execute_tool(tool_name, arguments)
+            result = self._execute_tool_guarded(tool_name, arguments, on_event=on_event)
 
         # ── Middleware: POST_TOOL (truncation, etc.) ──
         try:
@@ -4653,11 +4661,6 @@ Write only the summary body. Do not include any preamble or prefix."""
                         # Ensure result is always a string for safe operations
                         result_str = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
 
-                        # ── Login page detection: when mcp_call (browser) hits a login page,
-                        #    inject a strong hint telling the LLM to use request_web_login
-                        #    instead of screenshotting or asking user to type in chat. ──
-                        if name == "mcp_call":
-                            result_str = self._inject_login_hint_if_needed(result_str)
                         evt = AgentEvent(time.time(), "tool_result",
                                          {"name": name, "result": result_str[:1000]})
                         self._log(evt.kind, evt.data)
@@ -5309,46 +5312,6 @@ Write only the summary body. Do not include any preamble or prefix."""
             "Do NOT attempt to decode or log the placeholders."
         )
         return json.dumps(result, ensure_ascii=False)
-
-    # ── Login page detection patterns ──
-    _LOGIN_URL_PATTERNS = (
-        "/login", "/signin", "/sign-in", "/sign_in",
-        "/auth", "/oauth", "/sso", "/passport",
-        "/account/login", "/user/login",
-    )
-    _LOGIN_CONTENT_KEYWORDS = (
-        "sign in", "log in", "login", "登录", "登陆",
-        "请输入密码", "请输入账号", "用户名", "password",
-        "forgot password", "忘记密码", "验证码",
-    )
-
-    def _inject_login_hint_if_needed(self, result_str: str) -> str:
-        """Detect if an mcp_call result indicates a login page; if so, append
-        a strong directive telling the LLM to call request_web_login next."""
-        try:
-            lower = result_str.lower()
-            is_login = False
-            # Check URL patterns in result
-            for pat in self._LOGIN_URL_PATTERNS:
-                if pat in lower:
-                    is_login = True
-                    break
-            # Check content keywords
-            if not is_login:
-                hits = sum(1 for kw in self._LOGIN_CONTENT_KEYWORDS if kw in lower)
-                if hits >= 2:  # need at least 2 keyword matches to reduce false positives
-                    is_login = True
-            if is_login:
-                hint = (
-                    "\n\n⚠️ [SYSTEM] LOGIN PAGE DETECTED — DO NOT screenshot or ask the user to type credentials in chat. "
-                    "You MUST call the request_web_login tool NOW with the login URL. "
-                    "This will show an interactive login card in the chat UI where the user can log in directly. "
-                    "After request_web_login returns, continue your task with the authenticated session."
-                )
-                return result_str + hint
-        except Exception:
-            pass
-        return result_str
 
     def _substitute_credentials(self, arguments: dict) -> dict:
         """Replace {{CRED_xxx}} placeholders in tool arguments with real values
