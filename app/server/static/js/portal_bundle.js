@@ -14893,22 +14893,30 @@ async function showDraftDetail(draftId) {
 }
 
 async function approveDraft(draftId, draftName) {
-  if (!confirm('确认批准技能草稿 "' + draftName + '" 并导入到技能商店？')) return;
   try {
     var res = await api('POST', '/api/portal/pending-skills/' + encodeURIComponent(draftId) + '/approve', {});
-    if (res.ok) { alert('已批准: ' + draftName + (res['import']&&res['import'].imported ? '\n已自动导入技能商店。' : '')); }
-    else { alert('批准失败: ' + JSON.stringify(res)); }
-  } catch (e) { alert('操作失败: ' + (e.message || String(e))); }
+    if (res.ok) {
+      window._toast('✓ 已批准: ' + draftName + (res['import']&&res['import'].imported ? '，已自动导入技能商店' : ''), 'ok');
+    } else {
+      window._toast('批准失败: ' + JSON.stringify(res), 'err');
+    }
+  } catch (e) {
+    window._toast('操作失败: ' + (e.message || String(e)), 'err');
+  }
   loadPendingSkills();
 }
 
 async function rejectDraft(draftId, draftName) {
-  if (!confirm('确认拒绝技能草稿 "' + draftName + '"？')) return;
   try {
     var res = await api('POST', '/api/portal/pending-skills/' + encodeURIComponent(draftId) + '/reject', {});
-    if (res.ok) { alert('已拒绝: ' + draftName); }
-    else { alert('操作失败: ' + JSON.stringify(res)); }
-  } catch (e) { alert('操作失败: ' + (e.message || String(e))); }
+    if (res.ok) {
+      window._toast('已拒绝: ' + draftName, 'ok');
+    } else {
+      window._toast('操作失败: ' + JSON.stringify(res), 'err');
+    }
+  } catch (e) {
+    window._toast('操作失败: ' + (e.message || String(e)), 'err');
+  }
   loadPendingSkills();
 }
 

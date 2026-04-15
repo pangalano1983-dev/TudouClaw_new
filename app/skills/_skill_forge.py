@@ -395,8 +395,10 @@ class SkillForge:
         meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
         logger.debug(f"Wrote metadata to {meta_path}")
 
-        # 更新草稿状态
-        draft.status = "exported"
+        # 更新草稿状态（仅当草稿还处于 draft 阶段时才设为 exported，
+        # 已 approved 的不回退状态）
+        if draft.status not in ("approved", "rejected"):
+            draft.status = "exported"
         with self._lock:
             self._drafts[draft.id] = draft
             self._save_drafts()
