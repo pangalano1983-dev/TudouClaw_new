@@ -5243,6 +5243,24 @@ Write only the summary body. Do not include any preamble or prefix."""
         if not url:
             return json.dumps({"error": "url is required"})
 
+        # ── Session-level dedup: if this domain was already attempted
+        #    (succeeded or failed/timed out), don't block again. ──
+        guard = self._get_login_guard()
+        if guard.already_attempted(url):
+            if guard.was_authenticated(url):
+                return json.dumps({
+                    "ok": True, "login_method": "cached",
+                    "note": f"Already authenticated for {site_name or url}. Proceed with your task.",
+                })
+            else:
+                return json.dumps({
+                    "error": (
+                        f"Login for {site_name or url} was already attempted but the user "
+                        "did not provide credentials. Do NOT retry — skip this login-required "
+                        "task, inform the user, and move on to other work."
+                    ),
+                })
+
         req = create_login_request(
             agent_id=self.id, agent_name=self.name,
             url=url, site_name=site_name, reason=reason, login_url=login_url,
@@ -5269,10 +5287,17 @@ Write only the summary body. Do not include any preamble or prefix."""
         self.status = prev_status if prev_status != AgentStatus.WAITING_APPROVAL else AgentStatus.BUSY
 
         if not credentials:
-            return json.dumps({"error": "Login request expired — no credentials provided within 5 minutes"})
+            guard.record_attempt(url, False)
+            return json.dumps({
+                "error": (
+                    "Login request expired — no credentials provided within 5 minutes. "
+                    "Do NOT retry this login. Skip this task and move on to other work."
+                ),
+            })
 
         # ── __BROWSER_SESSION__ signal: user logged in via iframe/new tab,
         #    agent should capture cookies from its own browser instance. ──
+        guard.record_attempt(url, True)
         if credentials.get("cookies") == "__BROWSER_SESSION__":
             return json.dumps({
                 "ok": True,

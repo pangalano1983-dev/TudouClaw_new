@@ -203,12 +203,48 @@ class LoginGuard:
     2. Blocks until the user submits credentials / confirms login.
     3. Retries the original tool call (the browser session is now authed).
     4. Returns the **post-login** result to the LLM — completely transparent.
+
+    Session memory
+    --------------
+    ``_attempted`` tracks domains that have been presented to the user
+    (succeeded or timed out).  ``_authenticated`` tracks domains where
+    the user successfully logged in.  A domain that was attempted but
+    NOT authenticated is never retried — the user already declined or
+    was absent.
     """
 
     def __init__(self, detector: LoginDetector | None = None):
         self.detector = detector or LoginDetector()
-        # Track URLs already handled this session to prevent infinite retry.
-        self._handled: set[str] = set()
+        # domain → True (success) / False (failed/expired)
+        self._attempted: dict[str, bool] = {}
+
+    # ------------------------------------------------------------------ #
+    # Public helpers — used by both guard() and _handle_web_login_request
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _domain_key(url: str) -> str:
+        """Extract a stable domain key from a URL."""
+        try:
+            host = urlparse(url).hostname or ""
+            # Strip leading "www."
+            if host.startswith("www."):
+                host = host[4:]
+            return host.lower()
+        except Exception:
+            return url.lower()
+
+    def already_attempted(self, url: str) -> bool:
+        """Return True if this domain was already attempted (success or fail)."""
+        return self._domain_key(url) in self._attempted
+
+    def was_authenticated(self, url: str) -> bool:
+        """Return True if this domain was successfully authenticated."""
+        return self._attempted.get(self._domain_key(url), False)
+
+    def record_attempt(self, url: str, success: bool) -> None:
+        """Record a login attempt result for this domain."""
+        self._attempted[self._domain_key(url)] = success
 
     def guard(
         self,
@@ -248,14 +284,16 @@ class LoginGuard:
         if signal is None:
             return result
 
-        # Prevent infinite loops: don't re-handle the same URL.
-        key = signal.url or signal.login_url or ""
-        if key in self._handled:
-            logger.debug("LoginGuard: already handled %s, returning original result", key)
+        # Prevent infinite loops: don't re-handle the same domain.
+        key_url = signal.url or signal.login_url or ""
+        if self.already_attempted(key_url):
+            if self.was_authenticated(key_url):
+                logger.debug("LoginGuard: %s already authenticated, returning result as-is", key_url)
+            else:
+                logger.debug("LoginGuard: %s already failed/skipped, not retrying", key_url)
             return result
-        self._handled.add(key)
 
-        logger.info("LoginGuard: login detected at %s — triggering login flow", key)
+        logger.info("LoginGuard: login detected at %s — triggering login flow", key_url)
 
         # Delegate to the Agent's existing login-request machinery
         # (PendingLoginRequest → SSE → block → user submits → unblock).
@@ -272,13 +310,18 @@ class LoginGuard:
             login_result = json.loads(login_result_str)
         except Exception as exc:
             logger.warning("LoginGuard: login flow error: %s", exc)
+            self.record_attempt(key_url, False)
             return result
 
         if not login_result.get("ok"):
             logger.info("LoginGuard: login skipped or failed, returning original result")
+            self.record_attempt(key_url, False)
             return result
 
-        # Login succeeded — retry the original tool call.
+        # Login succeeded
+        self.record_attempt(key_url, True)
+
+        # Retry the original tool call with the now-authenticated session.
         if retry_fn is not None:
             logger.info("LoginGuard: login succeeded, retrying %s", tool_name)
             try:
