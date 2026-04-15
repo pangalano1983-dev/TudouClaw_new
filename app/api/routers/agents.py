@@ -981,6 +981,40 @@ async def manage_prompt_packs(
             "total": len(registry.store.get_active()),
             "scan_dirs": registry.store._scan_dirs,
         }
+    elif action == "import_from_catalog":
+        import json as _json
+        from pathlib import Path as _Path
+        from ...core.prompt_enhancer import PromptPack
+        skill_ids = body.get("skill_ids", [])
+        catalog_path = _Path(__file__).resolve().parent.parent.parent / "data" / "community_skills.json"
+        try:
+            with open(catalog_path, 'r', encoding='utf-8') as f:
+                catalog = _json.load(f)
+            imported_count = 0
+            for skill_id in skill_ids:
+                skill_entry = None
+                for skill in catalog.get("skills", []):
+                    if skill.get("id") == skill_id:
+                        skill_entry = skill
+                        break
+                if skill_entry:
+                    record = PromptPack(
+                        skill_id=skill_entry.get("id", ""),
+                        name=skill_entry.get("name", ""),
+                        description=skill_entry.get("description", ""),
+                        category=skill_entry.get("category", "general"),
+                        tags=skill_entry.get("tags", []),
+                        content="",
+                        origin="catalog"
+                    )
+                    registry.store.add_skill(record)
+                    imported_count += 1
+                    if skill_id not in agent.bound_prompt_packs:
+                        agent.bound_prompt_packs.append(skill_id)
+            hub._save_agents()
+            return {"ok": True, "imported": imported_count, "bound_prompt_packs": agent.bound_prompt_packs}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
     elif action == "import_local":
         local_path = body.get("path", "")
         if not os.path.isdir(local_path):
