@@ -1,0 +1,40 @@
+name: take_screenshot
+version: 1.0.0
+description:
+  zh-CN: 截取屏幕指定区域，返回图片路径
+  en: Capture screen region and return image path
+author: tudou-builtin
+runtime: python
+entry: main.py
+
+depends_on:
+  mcp:
+    - id: screen-capture
+      tools:
+        - capture
+      optional: false
+
+inputs:
+  - name: region
+    type: string
+    required: false
+    default: full
+    enum: [full, window, selection]
+    description: 截图区域
+
+outputs:
+  - name: image_path
+    type: string
+  - name: width
+    type: integer
+  - name: height
+    type: integer
+
+triggers:
+  - 截图
+  - screenshot
+  - 看一下屏幕
+  - capture screen
+
+hint:
+  sensitive: false

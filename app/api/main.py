@@ -1,0 +1,361 @@
+"""
+TudouClaw FastAPI Application
+============================
+Phase-1 backend: replaces BaseHTTPRequestHandler with FastAPI.
+Maintains full backward compatibility with existing hub/agent core.
+
+Usage:
+    python -m app.api.main              # dev mode, port 9090
+    python -m app.api.main --port 8000  # custom port
+    uvicorn app.api.main:app --reload   # hot-reload dev
+"""
+from __future__ import annotations
+
+import os
+import socket
+
+from ..defaults import (
+    PORTAL_PORT, BIND_ADDRESS, CORS_ORIGINS_DEFAULT,
+    IP_DETECT_TARGET, IP_DETECT_PORT,
+)
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
+from .middleware.security import SecurityHeadersMiddleware
+from .deps.hub import init_hub, shutdown_hub
+
+logger = logging.getLogger("tudouclaw.api")
+
+# ---------------------------------------------------------------------------
+# Lifespan: startup / shutdown
+# ---------------------------------------------------------------------------
+
+def _print_banner(hub, raw_admin_token: str = ""):
+    """Print startup banner with admin token and JWT, matching old portal style."""
+    hostname = socket.gethostname()
+    local_ip = "127.0.0.1"
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect((IP_DETECT_TARGET, IP_DETECT_PORT))
+        local_ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        pass
+
+    port = int(os.environ.get("TUDOU_PORT", str(PORTAL_PORT)))
+    protocol = "https" if os.environ.get("TUDOU_FORCE_HTTPS", "false").lower() == "true" else "http"
+
+    print()
+    print(f"  \033[1m\033[34m\U0001f954 TudouClaw API (FastAPI)\033[0m")
+    print(f"  \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
+    print(f"  Local:    {protocol}://localhost:{port}")
+    print(f"  Network:  {protocol}://{local_ip}:{port}")
+    print(f"  API Docs: {protocol}://localhost:{port}/api/docs")
+    print(f"  Node:     {hostname}")
+
+    if raw_admin_token:
+        # Generate a JWT access token for direct API use
+        try:
+            from .deps.auth import create_access_token
+            jwt_token = create_access_token(
+                user_id="admin",
+                role="superAdmin",
+                extra={"token_login": True},
+            )
+        except Exception:
+            jwt_token = ""
+
+        print()
+        print(f"  \033[1m\033[33m\u26a0  Admin Token (for login page):\033[0m")
+        print(f"  \033[1m{raw_admin_token}\033[0m")
+        if jwt_token:
+            print()
+            print(f"  \033[1m\033[33m\u26a0  JWT Bearer Token (for API calls):\033[0m")
+            print(f"  \033[1m{jwt_token}\033[0m")
+    else:
+        print()
+        print(f"  \033[33m\u26a0  No admin token found. Set TUDOU_ADMIN_SECRET env.\033[0m")
+
+    print()
+    print(f"  Press Ctrl+C to stop")
+    print()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize Hub on startup, clean up on shutdown."""
+    logger.info("TudouClaw FastAPI starting up ...")
+
+    # Initialize auth system (must happen before Hub if auth depends on data_dir)
+    data_dir = os.environ.get("TUDOU_DATA_DIR", "")
+    if not data_dir:
+        from .. import DEFAULT_DATA_DIR
+        data_dir = os.environ.get("TUDOU_CLAW_DATA_DIR", DEFAULT_DATA_DIR)
+    os.makedirs(data_dir, exist_ok=True)
+    os.environ.setdefault("TUDOU_CLAW_DATA_DIR", data_dir)
+
+    shared_secret = os.environ.get("TUDOU_ADMIN_SECRET", "")
+    explicit_token = os.environ.get("TUDOU_ADMIN_TOKEN", "")
+
+    # Reuse persisted token from previous run so it survives restarts.
+    # Only generate a fresh one when no persisted token exists.
+    token_file = os.path.join(data_dir, ".admin_token")
+    if not explicit_token:
+        try:
+            if os.path.isfile(token_file):
+                with open(token_file, "r") as f:
+                    explicit_token = f.read().strip()
+        except OSError:
+            pass
+
+    try:
+        from ..auth import init_auth
+        auth_mgr, raw_token = init_auth(
+            data_dir=data_dir,
+            admin_token=explicit_token,       # persisted or auto-generate
+            shared_secret=shared_secret,      # inter-node shared secret
+        )
+        app.state.raw_admin_token = raw_token
+
+        # Persist token to file so it survives restarts
+        try:
+            with open(token_file, "w") as f:
+                f.write(raw_token)
+            os.chmod(token_file, 0o600)
+        except OSError:
+            pass
+    except Exception as e:
+        logger.warning("Auth init failed: %s", e)
+        app.state.raw_admin_token = ""
+
+    hub = init_hub()
+
+    # ── MCP Manager + Router ─────────────────────────────────────────
+    # The Hub constructor does NOT set up the MCP call pipeline. We must
+    # initialise the MCP manager (loads global_mcps.json / mcp_configs.json),
+    # create the MCPCallRouter (single entry point for every MCP call),
+    # and sync MCP bindings into all loaded agents.
+    try:
+        from ..mcp.manager import init_mcp_manager
+        init_mcp_manager(data_dir=data_dir)
+        logger.info("MCP manager initialized")
+    except Exception as _me:
+        logger.warning("MCP manager init failed: %s", _me)
+
+    try:
+        from ..mcp.router import MCPCallRouter
+        hub.mcp_router = MCPCallRouter(hub=hub)
+        logger.info("MCP call router initialized")
+    except Exception as _re:
+        logger.warning("MCP router init failed: %s", _re)
+        hub.mcp_router = None
+
+    # Sync MCP bindings into all loaded agents so agent.profile.mcp_servers
+    # reflects the authoritative binding table from the MCP manager.
+    try:
+        hub.sync_all_agent_mcps()
+        logger.info("MCP bindings synced to all agents")
+    except Exception as _se:
+        logger.warning("MCP sync failed: %s", _se)
+
+    # ── SkillForge ─────────────────────────────────────────────────
+    try:
+        from ..skills._skill_forge import get_skill_forge
+        get_skill_forge(data_dir=data_dir)
+        logger.info("SkillForge initialized")
+    except Exception as _sf:
+        logger.warning("SkillForge init failed: %s", _sf)
+
+    # ── Channel Router — bind agent chat function + start pollers ──
+    try:
+        from ..channel import get_router as _get_ch_router
+        _ch_router = _get_ch_router()
+
+        def _agent_chat_for_channel(agent_id: str, message: str) -> str:
+            import threading as _th
+            agent = hub.get_agent(agent_id)
+            if not agent:
+                return f"Agent {agent_id} not found"
+            result_holder = [None]
+            error_holder = [None]
+            def _run():
+                try:
+                    result_holder[0] = agent.chat(message) or ""
+                except Exception as e:
+                    error_holder[0] = str(e)
+            t = _th.Thread(target=_run, daemon=True)
+            t.start()
+            t.join(timeout=200)
+            if error_holder[0]:
+                return f"Error: {error_holder[0]}"
+            if result_holder[0] is None:
+                return "Error: Agent LLM call timed out"
+            return result_holder[0]
+
+        _ch_router.set_agent_chat_fn(_agent_chat_for_channel)
+        logger.info("Channel router bound to agent chat (%d channels)",
+                     len(_ch_router.list_channels()))
+    except Exception as _che:
+        logger.warning("Channel router init failed: %s", _che)
+
+    # ── Scheduler ──────────────────────────────────────────────────
+    scheduler = None
+    try:
+        from ..scheduler import init_scheduler
+        scheduler = init_scheduler(data_dir=data_dir)
+        scheduler.set_hub(hub)
+        # Channel router (optional — for channel-based notifications)
+        try:
+            from ..channel import get_router as _get_ch_router2
+            scheduler.set_channel_router(_get_ch_router2())
+        except Exception:
+            pass
+        # Template library (optional — for preset jobs)
+        try:
+            from ..server.template_library import get_template_library
+            scheduler.set_template_library(get_template_library())
+        except Exception:
+            pass
+        scheduler.start()
+        logger.info("Scheduler initialized and started")
+    except Exception as _sche:
+        logger.warning("Scheduler init failed: %s", _sche)
+
+    _print_banner(hub, app.state.raw_admin_token)
+    yield
+    logger.info("TudouClaw FastAPI shutting down ...")
+    # Stop scheduler before hub shutdown
+    if scheduler is not None:
+        try:
+            scheduler.stop()
+        except Exception:
+            pass
+    shutdown_hub()
+
+
+# ---------------------------------------------------------------------------
+# App factory
+# ---------------------------------------------------------------------------
+
+def create_app() -> FastAPI:
+    app = FastAPI(
+        title="TudouClaw API",
+        description="Multi-Agent AI Coordination Hub",
+        version="2.0.0",
+        docs_url="/api/docs",
+        redoc_url="/api/redoc",
+        openapi_url="/api/openapi.json",
+        lifespan=lifespan,
+    )
+
+    # ── CORS ──────────────────────────────────────────────────────────
+    # In dev, Vue dev server runs on a different port (e.g. 5173)
+    cors_origins = os.environ.get(
+        "TUDOU_CORS_ORIGINS",
+        CORS_ORIGINS_DEFAULT,
+    ).split(",")
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # ── Security headers ──────────────────────────────────────────────
+    app.add_middleware(SecurityHeadersMiddleware)
+
+    # ── Register routers ──────────────────────────────────────────────
+    from .routers import (
+        auth,
+        agents,
+        chat,
+        projects,
+        workflows,
+        skills,
+        mcp,
+        providers,
+        config,
+        nodes,
+        scheduler,
+        experience,
+        meetings,
+        admin,
+        knowledge,
+        hub_sync,
+        health,
+        channels,
+        personas,
+        i18n,
+        attachment,
+        audio,
+        pages,
+    )
+
+    # ── API routers ──────────────────────────────────────────────────
+    app.include_router(health.router)
+    app.include_router(auth.router)
+    app.include_router(agents.router)
+    app.include_router(chat.router)
+    app.include_router(projects.router)
+    app.include_router(workflows.router)
+    app.include_router(skills.router)
+    app.include_router(mcp.router)
+    app.include_router(providers.router)
+    app.include_router(config.router)
+    app.include_router(nodes.router)
+    app.include_router(scheduler.router)
+    app.include_router(experience.router)
+    app.include_router(meetings.router)
+    app.include_router(admin.router)
+    app.include_router(knowledge.router)
+    app.include_router(hub_sync.router)
+    app.include_router(channels.router)
+    app.include_router(personas.router)
+    app.include_router(i18n.router)
+    app.include_router(attachment.router)
+    app.include_router(audio.router)
+
+    # ── Static files (JS/CSS used by portal templates) ───────────────
+    server_static = os.path.join(os.path.dirname(__file__), "..", "server", "static")
+    app_static = os.path.join(os.path.dirname(__file__), "..", "static")
+    if os.path.isdir(server_static):
+        app.mount("/static/js", StaticFiles(directory=os.path.join(server_static, "js")), name="legacy-js")
+    if os.path.isdir(app_static):
+        app.mount("/static", StaticFiles(directory=app_static), name="legacy-static")
+
+    # ── Page routes (must be registered AFTER static mounts) ─────────
+    app.include_router(pages.router)
+
+    return app
+
+
+app = create_app()
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import argparse
+    import uvicorn
+
+    parser = argparse.ArgumentParser(description="TudouClaw API Server")
+    parser.add_argument("--host", default=BIND_ADDRESS, help="Bind address")
+    parser.add_argument("--port", type=int, default=PORTAL_PORT, help="Port")
+    parser.add_argument("--reload", action="store_true", help="Hot reload (dev)")
+    args = parser.parse_args()
+
+    uvicorn.run(
+        "app.api.main:app",
+        host=args.host,
+        port=args.port,
+        reload=args.reload,
+        log_level="info",
+    )

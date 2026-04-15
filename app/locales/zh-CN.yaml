@@ -1,0 +1,121 @@
+# TudouClaw 中文 locale
+# 所有面向用户的字符串集中在此，便于翻译和维护
+# 添加新 key 时同步更新 en.yaml
+
+common:
+  ok: "确定"
+  cancel: "取消"
+  save: "保存"
+  delete: "删除"
+  edit: "编辑"
+  loading: "加载中..."
+  unknown: "未知"
+  enabled: "已启用"
+  disabled: "已禁用"
+  ready: "就绪"
+  not_ready: "未就绪"
+  pending: "待处理"
+
+skills:
+  module_title: "技能库"
+  module_description: "可分配给智能体的能力包，依赖底层 MCP 通道"
+  install: "安装技能"
+  uninstall: "卸载"
+  install_from_file: "从文件导入"
+  install_from_url: "从 URL 安装"
+  grant_to_agent: "分配给智能体"
+  revoke_from_agent: "撤销分配"
+  invoke: "调用"
+  test_run: "测试运行"
+
+  status:
+    ready: "就绪"
+    needs_dependencies: "缺少依赖"
+    error: "错误"
+    disabled: "已禁用"
+
+  fields:
+    name: "名称"
+    version: "版本"
+    description: "描述"
+    author: "作者"
+    runtime: "运行时"
+    triggers: "触发词"
+    inputs: "输入参数"
+    outputs: "输出"
+    depends_on_mcp: "依赖 MCP"
+    depends_on_llm: "依赖 LLM"
+    granted_agents: "已分配的智能体"
+    sensitive: "敏感操作"
+
+  errors:
+    manifest_invalid: "manifest 不合法: {reason}"
+    manifest_missing_field: "manifest 缺少必填字段: {field}"
+    manifest_unsupported_runtime: "不支持的 runtime: {runtime}"
+    not_found: "技能未找到: {id}"
+    already_installed: "技能已安装: {id}"
+    dependency_missing: "缺少依赖 MCP: {mcp_id}"
+    dependency_tool_missing: "MCP {mcp_id} 缺少工具: {tool}"
+    not_granted: "智能体 {agent_id} 未被授予技能 {skill_id}"
+    forbidden_import: "技能代码包含禁用的 import: {module}"
+    forbidden_io: "技能代码包含禁用的 IO 操作"
+    hardcoded_credential: "技能代码第 {line} 行硬编码了敏感字段 '{name}'，请改为通过 ctx.env('...') 从环境变量注入（os.environ 已禁用）"
+    forbidden_env_access: "技能代码第 {line} 行直接访问了 '{name}'，请改为 ctx.env('KEY')；环境变量必须在 manifest.env_vars 声明"
+    runtime_error: "技能运行时错误: {error}"
+    approval_denied: "调用被审批策略拒绝"
+    approval_pending: "调用进入审批队列，请等待 admin 决定"
+
+  install_success: "技能 {name} 已安装"
+  uninstall_success: "技能 {name} 已卸载"
+  granted_success: "技能 {skill} 已分配给 {agent}"
+  revoked_success: "技能 {skill} 已从 {agent} 撤销"
+
+  prompt_injection_header: "你具备以下技能（通过 skill_call 调用）"
+  prompt_injection_item: "- {name}: {description} (触发词: {triggers})"
+
+mcp:
+  module_title: "MCP 服务器"
+  module_description: "底层连接和凭据配置（admin 专用）"
+  status_online: "在线"
+  status_offline: "离线"
+
+approval:
+  module_title: "工具与审批"
+  policy_tab: "审批策略"
+  queue_tab: "待审批队列"
+  history_tab: "历史"
+
+  escalate:
+    by_skill: "按技能升级"
+    by_tool: "按 MCP 工具升级"
+    by_arg_pattern: "按参数模式升级"
+    by_role: "按智能体角色升级"
+    by_time: "按时间窗口升级"
+    by_frequency: "按调用频率升级"
+
+  decision:
+    approve: "通过"
+    deny: "拒绝"
+    pending: "待决定"
+
+projects:
+  module_title: "项目"
+  paused: "已暂停"
+  active: "运行中"
+  completed: "已完成"
+
+agents:
+  module_title: "智能体"
+  granted_skills: "已授予技能"
+  no_skills: "尚未分配任何技能"
+
+nav:
+  workspace: "工作台"
+  projects: "项目"
+  agents: "智能体"
+  knowledge_memory: "知识与记忆"
+  roles_skills: "角色与技能"
+  tools_approvals: "工具与审批"
+  integrations: "集成与通知"
+  system_settings: "系统设置"
+  admin: "管理员"

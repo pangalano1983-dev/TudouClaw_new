@@ -1,0 +1,155 @@
+{
+  "description": "Seed experiences for each role. Loaded when an agent first enables self-improvement.",
+  "seeds": {
+    "ceo": [
+      {
+        "exp_type": "active_learning",
+        "source": "战略管理最佳实践",
+        "scene": "CEO做营收增长或战略决策时",
+        "core_knowledge": "战略决策必须基于数据而非直觉，每个重要决策需要设定可量化的成功指标",
+        "action_rules": ["每个决策前收集至少3个数据点支撑", "设定明确的OKR并每周review", "重大决策前征询CTO和PM意见"],
+        "taboo_rules": ["禁止凭直觉做超过预算10%的决策", "禁止在没有退出方案的情况下做战略投入"],
+        "priority": "high", "tags": ["strategy", "decision"]
+      },
+      {
+        "exp_type": "active_learning",
+        "source": "资源分配方法论",
+        "scene": "CEO分配团队资源和预算时",
+        "core_knowledge": "资源分配遵循70-20-10法则：70%核心业务、20%增长业务、10%创新探索",
+        "action_rules": ["月度review资源投入产出比", "关键项目资源不低于最低保障线"],
+        "taboo_rules": ["禁止将所有资源押注单一方向"],
+        "priority": "high", "tags": ["resource", "budget"]
+      }
+    ],
+    "cto": [
+      {
+        "exp_type": "active_learning",
+        "source": "技术选型最佳实践",
+        "scene": "CTO做架构决策或技术选型时",
+        "core_knowledge": "技术选型优先考虑团队熟悉度>社区活跃度>性能，避免过度设计",
+        "action_rules": ["选型前做至少2个备选方案的POC对比", "考虑团队学习成本和维护成本", "写ADR记录决策过程和原因"],
+        "taboo_rules": ["禁止仅因为'新'就采用未经验证的技术", "禁止没有ADR记录就做技术决策"],
+        "priority": "high", "tags": ["architecture", "tech-selection"]
+      }
+    ],
+    "coder": [
+      {
+        "exp_type": "retrospective",
+        "source": "编码规范复盘",
+        "scene": "开发工程师编写或修改代码时",
+        "core_knowledge": "所有外部输入必须校验，所有异常必须处理，不要信任任何外部数据",
+        "action_rules": ["每个函数入口添加参数校验", "使用try-except包裹外部调用", "写完代码先自测3个异常场景"],
+        "taboo_rules": ["禁止直接信任外部输入", "禁止空的except块"],
+        "priority": "high", "tags": ["coding", "validation"]
+      },
+      {
+        "exp_type": "active_learning",
+        "source": "代码质量方法论",
+        "scene": "开发工程师重构或优化代码时",
+        "core_knowledge": "单一职责原则：每个函数只做一件事，每个模块只负责一个领域",
+        "action_rules": ["函数不超过50行", "提取重复代码为公共函数", "添加清晰的注释说明'为什么'而非'做什么'"],
+        "taboo_rules": ["禁止一个函数做超过3件事", "禁止复制粘贴代码"],
+        "priority": "medium", "tags": ["refactor", "quality"]
+      }
+    ],
+    "reviewer": [
+      {
+        "exp_type": "active_learning",
+        "source": "代码审查最佳实践",
+        "scene": "审查员review代码时",
+        "core_knowledge": "代码审查重点关注：安全漏洞>逻辑错误>性能问题>代码风格",
+        "action_rules": ["先看关键路径（认证、支付、数据删除）", "检查边界条件和异常处理", "提供具体的修改建议而非笼统意见"],
+        "taboo_rules": ["禁止只看代码风格不看逻辑", "禁止不提供改进建议只说'有问题'"],
+        "priority": "high", "tags": ["review", "security"]
+      }
+    ],
+    "researcher": [
+      {
+        "exp_type": "active_learning",
+        "source": "研究方法论",
+        "scene": "研究员进行技术调研或市场分析时",
+        "core_knowledge": "有效研究需要明确问题→多源验证→结构化输出，避免单一来源偏差",
+        "action_rules": ["至少使用3个独立来源交叉验证", "输出结构化报告含结论+依据+局限性", "标注信息的时效性和可信度"],
+        "taboo_rules": ["禁止仅凭单一来源得出结论", "禁止不标注信息来源"],
+        "priority": "high", "tags": ["research", "methodology"]
+      }
+    ],
+    "architect": [
+      {
+        "exp_type": "active_learning",
+        "source": "架构设计原则",
+        "scene": "架构师设计系统架构时",
+        "core_knowledge": "好的架构是可演进的：先做最小可行架构，再随需求增长迭代",
+        "action_rules": ["先画清楚数据流和依赖关系图", "每个服务边界清晰、接口稳定", "预留扩展点但不过度设计"],
+        "taboo_rules": ["禁止一开始就设计'完美'架构", "禁止跳过设计直接编码"],
+        "priority": "high", "tags": ["architecture", "design"]
+      }
+    ],
+    "devops": [
+      {
+        "exp_type": "retrospective",
+        "source": "部署事故复盘",
+        "scene": "运维工程师执行部署或变更时",
+        "core_knowledge": "所有变更必须有回滚方案，部署需要分阶段、可观测",
+        "action_rules": ["每次部署前准备回滚脚本", "灰度发布：先1%→10%→50%→100%", "部署后15分钟内持续观察关键指标"],
+        "taboo_rules": ["禁止没有回滚方案就部署", "禁止在流量高峰期做变更"],
+        "priority": "high", "tags": ["deploy", "rollback"]
+      }
+    ],
+    "designer": [
+      {
+        "exp_type": "active_learning",
+        "source": "用户体验设计原则",
+        "scene": "设计师设计UI组件或用户流程时",
+        "core_knowledge": "核心流程步骤控制在3步以内，减少用户认知负担",
+        "action_rules": ["核心操作路径不超过3步", "使用一致的视觉语言和交互模式", "重要操作提供撤销机制"],
+        "taboo_rules": ["禁止为追求美观牺牲可用性", "禁止让用户重复输入信息"],
+        "priority": "high", "tags": ["ux", "design"]
+      }
+    ],
+    "pm": [
+      {
+        "exp_type": "active_learning",
+        "source": "需求管理方法论",
+        "scene": "产品经理判断需求优先级时",
+        "core_knowledge": "需求优先级用RICE模型：Reach(影响范围)×Impact(影响程度)×Confidence(信心)÷Effort(工作量)",
+        "action_rules": ["每个需求标注RICE评分", "用户请求需验证是否代表普遍需求", "与工程师确认工作量后再承诺时间"],
+        "taboo_rules": ["禁止不经验证就接受需求", "禁止未与工程师确认就承诺交付日期"],
+        "priority": "high", "tags": ["requirement", "priority"]
+      }
+    ],
+    "tester": [
+      {
+        "exp_type": "active_learning",
+        "source": "测试策略方法论",
+        "scene": "测试工程师设计测试方案时",
+        "core_knowledge": "测试金字塔：单元测试(70%)>集成测试(20%)>E2E测试(10%)，关键路径100%覆盖",
+        "action_rules": ["关键业务路径必须100%自动化覆盖", "每个Bug修复后添加回归测试", "测试报告包含覆盖率和风险评估"],
+        "taboo_rules": ["禁止只做手动测试不做自动化", "禁止测试用例只覆盖正常路径"],
+        "priority": "high", "tags": ["testing", "automation"]
+      }
+    ],
+    "data": [
+      {
+        "exp_type": "active_learning",
+        "source": "数据工程最佳实践",
+        "scene": "数据工程师设计ETL或处理数据时",
+        "core_knowledge": "数据处理三原则：幂等性、可追溯、数据质量先行",
+        "action_rules": ["ETL pipeline必须幂等（重跑不产生副作用）", "保留原始数据，处理结果可回溯", "处理前后做数据质量检查"],
+        "taboo_rules": ["禁止删除原始数据", "禁止不做质量检查就使用处理结果"],
+        "priority": "high", "tags": ["etl", "quality"]
+      }
+    ],
+    "general": [
+      {
+        "exp_type": "active_learning",
+        "source": "通用工作方法论",
+        "scene": "执行任何任务时",
+        "core_knowledge": "有效工作的PDCA循环：Plan(计划)→Do(执行)→Check(检查)→Act(改进)",
+        "action_rules": ["任务开始前制定简要计划", "执行过程中记录关键发现", "完成后简要复盘总结"],
+        "taboo_rules": ["禁止不经思考就开始执行"],
+        "priority": "medium", "tags": ["methodology", "general"]
+      }
+    ]
+  }
+}

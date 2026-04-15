@@ -1,0 +1,46 @@
+<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <!-- Body -->
+  <rect x="20" y="32" width="24" height="20" fill="#32CD32"/>
+  <rect x="16" y="28" width="32" height="8" fill="#32CD32"/>
+
+  <!-- Head -->
+  <rect x="18" y="12" width="28" height="20" fill="#32CD32"/>
+
+  <!-- Eyes -->
+  <rect x="22" y="18" width="2" height="2" fill="#000"/>
+  <rect x="30" y="18" width="2" height="2" fill="#000"/>
+
+  <!-- Mouth -->
+  <rect x="24" y="24" width="2" height="2" fill="#000"/>
+  <rect x="26" y="24" width="2" height="2" fill="#000"/>
+  <rect x="28" y="24" width="2" height="2" fill="#000"/>
+
+  <!-- Code brackets on chest (Coder detail) -->
+  <!-- Left bracket < -->
+  <rect x="22" y="36" width="2" height="2" fill="#FFF"/>
+  <rect x="20" y="38" width="2" height="2" fill="#FFF"/>
+  <rect x="22" y="40" width="2" height="2" fill="#FFF"/>
+  <rect x="24" y="38" width="2" height="2" fill="#FFF"/>
+
+  <!-- Right bracket > -->
+  <rect x="34" y="36" width="2" height="2" fill="#FFF"/>
+  <rect x="36" y="38" width="2" height="2" fill="#FFF"/>
+  <rect x="34" y="40" width="2" height="2" fill="#FFF"/>
+  <rect x="32" y="38" width="2" height="2" fill="#FFF"/>
+
+  <!-- Middle slash -->
+  <rect x="28" y="36" width="2" height="2" fill="#FFD700"/>
+  <rect x="28" y="40" width="2" height="2" fill="#FFD700"/>
+
+  <!-- Arms -->
+  <rect x="10" y="34" width="8" height="6" fill="#32CD32"/>
+  <rect x="46" y="34" width="8" height="6" fill="#32CD32"/>
+
+  <!-- Legs -->
+  <rect x="22" y="52" width="4" height="8" fill="#32CD32"/>
+  <rect x="32" y="52" width="4" height="8" fill="#32CD32"/>
+
+  <!-- Feet -->
+  <rect x="20" y="60" width="8" height="2" fill="#228B22"/>
+  <rect x="32" y="60" width="8" height="2" fill="#228B22"/>
+</svg>

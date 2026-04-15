@@ -1,0 +1,61 @@
+name: send_email
+version: 1.0.0
+description:
+  zh-CN: 发送一封邮件给指定收件人
+  en: Send an email to specified recipients
+author: tudou-builtin
+runtime: python
+entry: main.py
+
+depends_on:
+  mcp:
+    - id: smtp-server
+      tools:
+        - send_email
+      optional: true
+    - id: agentmail
+      tools:
+        - send_email
+      optional: true
+
+inputs:
+  - name: to
+    type: array
+    required: true
+    description: 收件人邮箱列表
+  - name: subject
+    type: string
+    required: true
+    description: 邮件主题
+  - name: body
+    type: string
+    required: true
+    description: 邮件正文（纯文本）
+  - name: cc
+    type: array
+    required: false
+    description: 抄送邮箱列表
+  - name: bcc
+    type: array
+    required: false
+    description: 密送邮箱列表
+  - name: attachments
+    type: array
+    required: false
+    description: 附件文件路径列表（支持 sandbox 内的相对路径或绝对路径）
+
+outputs:
+  - name: message_id
+    type: string
+  - name: sent_count
+    type: integer
+
+triggers:
+  - 发邮件
+  - send email
+  - email
+  - 写邮件
+
+hint:
+  sensitive: true
+  reason: 会向外部地址发送邮件

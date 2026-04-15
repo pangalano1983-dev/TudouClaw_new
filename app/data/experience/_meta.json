@@ -1,0 +1,36 @@
+{
+  "roles": {
+    "general": {
+      "next_seq": 2,
+      "total_count": 1,
+      "last_updated": 1775500045.348959
+    },
+    "coder": {
+      "next_seq": 3,
+      "total_count": 2,
+      "last_updated": 1775500228.546976
+    },
+    "cto": {
+      "next_seq": 2,
+      "total_count": 1,
+      "last_updated": 1775548477.2778811
+    },
+    "reviewer": {
+      "next_seq": 2,
+      "total_count": 1,
+      "last_updated": 1775812232.873864
+    },
+    "tester": {
+      "next_seq": 2,
+      "total_count": 1,
+      "last_updated": 1775819281.1663952
+    },
+    "default": {
+      "next_seq": 3,
+      "total_count": 2,
+      "last_updated": 1775828767.751356
+    }
+  },
+  "created_at": 1775499317.947422,
+  "last_cleanup": 0
+}

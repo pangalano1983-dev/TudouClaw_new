@@ -1,0 +1,1241 @@
+"""Project management router — CRUD, tasks, milestones, goals, deliverables."""
+from __future__ import annotations
+
+import logging
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Body
+
+from ..deps.hub import get_hub
+from ..deps.auth import CurrentUser, get_current_user
+
+logger = logging.getLogger("tudouclaw.api.projects")
+
+router = APIRouter(prefix="/api/portal", tags=["projects"])
+
+
+def _get_project_or_404(hub, project_id: str):
+    """Get project or raise 404."""
+    try:
+        project = hub.get_project(project_id) if hasattr(hub, "get_project") else None
+        if not project:
+            raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+        return project
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Project listing and CRUD
+# ---------------------------------------------------------------------------
+
+@router.get("/projects")
+async def list_projects(
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """List all projects."""
+    try:
+        projects = hub.list_projects() if hasattr(hub, "list_projects") else []
+        projects_list = [p.to_dict() if hasattr(p, "to_dict") else p for p in projects]
+        return {"projects": projects_list}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects")
+async def manage_projects(
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Create, update, or delete a project."""
+    try:
+        action = body.get("action", "create")
+
+        if action == "create":
+            project = hub.create_project(body) if hasattr(hub, "create_project") else {}
+            return {"ok": True, "project": project}
+        elif action == "update":
+            project = hub.update_project(body.get("project_id"), body) if hasattr(hub, "update_project") else {}
+            return {"ok": True, "project": project}
+        elif action == "delete":
+            hub.delete_project(body.get("project_id")) if hasattr(hub, "delete_project") else None
+            return {"ok": True}
+        else:
+            raise HTTPException(400, f"Unknown action: {action}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/projects/{project_id}")
+async def get_project(
+    project_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Get project detail."""
+    try:
+        project = _get_project_or_404(hub, project_id)
+        data = project.to_dict() if hasattr(project, "to_dict") else project
+        return data if isinstance(data, dict) else {"data": data}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Tasks
+# ---------------------------------------------------------------------------
+
+@router.get("/projects/{project_id}/tasks")
+async def get_project_tasks(
+    project_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Get project tasks."""
+    try:
+        project = _get_project_or_404(hub, project_id)
+        tasks = project.tasks if hasattr(project, "tasks") else []
+        tasks_list = [t.to_dict() if hasattr(t, "to_dict") else t for t in tasks]
+        return {"tasks": tasks_list}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects/{project_id}/tasks")
+async def assign_task(
+    project_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Assign or create a task in the project."""
+    try:
+        project = _get_project_or_404(hub, project_id)
+        task = project.create_task(body) if hasattr(project, "create_task") else {}
+        return {"ok": True, "task": task}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Milestones
+# ---------------------------------------------------------------------------
+
+@router.get("/projects/{project_id}/milestones")
+async def get_project_milestones(
+    project_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Get project milestones."""
+    try:
+        project = _get_project_or_404(hub, project_id)
+        milestones = project.milestones if hasattr(project, "milestones") else []
+        milestones_list = [m.to_dict() if hasattr(m, "to_dict") else m for m in milestones]
+        return {"milestones": milestones_list}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects/{project_id}/milestones")
+async def create_milestone(
+    project_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Create a milestone in the project."""
+    try:
+        project = _get_project_or_404(hub, project_id)
+        milestone = project.create_milestone(body) if hasattr(project, "create_milestone") else {}
+        return {"ok": True, "milestone": milestone}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Goals
+# ---------------------------------------------------------------------------
+
+@router.get("/projects/{project_id}/goals")
+async def get_project_goals(
+    project_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Get project goals."""
+    try:
+        project = _get_project_or_404(hub, project_id)
+        goals = project.goals if hasattr(project, "goals") else []
+        goals_list = [g.to_dict() if hasattr(g, "to_dict") else g for g in goals]
+        return {"goals": goals_list}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Deliverables
+# ---------------------------------------------------------------------------
+
+@router.get("/projects/{project_id}/deliverables")
+async def get_project_deliverables(
+    project_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Get project deliverables."""
+    try:
+        project = _get_project_or_404(hub, project_id)
+        deliverables = project.deliverables if hasattr(project, "deliverables") else []
+        deliverables_list = [d.to_dict() if hasattr(d, "to_dict") else d for d in deliverables]
+        return {"deliverables": deliverables_list}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Issues
+# ---------------------------------------------------------------------------
+
+@router.get("/projects/{project_id}/issues")
+async def get_project_issues(
+    project_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Get project issues."""
+    try:
+        project = _get_project_or_404(hub, project_id)
+        issues = project.issues if hasattr(project, "issues") else []
+        issues_list = [i.to_dict() if hasattr(i, "to_dict") else i for i in issues]
+        return {"issues": issues_list}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Project overview and management
+# ---------------------------------------------------------------------------
+
+@router.get("/projects/{project_id}/overview")
+async def get_project_overview(
+    project_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Get project overview (summary stats)."""
+    try:
+        project = _get_project_or_404(hub, project_id)
+        overview = project.get_overview() if hasattr(project, "get_overview") else {}
+        return overview if isinstance(overview, dict) else {"data": overview}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects/{project_id}/status")
+async def update_project_status(
+    project_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Update project status."""
+    try:
+        project = _get_project_or_404(hub, project_id)
+        status = body.get("status", "")
+        if hasattr(project, "set_status"):
+            project.set_status(status)
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects/{project_id}/members")
+async def manage_project_members(
+    project_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Add or remove project members."""
+    try:
+        project = _get_project_or_404(hub, project_id)
+        action = body.get("action", "add")
+        member_id = body.get("member_id", "")
+
+        if action == "add" and hasattr(project, "add_member"):
+            project.add_member(member_id)
+        elif action == "remove" and hasattr(project, "remove_member"):
+            project.remove_member(member_id)
+
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects/{project_id}/chat")
+async def send_project_message(
+    project_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Send a message in project chat."""
+    try:
+        project = _get_project_or_404(hub, project_id)
+        message = body.get("message", "").strip()
+        if not message:
+            raise HTTPException(400, "Empty message")
+
+        if hasattr(project, "send_message"):
+            result = project.send_message(message, user_id=user.user_id)
+            return {"ok": True, "result": result}
+
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/projects/{project_id}/chat")
+async def get_project_chat(
+    project_id: str,
+    limit: int = Query(50, ge=1, le=500),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Get project chat history."""
+    try:
+        project = _get_project_or_404(hub, project_id)
+        msgs = project.get_chat_history(limit=limit) if hasattr(project, "get_chat_history") else []
+        return {"messages": [m.to_dict() if hasattr(m, "to_dict") else m for m in msgs]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Task updates, steps, checkpoints
+# ---------------------------------------------------------------------------
+
+@router.post("/projects/{project_id}/task-update")
+async def update_task(
+    project_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Update an existing task."""
+    try:
+        proj = _get_project_or_404(hub, project_id)
+        task_id = body.get("task_id", "")
+        updates = {k: v for k, v in body.items() if k != "task_id"}
+        task = proj.update_task(task_id, **updates) if hasattr(proj, "update_task") else None
+        if not task:
+            raise HTTPException(404, "Task not found")
+        if hasattr(hub, "_save_projects"):
+            hub._save_projects()
+        return {"ok": True, "task": task.to_dict() if hasattr(task, "to_dict") else task}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects/{project_id}/task-steps")
+async def define_task_steps(
+    project_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Define or replace task step list."""
+    try:
+        proj = _get_project_or_404(hub, project_id)
+        task_id = body.get("task_id", "")
+        steps = body.get("steps", [])
+        task = next((t for t in proj.tasks if t.id == task_id), None) if hasattr(proj, "tasks") else None
+        if not task:
+            raise HTTPException(404, "Task not found")
+        if not isinstance(steps, list):
+            raise HTTPException(400, "steps must be a list")
+        # Normalize step items
+        normalized = []
+        for it in steps:
+            if isinstance(it, str):
+                normalized.append({"name": it, "manual_review": False})
+            elif isinstance(it, dict) and "name" in it:
+                normalized.append({"name": str(it["name"]), "manual_review": bool(it.get("manual_review", False))})
+            else:
+                raise HTTPException(400, "each step must be str or {name, manual_review}")
+        from app.project import TaskStep
+        prev_done = {s.name: s for s in (task.steps or []) if s.status in ("done", "skipped")}
+        new_steps = []
+        for it in normalized:
+            n = it["name"]
+            if n in prev_done:
+                s = prev_done[n]
+                s.manual_review = it["manual_review"]
+                new_steps.append(s)
+            else:
+                new_steps.append(TaskStep(name=n, manual_review=it["manual_review"]))
+        task.steps = new_steps
+        task.current_step_index = 0
+        if hasattr(hub, "_save_projects"):
+            hub._save_projects()
+        return {"ok": True, "task": task.to_dict() if hasattr(task, "to_dict") else task}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects/{project_id}/task-step-review")
+async def review_task_step(
+    project_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Human review (approve/reject) of a task step."""
+    try:
+        proj = _get_project_or_404(hub, project_id)
+        task_id = body.get("task_id", "")
+        step_id = body.get("step_id", "")
+        action = body.get("action", "approve")
+        task = next((t for t in proj.tasks if t.id == task_id), None) if hasattr(proj, "tasks") else None
+        if not task:
+            raise HTTPException(404, "Task not found")
+        step = next((s for s in (task.steps or []) if s.id == step_id), None)
+        if not step:
+            raise HTTPException(404, "Step not found")
+        if not step.manual_review:
+            raise HTTPException(400, "Step is not flagged for manual review")
+        if step.status != "awaiting_review":
+            raise HTTPException(400, f"Step is not awaiting review (current: {step.status})")
+        reviewer = user.user_id if hasattr(user, "user_id") else "user"
+        if action == "approve":
+            ok = task.approve_step(step, reviewer_id=str(reviewer), override_result=body.get("result", ""))
+            if not ok:
+                raise HTTPException(400, "Approve failed")
+        elif action == "reject":
+            ok = task.reject_step(step, reviewer_id=str(reviewer), reason=body.get("reason", ""))
+            if not ok:
+                raise HTTPException(400, "Reject failed")
+        else:
+            raise HTTPException(400, "action must be approve|reject")
+        if hasattr(hub, "_save_projects"):
+            hub._save_projects()
+        return {"ok": True, "task": task.to_dict() if hasattr(task, "to_dict") else task}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects/{project_id}/task-checkpoint")
+async def task_checkpoint(
+    project_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Manual step checkpoint (done/failed/skipped)."""
+    try:
+        proj = _get_project_or_404(hub, project_id)
+        task_id = body.get("task_id", "")
+        step_id = body.get("step_id", "")
+        new_status = body.get("status", "done")
+        task = next((t for t in proj.tasks if t.id == task_id), None) if hasattr(proj, "tasks") else None
+        if not task:
+            raise HTTPException(404, "Task not found")
+        step = next((s for s in (task.steps or []) if s.id == step_id), None)
+        if not step:
+            raise HTTPException(404, "Step not found")
+        if new_status == "failed":
+            task.complete_step(step, error=body.get("error", "manual fail"))
+        elif new_status == "skipped":
+            step.status = "skipped"
+        else:
+            task.complete_step(step, result=body.get("result", ""))
+        if hasattr(hub, "_save_projects"):
+            hub._save_projects()
+        return {"ok": True, "task": task.to_dict() if hasattr(task, "to_dict") else task}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Milestone mutations
+# ---------------------------------------------------------------------------
+
+@router.post("/projects/{project_id}/milestones/{milestone_id}/update")
+async def update_milestone(
+    project_id: str,
+    milestone_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Update a milestone."""
+    try:
+        proj = _get_project_or_404(hub, project_id)
+        updates = {k: v for k, v in body.items() if k != "milestone_id"}
+        ms = proj.update_milestone(milestone_id, **updates) if hasattr(proj, "update_milestone") else None
+        if not ms:
+            raise HTTPException(404, "Milestone not found")
+        if hasattr(hub, "_save_projects"):
+            hub._save_projects()
+        return {"ok": True, "milestone": ms.to_dict() if hasattr(ms, "to_dict") else ms}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects/{project_id}/milestones/{milestone_id}/confirm")
+async def confirm_milestone(
+    project_id: str,
+    milestone_id: str,
+    body: dict = Body(default={}),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Confirm a milestone."""
+    try:
+        proj = _get_project_or_404(hub, project_id)
+        by = user.user_id if hasattr(user, "user_id") else "admin"
+        ms = proj.confirm_milestone(milestone_id, by=by) if hasattr(proj, "confirm_milestone") else None
+        if not ms:
+            raise HTTPException(404, "Milestone not found")
+        if hasattr(hub, "_save_projects"):
+            hub._save_projects()
+        return {"ok": True, "milestone": ms.to_dict() if hasattr(ms, "to_dict") else ms}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects/{project_id}/milestones/{milestone_id}/reject")
+async def reject_milestone(
+    project_id: str,
+    milestone_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Reject a milestone."""
+    try:
+        proj = _get_project_or_404(hub, project_id)
+        reason = body.get("reason", "")
+        by = user.user_id if hasattr(user, "user_id") else "admin"
+        ms = proj.reject_milestone(milestone_id, reason=reason, by=by) if hasattr(proj, "reject_milestone") else None
+        if not ms:
+            raise HTTPException(404, "Milestone not found")
+        if hasattr(hub, "_save_projects"):
+            hub._save_projects()
+        return {"ok": True, "milestone": ms.to_dict() if hasattr(ms, "to_dict") else ms}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Goal mutations
+# ---------------------------------------------------------------------------
+
+@router.post("/projects/{project_id}/goals")
+async def add_goal(
+    project_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Add a goal to the project."""
+    try:
+        proj = _get_project_or_404(hub, project_id)
+        g = proj.add_goal(
+            name=body.get("name", ""),
+            description=body.get("description", ""),
+            owner_agent_id=body.get("owner_agent_id", ""),
+            metric=body.get("metric", "count"),
+            target_value=float(body.get("target_value", 0) or 0),
+            target_text=body.get("target_text", ""),
+        ) if hasattr(proj, "add_goal") else None
+        if not g:
+            raise HTTPException(500, "Failed to add goal")
+        if hasattr(hub, "_save_projects"):
+            hub._save_projects()
+        return {"ok": True, "goal": g.to_dict() if hasattr(g, "to_dict") else g}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects/{project_id}/goals/{goal_id}/update")
+async def update_goal(
+    project_id: str,
+    goal_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Update a goal."""
+    try:
+        proj = _get_project_or_404(hub, project_id)
+        allowed = {k: v for k, v in body.items()
+                   if k in ("name", "description", "owner_agent_id", "metric",
+                            "target_value", "current_value", "target_text", "done",
+                            "linked_milestone_ids", "linked_deliverable_ids")}
+        g = proj.update_goal(goal_id, **allowed) if hasattr(proj, "update_goal") else None
+        if not g:
+            raise HTTPException(404, "Goal not found")
+        if hasattr(hub, "_save_projects"):
+            hub._save_projects()
+        return {"ok": True, "goal": g.to_dict() if hasattr(g, "to_dict") else g}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects/{project_id}/goals/{goal_id}/progress")
+async def update_goal_progress(
+    project_id: str,
+    goal_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Update goal progress."""
+    try:
+        proj = _get_project_or_404(hub, project_id)
+        g = proj.update_goal_progress(
+            goal_id,
+            current_value=float(body["current_value"]) if "current_value" in body else None,
+            done=bool(body["done"]) if "done" in body else None,
+        ) if hasattr(proj, "update_goal_progress") else None
+        if not g:
+            raise HTTPException(404, "Goal not found")
+        if hasattr(hub, "_save_projects"):
+            hub._save_projects()
+        return {"ok": True, "goal": g.to_dict() if hasattr(g, "to_dict") else g}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects/{project_id}/goals/{goal_id}/delete")
+async def delete_goal(
+    project_id: str,
+    goal_id: str,
+    body: dict = Body(default={}),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Delete a goal."""
+    try:
+        proj = _get_project_or_404(hub, project_id)
+        ok = proj.remove_goal(goal_id) if hasattr(proj, "remove_goal") else False
+        if ok and hasattr(hub, "_save_projects"):
+            hub._save_projects()
+        return {"ok": ok}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Deliverable mutations
+# ---------------------------------------------------------------------------
+
+@router.post("/projects/{project_id}/deliverables")
+async def add_deliverable(
+    project_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Add a deliverable to the project."""
+    try:
+        proj = _get_project_or_404(hub, project_id)
+        dv = proj.add_deliverable(
+            title=body.get("title", ""),
+            kind=body.get("kind", "document"),
+            author_agent_id=body.get("author_agent_id", ""),
+            task_id=body.get("task_id", ""),
+            milestone_id=body.get("milestone_id", ""),
+            content_text=body.get("content_text", ""),
+            file_path=body.get("file_path", ""),
+            url=body.get("url", ""),
+        ) if hasattr(proj, "add_deliverable") else None
+        if not dv:
+            raise HTTPException(500, "Failed to add deliverable")
+        if hasattr(hub, "_save_projects"):
+            hub._save_projects()
+        return {"ok": True, "deliverable": dv.to_dict() if hasattr(dv, "to_dict") else dv}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects/{project_id}/deliverables/{deliverable_id}/update")
+async def update_deliverable(
+    project_id: str,
+    deliverable_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Update a deliverable."""
+    try:
+        proj = _get_project_or_404(hub, project_id)
+        allowed = {k: v for k, v in body.items()
+                   if k in ("title", "kind", "content_text", "file_path", "url",
+                            "task_id", "milestone_id")}
+        dv = proj.update_deliverable(deliverable_id, **allowed) if hasattr(proj, "update_deliverable") else None
+        if not dv:
+            raise HTTPException(404, "Deliverable not found")
+        if hasattr(hub, "_save_projects"):
+            hub._save_projects()
+        return {"ok": True, "deliverable": dv.to_dict() if hasattr(dv, "to_dict") else dv}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects/{project_id}/deliverables/{deliverable_id}/submit")
+async def submit_deliverable(
+    project_id: str,
+    deliverable_id: str,
+    body: dict = Body(default={}),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Submit a deliverable for review."""
+    try:
+        proj = _get_project_or_404(hub, project_id)
+        dv = proj.submit_deliverable(deliverable_id) if hasattr(proj, "submit_deliverable") else None
+        if not dv:
+            raise HTTPException(404, "Deliverable not found")
+        if hasattr(hub, "_save_projects"):
+            hub._save_projects()
+        return {"ok": True, "deliverable": dv.to_dict() if hasattr(dv, "to_dict") else dv}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects/{project_id}/deliverables/{deliverable_id}/review")
+async def review_deliverable(
+    project_id: str,
+    deliverable_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Review (approve/reject) a deliverable."""
+    try:
+        proj = _get_project_or_404(hub, project_id)
+        approved = bool(body.get("approved", False))
+        comment = body.get("comment", "") or ""
+        reviewer = user.user_id if hasattr(user, "user_id") else "admin"
+        dv = proj.review_deliverable(
+            deliverable_id, approved=approved, reviewer=reviewer, comment=comment,
+        ) if hasattr(proj, "review_deliverable") else None
+        if not dv:
+            raise HTTPException(404, "Deliverable not found")
+        if hasattr(hub, "_save_projects"):
+            hub._save_projects()
+        return {"ok": True, "deliverable": dv.to_dict() if hasattr(dv, "to_dict") else dv}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects/{project_id}/deliverables/{deliverable_id}/delete")
+async def delete_deliverable(
+    project_id: str,
+    deliverable_id: str,
+    body: dict = Body(default={}),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Delete a deliverable."""
+    try:
+        proj = _get_project_or_404(hub, project_id)
+        ok = proj.remove_deliverable(deliverable_id) if hasattr(proj, "remove_deliverable") else False
+        if ok and hasattr(hub, "_save_projects"):
+            hub._save_projects()
+        return {"ok": ok}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Issue mutations
+# ---------------------------------------------------------------------------
+
+@router.post("/projects/{project_id}/issues")
+async def add_issue(
+    project_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Add an issue to the project."""
+    try:
+        proj = _get_project_or_404(hub, project_id)
+        reporter = body.get("reporter", "") or (user.user_id if hasattr(user, "user_id") else "user")
+        iss = proj.add_issue(
+            title=body.get("title", ""),
+            description=body.get("description", ""),
+            severity=body.get("severity", "medium"),
+            reporter=reporter,
+            assigned_to=body.get("assigned_to", ""),
+            related_task_id=body.get("related_task_id", ""),
+            related_milestone_id=body.get("related_milestone_id", ""),
+        ) if hasattr(proj, "add_issue") else None
+        if not iss:
+            raise HTTPException(500, "Failed to add issue")
+        if hasattr(hub, "_save_projects"):
+            hub._save_projects()
+        return {"ok": True, "issue": iss.to_dict() if hasattr(iss, "to_dict") else iss}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects/{project_id}/issues/{issue_id}/update")
+async def update_issue(
+    project_id: str,
+    issue_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Update an issue."""
+    try:
+        proj = _get_project_or_404(hub, project_id)
+        allowed = {k: v for k, v in body.items()
+                   if k in ("title", "description", "severity", "status",
+                            "assigned_to", "related_task_id", "related_milestone_id")}
+        iss = proj.update_issue(issue_id, **allowed) if hasattr(proj, "update_issue") else None
+        if not iss:
+            raise HTTPException(404, "Issue not found")
+        if hasattr(hub, "_save_projects"):
+            hub._save_projects()
+        return {"ok": True, "issue": iss.to_dict() if hasattr(iss, "to_dict") else iss}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects/{project_id}/issues/{issue_id}/resolve")
+async def resolve_issue(
+    project_id: str,
+    issue_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Resolve an issue."""
+    try:
+        proj = _get_project_or_404(hub, project_id)
+        iss = proj.resolve_issue(
+            issue_id,
+            resolution=body.get("resolution", ""),
+            status=body.get("status", "resolved"),
+        ) if hasattr(proj, "resolve_issue") else None
+        if not iss:
+            raise HTTPException(404, "Issue not found")
+        if hasattr(hub, "_save_projects"):
+            hub._save_projects()
+        return {"ok": True, "issue": iss.to_dict() if hasattr(iss, "to_dict") else iss}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects/{project_id}/issues/{issue_id}/delete")
+async def delete_issue(
+    project_id: str,
+    issue_id: str,
+    body: dict = Body(default={}),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Delete an issue."""
+    try:
+        proj = _get_project_or_404(hub, project_id)
+        ok = proj.remove_issue(issue_id) if hasattr(proj, "remove_issue") else False
+        if ok and hasattr(hub, "_save_projects"):
+            hub._save_projects()
+        return {"ok": ok}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Workflow step approval
+# ---------------------------------------------------------------------------
+
+@router.post("/projects/{project_id}/tasks/{task_id}/approve-step")
+async def approve_workflow_step(
+    project_id: str,
+    task_id: str,
+    body: dict = Body(default={}),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Approve a workflow step for execution."""
+    try:
+        proj = _get_project_or_404(hub, project_id)
+        task = next((t for t in proj.tasks if t.id == task_id), None) if hasattr(proj, "tasks") else None
+        if not task:
+            raise HTTPException(404, "Task not found")
+        md = getattr(task, "metadata", None) or {}
+        if not md.get("pending_approval"):
+            raise HTTPException(400, "Task is not awaiting approval")
+        approver = user.user_id if hasattr(user, "user_id") else "admin"
+        try:
+            task.metadata["pending_approval"] = False
+            task.metadata["approved_by"] = approver
+        except Exception:
+            pass
+        # Mark as in-progress
+        try:
+            from app.project import ProjectTaskStatus
+            task.status = ProjectTaskStatus.IN_PROGRESS
+        except Exception:
+            task.status = "in_progress"
+        if hasattr(hub, "_save_projects"):
+            hub._save_projects()
+        return {"ok": True, "task": task.to_dict() if hasattr(task, "to_dict") else task}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Project lifecycle: pause / resume
+# ---------------------------------------------------------------------------
+
+@router.post("/projects/{project_id}/pause")
+async def pause_project(
+    project_id: str,
+    body: dict = Body(default={}),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Pause a project."""
+    try:
+        proj = _get_project_or_404(hub, project_id)
+        by = user.user_id if hasattr(user, "user_id") else "admin"
+        reason = body.get("reason", "")
+        if hasattr(proj, "pause"):
+            proj.pause(by=by, reason=reason)
+        if hasattr(hub, "_save_projects"):
+            hub._save_projects()
+        return {"ok": True, "paused": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects/{project_id}/resume")
+async def resume_project(
+    project_id: str,
+    body: dict = Body(default={}),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Resume a paused project."""
+    try:
+        proj = _get_project_or_404(hub, project_id)
+        by = user.user_id if hasattr(user, "user_id") else "admin"
+        if hasattr(proj, "resume"):
+            proj.resume(by=by)
+        if hasattr(hub, "_save_projects"):
+            hub._save_projects()
+        return {"ok": True, "paused": False}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Standalone tasks (cross-project task registry)
+# ---------------------------------------------------------------------------
+
+@router.post("/standalone-tasks")
+async def create_standalone_task(
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Create a standalone task."""
+    try:
+        reg = getattr(hub, "standalone_task_registry", None)
+        if reg is None:
+            raise HTTPException(503, "standalone task registry not initialized")
+        actor = user.user_id if hasattr(user, "user_id") else "admin"
+        t = reg.create(
+            title=body.get("title", ""),
+            description=body.get("description", ""),
+            assigned_to=body.get("assigned_to", ""),
+            created_by=body.get("created_by", "") or actor,
+            priority=body.get("priority", "normal"),
+            due_hint=body.get("due_hint", ""),
+            tags=body.get("tags", []) or [],
+            source_meeting_id=body.get("source_meeting_id", ""),
+        )
+        return t.to_dict() if hasattr(t, "to_dict") else {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/standalone-tasks")
+async def list_standalone_tasks(
+    assignee: str = Query("", description="Filter by assignee agent ID"),
+    status: str = Query("", description="Filter by status"),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """List standalone tasks."""
+    try:
+        reg = getattr(hub, "standalone_task_registry", None)
+        if reg is None:
+            return {"tasks": []}
+        items = reg.list(
+            assignee=assignee or None,
+            status=status or None,
+        )
+        return {"tasks": [t.to_dict() for t in items]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/standalone-tasks/{task_id}")
+async def update_standalone_task(
+    task_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Update a standalone task."""
+    try:
+        reg = getattr(hub, "standalone_task_registry", None)
+        if reg is None:
+            raise HTTPException(503, "standalone task registry not initialized")
+        allowed = {k: v for k, v in body.items()
+                   if k in ("title", "description", "assigned_to", "status",
+                            "priority", "due_hint", "tags", "result")}
+        t = reg.update(task_id, **allowed)
+        if t:
+            return t.to_dict() if hasattr(t, "to_dict") else {"ok": True}
+        raise HTTPException(404, "Standalone task not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/standalone-tasks/{task_id}/delete")
+async def delete_standalone_task(
+    task_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Delete a standalone task."""
+    try:
+        reg = getattr(hub, "standalone_task_registry", None)
+        if reg is None:
+            raise HTTPException(503, "standalone task registry not initialized")
+        ok = reg.delete(task_id)
+        return {"ok": ok}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Template library
+# ---------------------------------------------------------------------------
+
+@router.post("/templates")
+async def manage_templates(
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Template library management (create, update, delete)."""
+    try:
+        action = body.get("action", "create")
+
+        if action == "create":
+            if not hasattr(hub, "create_template"):
+                raise HTTPException(501, "template management not available")
+            tmpl = hub.create_template(
+                name=body.get("name", ""),
+                content=body.get("content", ""),
+                description=body.get("description", ""),
+                roles=body.get("roles", []),
+                tags=body.get("tags", []),
+                category=body.get("category", "general"),
+            )
+            return tmpl.to_dict() if hasattr(tmpl, "to_dict") else {"ok": True, "template": tmpl}
+
+        if action == "update":
+            if not hasattr(hub, "update_template"):
+                raise HTTPException(501, "template management not available")
+            tmpl_id = body.get("id", "")
+            kwargs = {k: v for k, v in body.items()
+                      if k in ("name", "content", "description", "roles", "tags", "category") and v is not None}
+            tmpl = hub.update_template(tmpl_id, **kwargs)
+            if tmpl:
+                return tmpl.to_dict() if hasattr(tmpl, "to_dict") else {"ok": True}
+            raise HTTPException(404, "Template not found")
+
+        if action == "delete":
+            if not hasattr(hub, "delete_template"):
+                raise HTTPException(501, "template management not available")
+            tmpl_id = body.get("id", "")
+            ok = hub.delete_template(tmpl_id)
+            return {"ok": ok}
+
+        raise HTTPException(400, f"Unknown template action: {action}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/templates")
+async def list_templates(
+    role: str = Query("", description="Filter by role"),
+    category: str = Query("", description="Filter by category"),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """List all templates — matches legacy portal_routes_get."""
+    try:
+        from ...template_library import get_template_library
+        lib = get_template_library()
+        templates = lib.list_templates(role=role, category=category)
+        return {"templates": [t.to_dict() for t in templates]}
+    except (ImportError, Exception) as e:
+        return {"templates": []}
+
+
+@router.get("/templates/{template_id}")
+async def get_template(
+    template_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Get a single template with full content — matches legacy."""
+    try:
+        from ...template_library import get_template_library
+        lib = get_template_library()
+        tpl = lib.get_template(template_id)
+        if not tpl:
+            raise HTTPException(status_code=404, detail="Template not found")
+        return tpl.to_dict(include_content=True)
+    except HTTPException:
+        raise
+    except (ImportError, Exception) as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Deliverables by agent
+# ---------------------------------------------------------------------------
+
+@router.get("/projects/{project_id}/deliverables-by-agent")
+async def get_deliverables_by_agent(
+    project_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Get project deliverables grouped by member agent."""
+    proj = _get_project_or_404(hub, project_id)
+    try:
+        explicit_by_author: dict = {}
+        unassigned = []
+        for dv in proj.deliverables:
+            aid = (getattr(dv, "author_agent_id", "") or "").strip()
+            if aid:
+                explicit_by_author.setdefault(aid, []).append(
+                    dv.to_dict() if hasattr(dv, "to_dict") else dv)
+            else:
+                unassigned.append(dv.to_dict() if hasattr(dv, "to_dict") else dv)
+        groups = []
+        for member in (proj.members or []):
+            agent = hub.get_agent(member) if hasattr(hub, "get_agent") else None
+            groups.append({
+                "agent_id": member,
+                "agent_name": agent.name if agent else member,
+                "deliverables": explicit_by_author.get(member, []),
+            })
+        if unassigned:
+            groups.append({
+                "agent_id": "",
+                "agent_name": "Unassigned",
+                "deliverables": unassigned,
+            })
+        return {"groups": groups}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

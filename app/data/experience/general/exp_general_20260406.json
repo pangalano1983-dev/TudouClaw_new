@@ -1,0 +1,29 @@
+[
+ {
+  "id": "GEN-001",
+  "exp_type": "active_learning",
+  "source": "通用工作方法论",
+  "scene": "执行任何任务时",
+  "core_knowledge": "有效工作的PDCA循环：Plan(计划)→Do(执行)→Check(检查)→Act(改进)",
+  "action_rules": [
+   "任务开始前制定简要计划",
+   "执行过程中记录关键发现",
+   "完成后简要复盘总结"
+  ],
+  "taboo_rules": [
+   "禁止不经思考就开始执行"
+  ],
+  "priority": "medium",
+  "success_count": 0,
+  "fail_count": 0,
+  "consecutive_fails": 0,
+  "is_valid": true,
+  "role": "general",
+  "tags": [
+   "methodology",
+   "general"
+  ],
+  "created_at": 1775500045.348076,
+  "updated_at": 1775500045.348077
+ }
+]

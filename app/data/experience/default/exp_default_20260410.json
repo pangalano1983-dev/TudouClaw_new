@@ -1,0 +1,63 @@
+[
+ {
+  "id": "DEF-001",
+  "exp_type": "retrospective",
+  "source": "贪吃蛇游戏POC项目产品复盘",
+  "scene": "贪吃蛇游戏POC项目复盘，产品经理/策略研究员角色",
+  "core_knowledge": "从贪吃蛇游戏POC项目中提炼的轻量To C产品快速验证与落地的核心经验，涵盖MVP设计、跨团队协同、用户体验、风险管控等维度",
+  "action_rules": [
+   "对轻量游戏/工具类产品，优先拆解MVP核心模块，跳过非必要功能以快速验证价值",
+   "跨角色协同时，提前明确技术实现边界与优先级，前置沟通潜在技术风险",
+   "原型测试需从用户视角验证操作流畅度与反馈合理性，优化细节体验",
+   "轻量化输出文档，用功能清单、交互流程图快速对齐团队，提升POC阶段效率",
+   "前置识别POC项目中的潜在技术风险，提前协调开发资源优化方案"
+  ],
+  "taboo_rules": [
+   "POC阶段不要追求完美功能，避免浪费开发资源",
+   "不要脱离用户视角测试原型，仅关注功能实现而忽略体验细节",
+   "不要忽略跨角色沟通中的风险点，避免后期返工"
+  ],
+  "priority": "high",
+  "success_count": 0,
+  "fail_count": 0,
+  "consecutive_fails": 0,
+  "is_valid": true,
+  "role": "default",
+  "tags": [
+   "game_poc",
+   "product",
+   "mvp",
+   "cross_team",
+   "user_experience",
+   "risk_management"
+  ],
+  "created_at": 1775819494.602783,
+  "updated_at": 1775819494.602783
+ },
+ {
+  "id": "DEF-002",
+  "exp_type": "active_learning",
+  "source": "火山引擎即梦AI文生视频实践",
+  "scene": "使用火山引擎即梦AI文生视频API",
+  "core_knowledge": "调用即梦AI文生视频API需要正确配置服务名称、端点和参数，并发限制是常见问题，需要等待后重试，生成的视频会自动下载到本地",
+  "action_rules": [
+   "确认服务名称必须是'cv'，端点必须是visual.volcengineapi.com",
+   "req_key使用jimeng_ti2v_v30_pro",
+   "遇到429并发限制错误需要等待几分钟后重试",
+   "正确实现火山引擎V4签名算法"
+  ],
+  "taboo_rules": [
+   "不要使用aiot作为服务名称，不要使用open.volcengineapi.com作为端点",
+   "不要在遇到限流后立即反复重试"
+  ],
+  "priority": "high",
+  "success_count": 0,
+  "fail_count": 0,
+  "consecutive_fails": 0,
+  "is_valid": true,
+  "role": "default",
+  "tags": [],
+  "created_at": 1775828767.742796,
+  "updated_at": 1775828767.742798
+ }
+]

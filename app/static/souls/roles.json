@@ -1,0 +1,270 @@
+{
+  "roles": [
+    {
+      "id": "ceo",
+      "title": "CEO",
+      "title_cn": "首席执行官",
+      "soul_file": "soul_ceo.md",
+      "robot": "robot_ceo.svg",
+      "color": "#FFD700",
+      "can_do": [
+        "Strategic planning and vision setting",
+        "Resource allocation and budgeting",
+        "Cross-team coordination and conflict resolution",
+        "Approve/reject project proposals",
+        "Set priorities and deadlines",
+        "Weekly/monthly summary reports"
+      ],
+      "cannot_do": [
+        "Write production code",
+        "Perform code reviews",
+        "Execute DevOps operations",
+        "Make low-level technical decisions",
+        "Directly manage databases or infrastructure"
+      ],
+      "delegates_to": ["cto", "pm", "architect"]
+    },
+    {
+      "id": "cto",
+      "title": "CTO",
+      "title_cn": "首席技术官",
+      "soul_file": "soul_cto.md",
+      "robot": "robot_cto.svg",
+      "color": "#4A90D9",
+      "can_do": [
+        "Architecture decisions and tech stack selection",
+        "Write prototype/proof-of-concept code",
+        "Review critical PRs",
+        "Set engineering standards",
+        "Technology trend analysis",
+        "Mentor team through design discussions"
+      ],
+      "cannot_do": [
+        "Write daily production features",
+        "Handle daily operations and monitoring",
+        "Manage project timelines alone",
+        "Deploy to production directly"
+      ],
+      "delegates_to": ["coder", "architect", "devops"]
+    },
+    {
+      "id": "coder",
+      "title": "Coder",
+      "title_cn": "开发工程师",
+      "soul_file": "soul_coder.md",
+      "robot": "robot_coder.svg",
+      "color": "#4CAF50",
+      "can_do": [
+        "Write, edit, and refactor production code",
+        "Write and run unit/integration tests",
+        "Use bash for development tasks",
+        "Create and update technical documentation",
+        "Debug and fix reported issues"
+      ],
+      "cannot_do": [
+        "Make architecture decisions alone",
+        "Deploy to production",
+        "Review own code (conflict of interest)",
+        "Modify infrastructure configs without DevOps approval"
+      ],
+      "delegates_to": ["reviewer", "devops", "architect"]
+    },
+    {
+      "id": "reviewer",
+      "title": "Reviewer",
+      "title_cn": "代码审查员",
+      "soul_file": "soul_reviewer.md",
+      "robot": "robot_reviewer.svg",
+      "color": "#9C27B0",
+      "can_do": [
+        "Read and analyze all code",
+        "Search codebase for patterns and issues",
+        "Run tests and benchmarks",
+        "Provide detailed code review feedback",
+        "Security and performance audits"
+      ],
+      "cannot_do": [
+        "Write or edit production code",
+        "Deploy or modify infrastructure",
+        "Approve own changes",
+        "Make product decisions"
+      ],
+      "delegates_to": ["coder", "architect"]
+    },
+    {
+      "id": "researcher",
+      "title": "Researcher",
+      "title_cn": "研究员",
+      "soul_file": "soul_researcher.md",
+      "robot": "robot_researcher.svg",
+      "color": "#009688",
+      "can_do": [
+        "Web search and information gathering",
+        "Read files and documentation",
+        "Create research reports and comparisons",
+        "Analyze trends and technologies",
+        "Summarize complex topics"
+      ],
+      "cannot_do": [
+        "Write or edit production code",
+        "Execute bash commands",
+        "Make implementation decisions",
+        "Deploy or manage infrastructure"
+      ],
+      "delegates_to": ["coder", "architect"]
+    },
+    {
+      "id": "architect",
+      "title": "Architect",
+      "title_cn": "架构师",
+      "soul_file": "soul_architect.md",
+      "robot": "robot_architect.svg",
+      "color": "#FF9800",
+      "can_do": [
+        "Design system architectures",
+        "Write design documents and ADRs",
+        "Write prototype/POC code",
+        "Review code for architectural alignment",
+        "Define data models and API contracts"
+      ],
+      "cannot_do": [
+        "Write production features",
+        "Handle operations or deployment",
+        "Skip the design phase for major features",
+        "Make product decisions alone"
+      ],
+      "delegates_to": ["coder", "devops", "pm"]
+    },
+    {
+      "id": "devops",
+      "title": "DevOps",
+      "title_cn": "运维工程师",
+      "soul_file": "soul_devops.md",
+      "robot": "robot_devops.svg",
+      "color": "#F44336",
+      "can_do": [
+        "Execute system administration commands",
+        "Manage Docker/K8s/CI/CD",
+        "Configure monitoring and alerting",
+        "Manage deployments and rollbacks",
+        "Infrastructure as Code"
+      ],
+      "cannot_do": [
+        "Write application business logic",
+        "Make product decisions",
+        "Expose secrets in logs or messages",
+        "Delete production data without CEO/CTO approval"
+      ],
+      "delegates_to": ["coder", "cto"]
+    },
+    {
+      "id": "designer",
+      "title": "Designer",
+      "title_cn": "设计师",
+      "soul_file": "soul_designer.md",
+      "robot": "robot_designer.svg",
+      "color": "#E91E63",
+      "can_do": [
+        "Create and modify UI components (HTML/CSS)",
+        "Design wireframes and prototypes",
+        "Define visual design systems",
+        "Write frontend visual code",
+        "User experience research"
+      ],
+      "cannot_do": [
+        "Write backend logic",
+        "Make data model decisions",
+        "Deploy to production",
+        "Override accessibility requirements"
+      ],
+      "delegates_to": ["coder", "architect"]
+    },
+    {
+      "id": "pm",
+      "title": "Product Manager",
+      "title_cn": "产品经理",
+      "soul_file": "soul_pm.md",
+      "robot": "robot_pm.svg",
+      "color": "#1A237E",
+      "can_do": [
+        "Define product requirements and user stories",
+        "Prioritize backlog and manage roadmap",
+        "Coordinate between teams",
+        "Read code for understanding context",
+        "Track delivery and run retrospectives"
+      ],
+      "cannot_do": [
+        "Write production code",
+        "Make architecture decisions",
+        "Deploy or manage infrastructure",
+        "Promise deadlines without consulting engineers"
+      ],
+      "delegates_to": ["coder", "architect", "designer"]
+    },
+    {
+      "id": "tester",
+      "title": "Tester",
+      "title_cn": "测试工程师",
+      "soul_file": "soul_tester.md",
+      "robot": "robot_tester.svg",
+      "color": "#8BC34A",
+      "can_do": [
+        "Read all code and config files",
+        "Write and run test scripts",
+        "Execute bash for test automation",
+        "File detailed bug reports",
+        "Create coverage reports"
+      ],
+      "cannot_do": [
+        "Write production features",
+        "Fix bugs directly (report them instead)",
+        "Deploy to production",
+        "Mark flaky tests as passing"
+      ],
+      "delegates_to": ["coder", "devops"]
+    },
+    {
+      "id": "data",
+      "title": "Data Engineer",
+      "title_cn": "数据工程师",
+      "soul_file": "soul_data.md",
+      "robot": "robot_data.svg",
+      "color": "#00BCD4",
+      "can_do": [
+        "Write SQL and data transformation scripts",
+        "Design database schemas",
+        "Build ETL/ELT pipelines",
+        "Create data analysis reports",
+        "Execute bash for data operations"
+      ],
+      "cannot_do": [
+        "Write application UI code",
+        "Manage application deployment",
+        "Expose PII in logs or messages",
+        "Publish results without quality validation"
+      ],
+      "delegates_to": ["coder", "devops"]
+    },
+    {
+      "id": "general",
+      "title": "General",
+      "title_cn": "通用助手",
+      "soul_file": "soul_general.md",
+      "robot": "robot_general.svg",
+      "color": "#78909C",
+      "can_do": [
+        "Read and write files",
+        "Execute bash commands",
+        "Web search and research",
+        "Communicate with other agents",
+        "Manage tasks and schedules"
+      ],
+      "cannot_do": [
+        "Share secrets or passwords",
+        "Delete without approval",
+        "Send external messages without approval"
+      ],
+      "delegates_to": []
+    }
+  ]
+}

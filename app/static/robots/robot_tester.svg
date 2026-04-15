@@ -1,0 +1,43 @@
+<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <!-- Body -->
+  <rect x="20" y="32" width="24" height="20" fill="#ADFF2F"/>
+  <rect x="16" y="28" width="32" height="8" fill="#ADFF2F"/>
+
+  <!-- Head -->
+  <rect x="18" y="12" width="28" height="20" fill="#ADFF2F"/>
+
+  <!-- Eyes -->
+  <rect x="22" y="18" width="2" height="2" fill="#000"/>
+  <rect x="30" y="18" width="2" height="2" fill="#000"/>
+
+  <!-- Mouth (happy smile) -->
+  <rect x="24" y="24" width="2" height="2" fill="#000"/>
+  <rect x="26" y="24" width="2" height="2" fill="#000"/>
+  <rect x="28" y="24" width="2" height="2" fill="#000"/>
+
+  <!-- Checkmark on chest (Tester detail) -->
+  <!-- Large checkmark -->
+  <rect x="22" y="38" width="2" height="2" fill="#00AA00"/>
+  <rect x="24" y="36" width="2" height="2" fill="#00AA00"/>
+  <rect x="26" y="34" width="2" height="2" fill="#00AA00"/>
+  <rect x="28" y="36" width="2" height="2" fill="#00AA00"/>
+  <rect x="30" y="38" width="2" height="2" fill="#00AA00"/>
+  <rect x="32" y="40" width="2" height="2" fill="#00AA00"/>
+  <!-- Checkmark shade -->
+  <rect x="24" y="38" width="2" height="2" fill="#00CC00"/>
+  <rect x="26" y="36" width="2" height="2" fill="#00CC00"/>
+  <rect x="28" y="38" width="2" height="2" fill="#00CC00"/>
+  <rect x="30" y="40" width="2" height="2" fill="#00CC00"/>
+
+  <!-- Arms -->
+  <rect x="10" y="34" width="8" height="6" fill="#ADFF2F"/>
+  <rect x="46" y="34" width="8" height="6" fill="#ADFF2F"/>
+
+  <!-- Legs -->
+  <rect x="22" y="52" width="4" height="8" fill="#ADFF2F"/>
+  <rect x="32" y="52" width="4" height="8" fill="#ADFF2F"/>
+
+  <!-- Feet -->
+  <rect x="20" y="60" width="8" height="2" fill="#7CB342"/>
+  <rect x="32" y="60" width="8" height="2" fill="#7CB342"/>
+</svg>

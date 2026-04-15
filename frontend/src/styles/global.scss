@@ -1,0 +1,283 @@
+// ── Dark theme color palette (matching original portal) ──────────────────
+:root {
+  --bg: #0e141b;
+  --bg2: #1a2027;
+  --surface: #161c23;
+  --surface2: #242a32;
+  --surface3: #2f353d;
+  --primary: #cbc9ff;
+  --primary-container: #acaaff;
+  --primary-hover: #dddcff;
+  --secondary: #ffb4aa;
+  --text: #dde3ed;
+  --text2: #8b949e;
+  --text3: #6e7681;
+  --border: #474651;
+  --success: #3fb950;
+  --warning: #f59e0b;
+  --error: #f85149;
+}
+
+// ── Global styles ────────────────────────────────────────────────────────
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  background-color: var(--bg);
+}
+
+#app {
+  width: 100%;
+  height: 100%;
+  min-height: 100vh;
+}
+
+// ── Ant Design dark theme overrides ──────────────────────────────────────
+.ant-layout {
+  background: var(--surface) !important;
+}
+
+.ant-layout-sider {
+  background: var(--surface) !important;
+}
+
+.ant-layout-header {
+  background: var(--surface2) !important;
+  border-bottom: 1px solid var(--border);
+}
+
+.ant-layout-content {
+  background: var(--bg) !important;
+  padding: 24px;
+}
+
+.ant-layout-footer {
+  background: var(--surface) !important;
+  border-top: 1px solid var(--border);
+  color: var(--text2);
+}
+
+.ant-menu {
+  background: var(--surface) !important;
+  color: var(--text) !important;
+  border: none;
+}
+
+.ant-menu-item {
+  color: var(--text2) !important;
+
+  &:hover {
+    color: var(--primary) !important;
+  }
+
+  &.ant-menu-item-selected {
+    color: var(--primary) !important;
+    background: rgba(167, 139, 250, 0.1) !important;
+  }
+}
+
+.ant-menu-submenu-title {
+  color: var(--text2) !important;
+
+  &:hover {
+    color: var(--primary) !important;
+  }
+}
+
+.ant-card {
+  background: var(--surface2) !important;
+  border-color: var(--border) !important;
+}
+
+.ant-card-head {
+  background: var(--surface3) !important;
+  border-bottom-color: var(--border) !important;
+}
+
+.ant-input,
+.ant-input-number,
+.ant-select-selector,
+.ant-picker {
+  background: var(--surface2) !important;
+  border-color: var(--border) !important;
+  color: var(--text) !important;
+
+  &:hover {
+    border-color: var(--primary) !important;
+  }
+
+  &:focus,
+  &.ant-input-focused {
+    border-color: var(--primary) !important;
+    box-shadow: 0 0 0 2px rgba(167, 139, 250, 0.2) !important;
+  }
+}
+
+.ant-input::placeholder {
+  color: var(--text3) !important;
+}
+
+.ant-btn-default {
+  border-color: var(--border) !important;
+  color: var(--text2) !important;
+
+  &:hover {
+    border-color: var(--primary) !important;
+    color: var(--primary) !important;
+  }
+}
+
+.ant-btn-primary {
+  background: var(--primary) !important;
+  border-color: var(--primary) !important;
+
+  &:hover {
+    background: var(--primary-hover) !important;
+    border-color: var(--primary-hover) !important;
+  }
+}
+
+.ant-table {
+  background: var(--surface2) !important;
+}
+
+.ant-table-thead > tr > th {
+  background: var(--surface3) !important;
+  border-color: var(--border) !important;
+  color: var(--text) !important;
+}
+
+.ant-table-tbody > tr {
+  &:hover > td {
+    background: var(--surface3) !important;
+  }
+
+  > td {
+    border-color: var(--border) !important;
+    color: var(--text) !important;
+  }
+}
+
+.ant-tag {
+  color: var(--text) !important;
+  border-color: var(--border) !important;
+}
+
+.ant-tag-green {
+  background: rgba(34, 197, 94, 0.15) !important;
+  border-color: var(--success) !important;
+  color: var(--success) !important;
+}
+
+.ant-tag-orange {
+  background: rgba(245, 158, 11, 0.15) !important;
+  border-color: var(--warning) !important;
+  color: var(--warning) !important;
+}
+
+.ant-tag-red {
+  background: rgba(239, 68, 68, 0.15) !important;
+  border-color: var(--error) !important;
+  color: var(--error) !important;
+}
+
+.ant-modal-content {
+  background: var(--surface2) !important;
+}
+
+.ant-modal-header {
+  background: var(--surface2) !important;
+  border-bottom-color: var(--border) !important;
+}
+
+.ant-modal-footer {
+  border-top-color: var(--border) !important;
+}
+
+.ant-tabs-tab {
+  color: var(--text2) !important;
+
+  &:hover {
+    color: var(--primary) !important;
+  }
+
+  &.ant-tabs-tab-active {
+    color: var(--primary) !important;
+  }
+}
+
+.ant-tabs-tab-remove {
+  color: var(--text3) !important;
+
+  &:hover {
+    color: var(--text2) !important;
+  }
+}
+
+.ant-dropdown-menu {
+  background: var(--surface2) !important;
+}
+
+.ant-dropdown-menu-item {
+  color: var(--text) !important;
+
+  &:hover {
+    background: var(--surface3) !important;
+    color: var(--primary) !important;
+  }
+}
+
+.ant-message-notice-content {
+  background: var(--surface2) !important;
+  color: var(--text) !important;
+}
+
+.ant-tooltip-inner {
+  background: var(--surface3) !important;
+  color: var(--text) !important;
+}
+
+.ant-empty-description {
+  color: var(--text3) !important;
+}
+
+.ant-spin {
+  color: var(--primary) !important;
+}
+
+// ── Utility classes ──────────────────────────────────────────────────────
+.text-primary {
+  color: var(--primary);
+}
+
+.text-secondary {
+  color: var(--text2);
+}
+
+.text-tertiary {
+  color: var(--text3);
+}
+
+.bg-surface {
+  background: var(--surface);
+}
+
+.bg-surface2 {
+  background: var(--surface2);
+}
+
+.border-subtle {
+  border-color: var(--border);
+}

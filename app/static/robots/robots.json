@@ -1,0 +1,112 @@
+{
+  "robots": [
+    {
+      "id": "ceo",
+      "name": "CEO",
+      "title": "Chief Executive Officer",
+      "description": "Gold crown robot - authoritative leadership presence",
+      "filename": "robot_ceo.svg",
+      "color": "#FFD700",
+      "role": "executive"
+    },
+    {
+      "id": "cto",
+      "name": "CTO",
+      "title": "Chief Technology Officer",
+      "description": "Blue tech robot with antenna - technology visionary",
+      "filename": "robot_cto.svg",
+      "color": "#4169E1",
+      "role": "executive"
+    },
+    {
+      "id": "coder",
+      "name": "Coder",
+      "title": "Software Engineer",
+      "description": "Green robot with code brackets - development expert",
+      "filename": "robot_coder.svg",
+      "color": "#32CD32",
+      "role": "engineer"
+    },
+    {
+      "id": "reviewer",
+      "name": "Reviewer",
+      "title": "Code Reviewer",
+      "description": "Purple robot with magnifying glass - quality assurance",
+      "filename": "robot_reviewer.svg",
+      "color": "#9370DB",
+      "role": "engineer"
+    },
+    {
+      "id": "researcher",
+      "name": "Researcher",
+      "title": "Research Scientist",
+      "description": "Teal robot with book - knowledge and research",
+      "filename": "robot_researcher.svg",
+      "color": "#20B2AA",
+      "role": "specialist"
+    },
+    {
+      "id": "architect",
+      "name": "Architect",
+      "title": "System Architect",
+      "description": "Orange robot with blueprint grid - design and planning",
+      "filename": "robot_architect.svg",
+      "color": "#FF8C00",
+      "role": "engineer"
+    },
+    {
+      "id": "devops",
+      "name": "DevOps",
+      "title": "DevOps Engineer",
+      "description": "Red robot with gear - infrastructure and operations",
+      "filename": "robot_devops.svg",
+      "color": "#DC143C",
+      "role": "engineer"
+    },
+    {
+      "id": "designer",
+      "name": "Designer",
+      "title": "UI/UX Designer",
+      "description": "Pink robot with paintbrush - creative design",
+      "filename": "robot_designer.svg",
+      "color": "#FF69B4",
+      "role": "specialist"
+    },
+    {
+      "id": "pm",
+      "name": "PM",
+      "title": "Product Manager",
+      "description": "Navy robot with clipboard - product leadership",
+      "filename": "robot_pm.svg",
+      "color": "#000080",
+      "role": "manager"
+    },
+    {
+      "id": "tester",
+      "name": "Tester",
+      "title": "QA Engineer",
+      "description": "Lime green robot with checkmark - quality testing",
+      "filename": "robot_tester.svg",
+      "color": "#ADFF2F",
+      "role": "engineer"
+    },
+    {
+      "id": "data",
+      "name": "Data Engineer",
+      "title": "Data Engineer",
+      "description": "Cyan robot with chart - data and analytics",
+      "filename": "robot_data.svg",
+      "color": "#00CED1",
+      "role": "engineer"
+    },
+    {
+      "id": "general",
+      "name": "General",
+      "title": "Generic AI Agent",
+      "description": "Gray/silver classic robot - universal AI helper",
+      "filename": "robot_general.svg",
+      "color": "#A9A9A9",
+      "role": "general"
+    }
+  ]
+}

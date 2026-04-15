@@ -1,0 +1,30 @@
+[
+ {
+  "id": "DEV-001",
+  "exp_type": "retrospective",
+  "source": "编码规范复盘",
+  "scene": "开发工程师编写或修改代码时",
+  "core_knowledge": "所有外部输入必须校验，所有异常必须处理，不要信任任何外部数据",
+  "action_rules": [
+   "每个函数入口添加参数校验",
+   "使用try-except包裹外部调用",
+   "写完代码先自测3个异常场景"
+  ],
+  "taboo_rules": [
+   "禁止直接信任外部输入",
+   "禁止空的except块"
+  ],
+  "priority": "high",
+  "success_count": 0,
+  "fail_count": 0,
+  "consecutive_fails": 0,
+  "is_valid": true,
+  "role": "coder",
+  "tags": [
+   "coding",
+   "validation"
+  ],
+  "created_at": 1775500228.543623,
+  "updated_at": 1775500228.543624
+ }
+]

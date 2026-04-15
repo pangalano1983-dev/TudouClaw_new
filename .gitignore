@@ -1,0 +1,75 @@
+# Runtime data
+*.json.bak
+workspaces/
+*.log
+.port_sessions/
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.env
+.env.*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Archive and project files
+archive/
+.omx/
+.clawd-agents/
+
+# Internal docs (not for public repo)
+TudouClaw_*.docx
+TudouClaw_*.html
+
+# Claude Code local artifacts
+CLAUDE.md
+CLAW.md
+.claude/
+
+# Node.js (frontend)
+node_modules/
+frontend/dist/
+
+# Database
+*.db-journal
+
+# Archives (don't track large binaries)
+*.zip
+*.tar.gz
+app/.tudou_tokens.json
+
+# Upstream fork code (not part of TudouClaws core)
+rust/
+
+# Agent workspace output / test artifacts
+developer/
+reviewer/
+
+# Local config (may contain environment-specific settings)
+app/config.yaml
+
+# Runtime skill install data
+data/skills.json
+
+# Proprietary MCP / skills (not open-source)
+app/mcp/builtins/jimeng_video.py
+app/skills/builtin/jimeng_video/
+app/tudou_jimeng_video_mcp.py
+tools/diag_jimeng.py
+
+# Database files
+*.db
+*.sqlite

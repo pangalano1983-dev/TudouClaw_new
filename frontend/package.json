@@ -1,0 +1,32 @@
+{
+  "name": "tudouclaw-frontend",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc -b && vite build",
+    "preview": "vite preview",
+    "lint": "eslint . --ext .vue,.js,.jsx,.ts,.tsx",
+    "type-check": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0",
+    "pinia": "^2.3.0",
+    "ant-design-vue": "^4.2.6",
+    "@ant-design/icons-vue": "^7.0.1",
+    "axios": "^1.7.9",
+    "dayjs": "^1.11.13"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "vite": "^6.0.7",
+    "vue-tsc": "^2.2.0",
+    "typescript": "~5.7.2",
+    "@types/node": "^22.10.5",
+    "sass": "^1.83.1",
+    "unplugin-vue-components": "^0.28.0",
+    "unplugin-auto-import": "^0.19.0"
+  }
+}

@@ -1,0 +1,30 @@
+# TudouClaw LLM Configuration
+# Copy this file to config.yaml and edit to match your setup.
+#
+#   cp app/config.yaml.example app/config.yaml
+#
+# The application will fall back to built-in defaults if config.yaml is absent,
+# but you will need at least one working LLM provider to use the agents.
+
+# --- System prompt applied to every agent ---
+global_system_prompt: |
+  ## Safety Rules
+  1. Dangerous operations (file deletion, overwrite, system commands) must be confirmed by the user first.
+  2. When uncertain, ask rather than guess.
+
+  ## Work Style
+  1. Plan before acting — list steps, confirm, then execute.
+  2. Verify each step before moving to the next.
+  3. Stop and report when encountering exceptions or uncertainty.
+
+# --- Default LLM provider ---
+# Options: ollama, openai, alicloud, custom
+provider: ollama
+
+# --- Model name (must be available on the chosen provider) ---
+model: qwen3.5:9b
+
+# --- Provider endpoints ---
+ollama_url: http://localhost:11434
+openai_base_url: https://api.openai.com/v1
+# unsloth_base_url: http://localhost:8000/v1

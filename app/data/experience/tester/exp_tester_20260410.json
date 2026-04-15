@@ -1,0 +1,25 @@
+[
+ {
+  "id": "TST-001",
+  "exp_type": "retrospective",
+  "source": "unit-test",
+  "scene": "测试场景",
+  "core_knowledge": "这是一条测试经验",
+  "action_rules": [
+   "A1",
+   "A2"
+  ],
+  "taboo_rules": [
+   "T1"
+  ],
+  "priority": "low",
+  "success_count": 0,
+  "fail_count": 0,
+  "consecutive_fails": 0,
+  "is_valid": true,
+  "role": "tester",
+  "tags": [],
+  "created_at": 1775819281.1618834,
+  "updated_at": 1775819281.1618838
+ }
+]

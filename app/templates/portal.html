@@ -1,0 +1,1741 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tudou Claws Portal</title>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
+<style>
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 300, 'GRAD' 0, 'opsz' 24;
+}
+:root {
+  --bg: #0e141b;
+  --bg2: #1a2027;
+  --surface: #161c23;
+  --surface2: #242a32;
+  --surface3: #2f353d;
+  --border: #474651;
+  --border-light: rgba(255,255,255,0.05);
+  --text: #dde3ed;
+  --text2: #8b949e;
+  --text3: #6e7681;
+  --primary: #cbc9ff;
+  --primary-container: #acaaff;
+  --secondary: #ffb4aa;
+  --error: #f85149;
+  --success: #3fb950;
+  --warning: #d29922;
+  --warning-bg: #2a2017;
+  --error-bg: #2d1114;
+  --success-bg: #12261e;
+  --radius: 8px;
+  --radius-lg: 12px;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  display: flex;
+  overflow: hidden;
+}
+/* ---- Sidebar ---- */
+.sidebar {
+  width: 256px;
+  min-width: 256px;
+  background: var(--bg2);
+  border-right: none;
+  box-shadow: 20px 0 40px rgba(0,0,0,0.06);
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  z-index: 50;
+}
+.sidebar-header {
+  padding: 24px 16px 20px;
+  border-bottom: none;
+}
+.sidebar-header h1 {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 18px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  transition: color 0.2s;
+}
+.sidebar-header h1 { color: var(--primary); }
+.sidebar-header .subtitle {
+  font-size: 10px;
+  color: var(--text3);
+  margin-top: 6px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+.nav { flex: 1; overflow-y: auto; padding: 12px 8px; }
+.nav::-webkit-scrollbar { width: 4px; }
+.nav::-webkit-scrollbar-track { background: transparent; }
+.nav::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.nav-section { margin-bottom: 20px; }
+.nav-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text3);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 8px 12px 6px;
+  margin-bottom: 6px;
+}
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text2);
+  transition: all 0.15s;
+  position: relative;
+}
+.nav-item:hover { background: var(--surface2); color: var(--text); }
+.nav-item.active {
+  background: var(--surface3);
+  color: var(--primary);
+  font-weight: 600;
+}
+.nav-item.active .icon {
+  font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+.nav-item .icon {
+  font-family: 'Material Symbols Outlined';
+  font-variation-settings: 'FILL' 0, 'wght' 300, 'GRAD' 0, 'opsz' 24;
+  font-size: 20px;
+  width: 24px;
+  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.nav-item .badge {
+  margin-left: auto;
+  background: var(--primary);
+  color: #0e141b;
+  font-size: 10px;
+  padding: 3px 7px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+.nav-item .badge.notification {
+  background: var(--error);
+  color: #fff;
+  animation: pulse 1.5s infinite;
+}
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-left: auto;
+  box-shadow: 0 0 6px currentColor;
+}
+.status-dot.idle { background: var(--success); }
+.status-dot.busy { background: var(--warning); animation: pulse 1.5s infinite; }
+.status-dot.error { background: var(--error); }
+.status-dot.offline { background: var(--text3); }
+@keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+@keyframes shimmer { 0%{background-position:-200% 0} 100%{background-position:200% 0} }
+@keyframes fadeInUp { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
+@keyframes robotTyping { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-2px)} }
+@keyframes robotBubblePulse { 0%,100%{opacity:1} 50%{opacity:0.6} }
+.working-indicator {
+  display:flex;align-items:center;gap:8px;padding:8px 14px;
+  background:linear-gradient(90deg,rgba(203,201,255,0.06),rgba(203,201,255,0.12),rgba(203,201,255,0.06));
+  background-size:200% 100%;animation:shimmer 2.5s ease-in-out infinite;
+  border-radius:10px;margin-top:4px;
+}
+.working-indicator .wi-dot {
+  width:6px;height:6px;border-radius:50%;background:var(--primary);animation:pulse 1.2s infinite;
+}
+.working-indicator .wi-text {
+  font-size:12px;color:var(--primary);font-weight:600;
+}
+.sidebar-footer {
+  padding: 14px 16px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text3);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.sidebar-footer-user { display: flex; gap: 8px; flex-wrap: wrap; }
+.sidebar-footer-user a {
+  color: var(--text3);
+  text-decoration: none;
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: all 0.15s;
+}
+.sidebar-footer-user a:hover { background: var(--surface2); color: var(--text); }
+/* ---- Main content ---- */
+.main { flex:1; display: flex; flex-direction: column; overflow: hidden; }
+.topbar {
+  padding: 14px 24px;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: rgba(14,20,27,0.8);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+.topbar h2 {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 15px;
+  font-weight: 700;
+}
+.topbar-actions { display: flex; gap: 10px; align-items: center; }
+.content { flex:1; overflow-y: auto; padding: 24px; }
+.content::-webkit-scrollbar { width: 4px; }
+.content::-webkit-scrollbar-track { background: transparent; }
+.content::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+/* ---- Buttons ---- */
+.btn {
+  padding: 10px 20px;
+  border-radius: 10px;
+  font-size: 13px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-family: inherit;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: all 0.2s;
+  outline: none;
+}
+.btn:hover {
+  background: var(--surface2);
+  border-color: var(--text3);
+}
+.btn-primary {
+  background: linear-gradient(135deg, var(--primary), var(--primary-container));
+  color: #0e141b;
+  font-weight: 700;
+  border: none;
+  box-shadow: 0 2px 12px rgba(203, 201, 255, 0.25);
+}
+.btn-primary:hover {
+  box-shadow: 0 4px 16px rgba(203, 201, 255, 0.4);
+  transform: translateY(-1px);
+}
+.btn-primary:active { transform: translateY(0); }
+.btn-danger { background: transparent; color: var(--error); border: 1px solid rgba(255,100,100,0.3); }
+.btn-danger:hover { background: rgba(255,100,100,0.08); border-color: var(--error); }
+.btn-success { background: transparent; color: var(--success); border: 1px solid rgba(100,255,100,0.3); }
+.btn-success:hover { background: rgba(100,255,100,0.08); border-color: var(--success); }
+.btn-ghost { background: transparent; color: var(--text2); border: 1px solid transparent; }
+.btn-ghost:hover { background: var(--surface2); color: var(--text); }
+.btn-sm { padding: 8px 14px; font-size: 12px; border-radius: 8px; }
+/* ---- Cards ---- */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border-light);
+  border-radius: 14px;
+  padding: 20px;
+  margin-bottom: 16px;
+  transition: all 0.2s;
+}
+.card:hover {
+  border-color: var(--border);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+}
+.card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.card-title { font-family: 'Plus Jakarta Sans', sans-serif; font-size: 14px; font-weight: 600; }
+.card-subtitle { font-size: 12px; color: var(--text3); }
+/* ---- Grid ---- */
+.grid { display: grid; gap: 16px; }
+.grid-2 { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+.grid-3 { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+.grid-4 { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+/* ---- Stats ---- */
+.stat-card {
+  background: var(--surface);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  text-align: center;
+}
+.stat-value {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 32px;
+  font-weight: 700;
+}
+.stat-label { font-size: 12px; color: var(--text3); margin-top: 6px; letter-spacing: 0.3px; }
+/* ---- Chat ---- */
+.chat-container { display: flex; flex-direction: column; height: 100%; }
+.chat-messages { flex:1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.chat-messages::-webkit-scrollbar { width: 4px; }
+.chat-messages::-webkit-scrollbar-track { background: transparent; }
+.chat-messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.chat-msg {
+  max-width: 80%;
+  padding: 12px 14px;
+  border-radius: var(--radius-lg);
+  font-size: 14px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+.chat-msg.user {
+  align-self: flex-end;
+  background: linear-gradient(135deg, #1a2332, #243447);
+  color: #e0e6ed;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-bottom-right-radius: 4px;
+}
+.chat-msg.assistant {
+  align-self: flex-start;
+  background: var(--surface2);
+  border: 1px solid var(--border-light);
+  border-bottom-left-radius: 4px;
+  color: var(--text);
+}
+.chat-msg-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  align-self: flex-start;
+  max-width: 85%;
+}
+.chat-msg-row .chat-msg {
+  max-width: 100%;
+  flex: 1;
+  min-width: 0;
+}
+.chat-msg-content {
+  color: var(--text);
+  /* markdown renderer converts \n → <br>, so we don't need pre-wrap
+     (pre-wrap + trailing <br>s caused giant empty bubbles) */
+  white-space: normal;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  min-height: 1em;
+}
+.chat-msg-content br + br { display: none; }  /* collapse double <br> */
+/* ---- Collapsible file content blocks ---- */
+.chat-file-block { margin: 6px 0; border: 1px solid var(--border-light, rgba(255,255,255,0.1)); border-radius: 8px; overflow: hidden; }
+.chat-file-block-header { display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: var(--surface3, rgba(255,255,255,0.04)); font-size: 12px; font-weight: 600; color: var(--text2, #aaa); cursor: pointer; user-select: none; }
+.chat-file-block-header .material-symbols-outlined { font-size: 16px; }
+.chat-file-block-header:hover { background: var(--surface2, rgba(255,255,255,0.06)); }
+.chat-file-block-body { padding: 8px 10px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; max-height: 160px; overflow: hidden; position: relative; }
+.chat-file-block-body.collapsed::after { content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 40px; background: linear-gradient(transparent, var(--surface2, #1e1e2e)); pointer-events: none; }
+.chat-file-block-toggle { display: block; padding: 4px 10px; font-size: 11px; color: var(--primary, #5b8def); cursor: pointer; text-align: center; border-top: 1px solid var(--border-light, rgba(255,255,255,0.06)); }
+.chat-file-block-toggle:hover { background: var(--surface3, rgba(255,255,255,0.04)); }
+.chat-file-block-body.expanded { max-height: none; }
+.chat-file-block-body.expanded::after { display: none; }
+.chat-msg.user .chat-file-block-body.collapsed::after { background: linear-gradient(transparent, #1a2332); }
+.chat-msg.user .chat-file-block { border-color: rgba(255,255,255,0.12); }
+.chat-msg.user .chat-file-block-header { background: rgba(255,255,255,0.06); }
+.chat-msg.user .chat-file-block-toggle { border-color: rgba(255,255,255,0.08); }
+.chat-msg-content .chat-inline-img {
+  display: block;
+  max-width: 100%;
+  max-height: 420px;
+  margin: 6px 0;
+  border-radius: 8px;
+  border: 1px solid var(--border-light, rgba(255,255,255,0.08));
+  cursor: zoom-in;
+  background: rgba(0,0,0,0.15);
+}
+.chat-msg-content .chat-inline-img-err {
+  display: inline-block;
+  padding: 6px 10px;
+  color: var(--text3, #888);
+  background: rgba(255,255,255,0.04);
+  border: 1px dashed var(--border-light, rgba(255,255,255,0.08));
+  cursor: default;
+  max-height: none;
+  font-size: 0.85em;
+}
+.chat-img-lightbox {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.85);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 99999; cursor: zoom-out;
+}
+.chat-img-lightbox img {
+  max-width: 92vw; max-height: 92vh;
+  border-radius: 8px; box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+}
+.chat-msg-content code {
+  background: rgba(255,255,255,0.06);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 0.9em;
+}
+.chat-msg-content pre {
+  background: rgba(0,0,0,0.3);
+  padding: 10px 12px;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 6px 0;
+}
+.chat-msg-content pre code {
+  background: none;
+  padding: 0;
+}
+.chat-msg-content p { margin: 4px 0; }
+.chat-msg-content ul, .chat-msg-content ol { margin: 4px 0; padding-left: 20px; }
+.chat-msg-content a { color: var(--primary); text-decoration: underline; }
+.chat-msg-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+/* ----- artifact_refs FileCard (phase-2 envelope injection) ----- */
+.chat-file-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+.chat-file-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: rgba(203, 201, 255, 0.06);
+  border: 1px solid rgba(203, 201, 255, 0.18);
+  border-radius: 8px;
+  text-decoration: none;
+  color: inherit;
+  max-width: 360px;
+  transition: background 0.15s, border-color 0.15s;
+  cursor: pointer;
+}
+.chat-file-card:hover {
+  background: rgba(203, 201, 255, 0.12);
+  border-color: rgba(203, 201, 255, 0.35);
+}
+.chat-file-card-icon {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.25);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.chat-file-card-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.chat-file-card-icon .material-symbols-outlined {
+  font-size: 24px;
+  color: var(--primary);
+}
+.chat-file-card-body {
+  flex: 1;
+  min-width: 0;  /* let text-overflow work */
+}
+.chat-file-card-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chat-file-card-meta {
+  font-size: 11px;
+  color: var(--text3);
+  margin-top: 2px;
+}
+.chat-file-card-action {
+  flex-shrink: 0;
+  font-size: 18px !important;
+  color: var(--text3);
+}
+.chat-file-card:hover .chat-file-card-action {
+  color: var(--primary);
+}
+.chat-msg.tool {
+  align-self: flex-start;
+  background: rgba(210,153,34,0.08);
+  border: 1px solid rgba(210, 153, 34, 0.3);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--warning);
+}
+.chat-msg.thinking {
+  opacity: 0.7;
+  font-style: italic;
+  color: var(--text3);
+}
+.rich-msg-body table { border-collapse: collapse; width: 100%; margin: 6px 0; }
+.rich-msg-body th, .rich-msg-body td { padding: 5px 8px; border: 1px solid rgba(255,255,255,0.1); text-align: left; font-size: 12px; }
+.rich-msg-body th { background: rgba(203,201,255,0.1); font-weight: 700; }
+.rich-msg-body pre { margin: 6px 0; }
+.rich-msg-body img { max-width: 100%; border-radius: 6px; }
+.rich-msg-body audio { max-width: 100%; }
+.rich-msg-body a { color: var(--primary); }
+.thinking-dots span {
+  animation: thinkBounce 1.2s infinite;
+  display: inline-block;
+  font-size: 20px;
+  line-height: 1;
+}
+.thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
+.thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes thinkBounce {
+  0%,80%,100% { opacity:0.3; transform:translateY(0); }
+  40% { opacity:1; transform:translateY(-4px); }
+}
+/* Progress bar in chat */
+.chat-msg-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255,255,255,0.05);
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+.chat-msg:hover .chat-msg-actions {
+  opacity: 1;
+}
+.chat-action-btn {
+  background: none;
+  border: 1px solid rgba(255,255,255,0.1);
+  color: var(--text3);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  transition: all 0.2s;
+}
+.chat-action-btn:hover {
+  background: var(--surface3);
+  color: var(--primary);
+  border-color: var(--primary);
+}
+.chat-progress-bar {
+  align-self: flex-start;
+  max-width: 80%;
+  min-width: 220px;
+  padding: 10px 14px;
+  background: var(--surface2);
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.05);
+}
+.chat-progress-phase {
+  font-size: 12px;
+  color: var(--text2);
+  font-weight: 600;
+  display:flex;align-items:center;gap:8px;
+}
+.chat-progress-phase .cp-dot {
+  width:6px;height:6px;border-radius:50%;background:var(--primary);animation:pulse 1.2s infinite;flex-shrink:0;
+}
+.chat-progress-abort {
+  background: none;
+  border: 1px solid rgba(255,255,255,0.15);
+  color: var(--error, #ef4444);
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+  margin-left: auto;
+  transition: all 0.2s;
+}
+.chat-progress-abort:hover {
+  background: var(--error, #ef4444);
+  color: #fff;
+  border-color: var(--error, #ef4444);
+}
+.chat-msg.approval {
+  align-self: flex-start;
+  background: rgba(210,153,34,0.1);
+  border: 1px solid rgba(210,153,34,0.4);
+  border-radius: 10px;
+  padding: 16px;
+  max-width: 90%;
+}
+/* @mention autocomplete dropdown */
+.mention-dropdown {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  background: var(--surface);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 10px;
+  max-height: 200px;
+  overflow-y: auto;
+  z-index: 999;
+  box-shadow: 0 -4px 20px rgba(0,0,0,0.4);
+  display: none;
+}
+.mention-dropdown.show { display: block; }
+.mention-item {
+  padding: 8px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  transition: background 0.1s;
+}
+.mention-item:hover, .mention-item.active {
+  background: rgba(203,201,255,0.1);
+}
+.mention-item .mention-name {
+  font-weight: 700;
+  color: var(--text);
+}
+.mention-item .mention-role {
+  font-size: 10px;
+  color: var(--text3);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.chat-input-area {
+  padding: 14px 16px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  gap: 10px;
+  background: var(--surface);
+}
+.chat-input-area textarea {
+  flex:1;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  font-family: inherit;
+  font-size: 14px;
+  resize: none;
+  outline: none;
+  min-height: 42px;
+  max-height: 120px;
+  transition: all 0.2s;
+}
+.chat-input-area textarea::placeholder { color: var(--text3); }
+.chat-input-area textarea:focus {
+  border-color: var(--primary);
+  background: var(--surface2);
+}
+/* ---- Modal ---- */
+.modal-overlay {
+  position: fixed;
+  top:0; left:0; right:0; bottom:0;
+  background: rgba(0,0,0,0.7);
+  backdrop-filter: blur(4px);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.modal-overlay.hidden { display: none !important; }
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 28px;
+  width: 500px;
+  max-width: 90vw;
+  max-height: 80vh;
+  overflow-y: auto;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.3);
+}
+.modal h3 {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 18px;
+  font-weight: 700;
+  margin-bottom: 20px;
+}
+.form-group { margin-bottom: 18px; }
+.form-group label {
+  display: block;
+  font-size: 12px;
+  color: var(--text2);
+  margin-bottom: 6px;
+  font-weight: 500;
+  letter-spacing: 0.3px;
+}
+.form-group input, .form-group select, .form-group textarea {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+  transition: all 0.2s;
+}
+.form-group input::placeholder, .form-group textarea::placeholder { color: var(--text3); }
+.form-group input:focus, .form-group select:focus, .form-group textarea:focus {
+  border-color: var(--primary);
+  background: var(--surface2);
+}
+/* Global .input class — matches form-group styling for use in modals */
+.input, select.input, textarea.input {
+  display: block;
+  width: 100%;
+  padding: 10px 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+  transition: all 0.2s;
+  box-sizing: border-box;
+}
+.input::placeholder { color: var(--text3); }
+.input:focus { border-color: var(--primary); background: var(--surface2); }
+/* Labels in modals */
+.modal-content label {
+  display: block;
+  font-size: 12px;
+  color: var(--text2);
+  margin-bottom: 4px;
+  margin-top: 8px;
+  font-weight: 500;
+}
+.form-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 24px; }
+/* ---- Event log ---- */
+.event-log { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; }
+.event-item {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-light);
+  display: flex;
+  gap: 10px;
+}
+.event-item .time { color: var(--text3); min-width: 80px; flex-shrink: 0; }
+.event-item .kind { min-width: 80px; font-weight: 600; flex-shrink: 0; }
+.event-item .kind.message { color: var(--primary); }
+.event-item .kind.tool_call { color: var(--warning); }
+.event-item .kind.tool_result { color: var(--success); }
+.event-item .kind.error { color: var(--error); }
+.event-item .kind.delegate { color: #c69f6d; }
+.event-item .data { color: var(--text2); flex:1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* ---- Nodes ---- */
+.node-card { display: flex; align-items: center; gap: 12px; }
+.node-icon { font-size: 28px; }
+.node-info { flex:1; }
+.node-name { font-weight: 600; font-size: 14px; }
+.node-url { font-size: 12px; color: var(--text3); }
+/* ---- Tags ---- */
+.tag {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 500;
+}
+.tag-green { background: var(--success-bg); color: var(--success); }
+.tag-yellow { background: var(--warning-bg); color: var(--warning); }
+.tag-red { background: var(--error-bg); color: var(--error); }
+.tag-blue { background: rgba(203, 201, 255, 0.15); color: var(--primary); }
+/* ---- Approvals ---- */
+.approval-card {
+  background: var(--surface);
+  border: 1px solid var(--border-light);
+  border-radius: 14px;
+  padding: 20px;
+  margin-bottom: 12px;
+}
+.approval-header {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 12px;
+  align-items: flex-start;
+}
+.approval-icon { font-size: 20px; flex-shrink: 0; }
+.approval-info { flex: 1; }
+.approval-title { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+.approval-detail { font-size: 12px; color: var(--text3); margin: 2px 0; }
+.approval-args {
+  background: var(--bg);
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-light);
+  font-family: monospace;
+  font-size: 11px;
+  color: var(--text2);
+  margin: 10px 0;
+  max-height: 120px;
+  overflow-y: auto;
+}
+.approval-actions { display: flex; gap: 8px; margin-top: 12px; }
+/* ---- Audit log table ---- */
+.audit-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.audit-table th {
+  background: var(--surface2);
+  padding: 10px;
+  text-align: left;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+}
+.audit-table td {
+  padding: 10px;
+  border-bottom: 1px solid var(--border-light);
+}
+.audit-table tr:hover { background: var(--surface2); }
+/* ---- Tokens ---- */
+.token-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius);
+  margin-bottom: 10px;
+}
+.token-info { flex: 1; }
+.token-id {
+  font-family: monospace;
+  font-size: 11px;
+  color: var(--text3);
+  word-break: break-all;
+}
+.token-actions { display: flex; gap: 8px; margin-left: 12px; }
+/* ---- Hidden ---- */
+.hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<!-- ============ Sidebar ============ -->
+<div class="sidebar">
+  <div class="sidebar-header">
+    <h1 onclick="showView('dashboard',null)">
+      <span style="width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,var(--primary),var(--primary-container));display:inline-flex;align-items:center;justify-content:center;flex-shrink:0">
+        <span class="material-symbols-outlined" style="font-size:20px;color:#282572">token</span>
+      </span>
+      Tudou Claws
+    </h1>
+    <div class="subtitle" id="node-info">Admin Console</div>
+  </div>
+  <div class="nav">
+    <!-- Primary navigation: 7 high-frequency entry points -->
+    <div class="nav-section">
+      <div class="nav-item active" data-view="dashboard" onclick="showView('dashboard',this)">
+        <span class="icon">space_dashboard</span> <span>工作台</span>
+        <span class="badge notification hidden" id="dashboard-badge">0</span>
+      </div>
+      <div class="nav-item" data-view="projects" onclick="showView('projects',this)">
+        <span class="icon">folder_special</span> <span>项目与任务</span>
+        <span class="badge" id="project-count">0</span>
+      </div>
+      <div class="nav-item" data-view="agents-list" onclick="showView('agents-list',this)">
+        <span class="icon">smart_toy</span> <span>智能体</span>
+        <span class="badge" id="agent-count-badge">0</span>
+      </div>
+      <div class="nav-item" data-view="knowledge-memory" onclick="showView('knowledge-memory',this)">
+        <span class="icon">psychology_alt</span> <span>知识与记忆</span>
+      </div>
+      <div class="nav-item" data-view="roles-skills" onclick="showView('roles-skills',this)">
+        <span class="icon">workspace_premium</span> <span>角色与技能</span>
+      </div>
+      <div class="nav-item" data-view="tools-approvals" onclick="showView('tools-approvals',this)">
+        <span class="icon">build_circle</span> <span>工具与审批</span>
+        <span class="badge notification hidden" id="approval-badge">0</span>
+      </div>
+      <div class="nav-item" data-view="integrations" onclick="showView('integrations',this)">
+        <span class="icon">hub</span> <span>集成与通知</span>
+      </div>
+    </div>
+
+    <!-- Bottom section: low-frequency admin items grouped -->
+    <div class="nav-section" style="margin-top:auto">
+      <div class="nav-item" data-view="settings-hub" onclick="showView('settings-hub',this)">
+        <span class="icon">settings</span> <span>系统设置</span>
+      </div>
+      <div class="nav-item" data-view="admin-manage" id="nav-admin-manage" onclick="showView('admin-manage',this)" style="display:none">
+        <span class="icon">admin_panel_settings</span> <span>管理员</span>
+      </div>
+    </div>
+  </div>
+  <div class="sidebar-footer">
+    <div id="sidebar-footer" style="display:flex;align-items:center;gap:8px">
+      <span class="material-symbols-outlined" style="font-size:16px;color:var(--text3)">person</span>
+      <span id="footer-username" style="font-size:12px;color:var(--text2)">admin</span>
+      <span id="footer-role" style="font-size:10px;padding:2px 6px;border-radius:4px;background:rgba(203,201,255,0.1);color:var(--primary);margin-left:auto">superAdmin</span>
+    </div>
+    <div class="sidebar-footer-user">
+      <a href="#" onclick="showChangePasswordModal();return false" id="btn-change-pw" style="display:none">Change Password</a>
+      <a href="#" onclick="logout();return false">Logout</a>
+    </div>
+  </div>
+</div>
+
+<!-- ============ Main ============ -->
+<div class="main">
+  <div class="topbar">
+    <h2 id="view-title">Dashboard</h2>
+    <div style="display:flex;align-items:center;gap:10px;margin-left:auto">
+    <div class="topbar-actions" id="topbar-actions"></div>
+    <div class="topbar-global" id="topbar-global" style="display:flex;align-items:center;gap:8px;margin-left:12px;padding-left:12px;border-left:1px solid rgba(255,255,255,0.06)">
+      <select id="global-node-switcher" onchange="onNodeSwitch(this.value)" title="切换节点视图" style="background:var(--surface);color:var(--text);border:1px solid rgba(255,255,255,0.08);border-radius:6px;padding:5px 10px;font-size:11px;cursor:pointer">
+        <option value="">所有节点</option>
+      </select>
+      <button class="btn btn-ghost btn-sm" id="global-notif-btn" onclick="showView('dashboard',null)" title="通知中心" style="padding:4px 8px;position:relative">
+        <span class="material-symbols-outlined" style="font-size:18px">notifications</span>
+        <span class="badge notification hidden" id="global-notif-badge" style="position:absolute;top:-2px;right:-2px">0</span>
+      </button>
+    </div>
+    </div>
+  </div>
+  <div class="content" id="content"></div>
+</div>
+
+<!-- ============ Modals ============ -->
+<div class="modal-overlay hidden" id="modal-create-agent">
+  <div class="modal" style="max-width:640px">
+    <h3>Create New Agent</h3>
+
+    <!-- Agent Class + Memory Mode (top-level classification) -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:4px">
+      <div class="form-group">
+        <label>智能体分类 Agent Class *</label>
+        <select id="ca-agent-class" onchange="_onAgentClassChange(this.value)">
+          <option value="advisor">专业领域顾问 — Advisor</option>
+          <option value="enterprise" selected>企业办公智能体 — Enterprise</option>
+          <option value="personal">个人应用智能体 — Personal</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>记忆模式 Memory Mode</label>
+        <select id="ca-memory-mode">
+          <option value="full" selected>完整记忆 Full (5 层全开)</option>
+          <option value="light">轻量记忆 Light (仅最近 N 条)</option>
+          <option value="off">无记忆 Off (会话级)</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- RAG Knowledge Base Configuration -->
+    <div id="ca-rag-section" style="margin-bottom:8px;padding:14px;background:var(--surface2);border-radius:10px;border:1px solid var(--border-light)">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <span class="material-symbols-outlined" style="font-size:18px;color:var(--primary)">library_books</span>
+        <span style="font-weight:600;font-size:13px">知识库配置 RAG Knowledge Base</span>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div class="form-group" style="margin-bottom:0">
+          <label>RAG 模式</label>
+          <select id="ca-rag-mode" onchange="_onRagModeChange(this.value)">
+            <option value="shared">共享知识库 Shared (企业通用)</option>
+            <option value="private">独立知识库 Private (专属领域)</option>
+            <option value="both">双库模式 Both (独立+共享)</option>
+            <option value="none">无 RAG None</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label>RAG 提供方 Provider</label>
+          <select id="ca-rag-provider">
+            <option value="">本地 ChromaDB (默认)</option>
+          </select>
+        </div>
+      </div>
+      <div id="ca-rag-domain-kb-area" style="margin-top:10px;display:none">
+        <div style="font-size:12px;color:var(--text2);margin-bottom:6px">选择专业领域知识库（可在"知识与记忆"页面新建和管理）</div>
+        <select id="ca-rag-domain-kb" style="width:100%;font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:8px 12px">
+          <option value="">-- 选择已有知识库 --</option>
+        </select>
+        <div id="ca-rag-domain-kb-info" style="display:none;margin-top:6px;padding:8px 12px;background:var(--surface2);border-radius:6px;font-size:11px;color:var(--text3)"></div>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div class="form-group">
+        <label>Name *</label>
+        <input id="ca-name" placeholder="e.g. CodeReviewer">
+      </div>
+      <div class="form-group">
+        <label>Role</label>
+        <select id="ca-role" onchange="caUpdateExpCount()">
+          <option value="general">General — 通用</option>
+          <option value="ceo">CEO — 首席执行官</option>
+          <option value="cto">CTO — 首席技术官</option>
+          <option value="coder">Coder — 开发工程师</option>
+          <option value="reviewer">Reviewer — 代码审查</option>
+          <option value="researcher">Researcher — 研究员</option>
+          <option value="architect">Architect — 架构师</option>
+          <option value="pm">PM — 项目经理</option>
+          <option value="designer">Designer — 设计师</option>
+          <option value="tester">Tester — 测试工程师</option>
+          <option value="devops">DevOps — 运维工程师</option>
+          <option value="data">Data — 数据分析师</option>
+        </select>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div class="form-group">
+        <label>Priority Level</label>
+        <select id="ca-priority-level">
+          <option value="3" selected>3 - Team Member (default)</option>
+          <option value="2">2 - Project Manager</option>
+          <option value="1">1 - CXO (highest)</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Role Title</label>
+        <input id="ca-role-title" placeholder="e.g. CXO, PM, Developer">
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label>人设模板 Persona Template (可选，选中后会覆盖性格/沟通风格等)</label>
+      <select id="ca-persona" onchange="applyPersonaPreview()">
+        <option value="">— 不使用模板 —</option>
+      </select>
+      <div id="ca-persona-preview" style="font-size:11px;color:var(--text3);margin-top:4px;min-height:14px"></div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div class="form-group">
+        <label>性格 Personality</label>
+        <select id="ca-personality">
+          <option value="helpful">helpful — 有帮助的</option>
+          <option value="friendly">friendly — 友好</option>
+          <option value="formal">formal — 正式</option>
+          <option value="concise">concise — 简洁</option>
+          <option value="patient">patient — 耐心</option>
+          <option value="strict">strict — 严谨</option>
+          <option value="pragmatic">pragmatic — 务实</option>
+          <option value="creative">creative — 创造性</option>
+          <option value="analytical">analytical — 分析型</option>
+          <option value="encouraging">encouraging — 鼓励型</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>沟通风格 Communication Style</label>
+        <select id="ca-style">
+          <option value="technical">technical — 技术向</option>
+          <option value="casual">casual — 轻松</option>
+          <option value="detailed">detailed — 详尽</option>
+          <option value="brief">brief — 简短</option>
+          <option value="educational">educational — 教学</option>
+          <option value="conversational">conversational — 对话式</option>
+          <option value="executive">executive — 高管向</option>
+        </select>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div class="form-group">
+        <label>Language 语言</label>
+        <select id="ca-language">
+          <option value="auto">auto — 跟随用户</option>
+          <option value="zh-CN">中文</option>
+          <option value="en">English</option>
+          <option value="ja">日本語</option>
+          <option value="ko">한국어</option>
+          <option value="es">Español</option>
+          <option value="fr">Français</option>
+          <option value="de">Deutsch</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>记忆长度 Memory <span id="ca-mem-label" style="color:var(--text3);font-weight:400">(50 条)</span></label>
+        <select id="ca-memory" onchange="document.getElementById('ca-mem-label').textContent='('+this.options[this.selectedIndex].dataset.count+' 条)'">
+          <option value="short" data-count="20">Short — 短期 (20 条，节省 token)</option>
+          <option value="medium" data-count="50" selected>Medium — 中期 (50 条，推荐)</option>
+          <option value="long" data-count="100">Long — 长期 (100 条)</option>
+          <option value="xlong" data-count="200">Extra Long — 超长 (200 条)</option>
+        </select>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div class="form-group">
+        <label>创造性 Temperature <span id="ca-temp-label" style="color:var(--text3);font-weight:400">(0.7 平衡)</span></label>
+        <input id="ca-temperature" type="range" min="0" max="1.5" step="0.1" value="0.7"
+               oninput="document.getElementById('ca-temp-label').textContent='('+this.value+' '+(this.value<0.3?'确定性':this.value<0.9?'平衡':'创造性')+')'">
+      </div>
+      <div class="form-group">
+        <label>执行策略 Exec Policy</label>
+        <select id="ca-exec-policy">
+          <option value="ask" selected>ask — 每次询问审批（推荐）</option>
+          <option value="full">full — 自动批准所有工具</option>
+          <option value="deny">deny — 禁用所有工具</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label>专长 & 技能 Expertise & Skills <span style="color:var(--text3);font-weight:400">(逗号分隔)</span></label>
+      <div id="ca-tags-display" style="min-height:32px;padding:6px 8px;background:var(--surface3);border-radius:6px;margin-bottom:6px;display:flex;flex-wrap:wrap;gap:6px;align-items:center"></div>
+      <input id="ca-expertise" placeholder="输入后按 Enter 添加，如: Python, 代码审查, Kubernetes, 测试"
+             onkeydown="if(event.key==='Enter'){event.preventDefault();caAddTags(this)}"
+             style="font-size:13px">
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">输入技能/专长后按回车添加，或用逗号一次添加多个</div>
+    </div>
+    <div class="form-group">
+      <label>专业领域 — 为 Agent 装载领域知识 (最多 8 个，可选)</label>
+      <div id="ca-skills-chips" style="min-height:36px;padding:8px 10px;background:var(--surface3);border-radius:6px;margin-bottom:6px;font-size:12px;color:var(--text3);display:flex;flex-wrap:wrap;gap:6px;align-items:center">未选择任何专业领域</div>
+      <button type="button" class="btn btn-sm" onclick="openCreateAgentSkillPicker()"><span class="material-symbols-outlined" style="font-size:14px">psychology</span> 选择领域…</button>
+    </div>
+
+    <div class="form-group">
+      <label>头像选择 Robot Avatar</label>
+      <div id="ca-avatar-grid" style="display:grid;grid-template-columns:repeat(6,1fr);gap:8px;padding:8px;background:var(--surface3);border-radius:8px"></div>
+    </div>
+
+    <div style="margin:12px 0;padding:12px;background:var(--surface2);border-radius:8px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <span class="material-symbols-outlined" style="font-size:18px;color:var(--primary)">psychology</span>
+        <span style="font-weight:600;font-size:13px">Self-Improvement (经验库)</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+          <input type="checkbox" id="ca-self-improve" checked onchange="caUpdateExpCount()"> Enable Self-Improvement
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+          <input type="checkbox" id="ca-import-exp" checked onchange="caUpdateExpCount()"> Import Experience Library
+        </label>
+      </div>
+      <div id="ca-exp-info" style="font-size:11px;color:var(--text3);margin-top:6px">Checking experience library...</div>
+    </div>
+
+    <details style="margin:12px 0">
+      <summary style="cursor:pointer;font-size:13px;color:var(--text2);padding:6px 0">⚙ 高级设置 Advanced</summary>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;padding-top:8px">
+        <div class="form-group">
+          <label>Provider</label>
+          <select id="ca-provider" onchange="updateModelSelect('ca-provider','ca-model')">
+            <option value="">Default (global)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Model</label>
+          <select id="ca-model">
+            <option value="">Default (global)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Deploy on Node</label>
+          <select id="ca-node">
+            <option value="local">Local (this machine)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Working Directory (留空使用默认 workspace)</label>
+          <input id="ca-workdir" placeholder="Default: agent workspace dir">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Custom Instructions 自定义指令 (可选)</label>
+        <textarea id="ca-prompt" rows="3" placeholder="Additional instructions appended to system prompt..."></textarea>
+      </div>
+    </details>
+
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="hideModal('create-agent')">Cancel</button>
+      <button class="btn btn-primary" onclick="createAgent()">Create Agent</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="modal-edit-agent">
+  <div class="modal">
+    <h3>Edit Agent</h3>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div class="form-group">
+        <label>Name</label>
+        <input id="ea-name" placeholder="e.g. CodeReviewer">
+      </div>
+      <div class="form-group">
+        <label>Role</label>
+        <select id="ea-role">
+          <option value="general">General — 通用</option>
+          <option value="ceo">CEO — 首席执行官</option>
+          <option value="cto">CTO — 首席技术官</option>
+          <option value="coder">Coder — 开发工程师</option>
+          <option value="reviewer">Reviewer — 代码审查</option>
+          <option value="researcher">Researcher — 研究员</option>
+          <option value="architect">Architect — 架构师</option>
+          <option value="pm">PM — 项目经理</option>
+          <option value="designer">Designer — 设计师</option>
+          <option value="tester">Tester — 测试工程师</option>
+          <option value="devops">DevOps — 运维工程师</option>
+          <option value="data">Data — 数据分析师</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Provider</label>
+        <select id="ea-provider" onchange="updateModelSelect('ea-provider','ea-model')">
+          <option value="">Default (global)</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Model</label>
+        <select id="ea-model">
+          <option value="">Default (global)</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Working Directory</label>
+      <input id="ea-workdir" placeholder="Leave blank for current directory" style="font-family:monospace;font-size:12px">
+    </div>
+
+    <!-- ── 多 LLM Slot 区域 (方案甲 + 乙) ── -->
+    <div style="border-top:1px solid var(--border);margin:12px 0;padding-top:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <div style="font-size:12px;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px">Multi-LLM Slots · 多模型插槽</div>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="eaToggleLlmPanel()">
+          <span id="ea-llm-toggle-label" class="material-symbols-outlined" style="font-size:16px">expand_more</span>
+        </button>
+      </div>
+      <div id="ea-llm-panel" style="display:none">
+        <div style="font-size:11px;color:var(--text3);margin-bottom:8px;line-height:1.5">
+          上面的 Provider/Model 是这个 agent 的<b>默认</b>模型。<br>
+          下面可以为学习、多模态、以及任意命名用途另配模型 —— 不配就一律走默认。
+        </div>
+
+        <!-- 甲: 学习/多模态专用 slot -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <div class="form-group">
+            <label style="font-size:12px">Learning Provider · 学习</label>
+            <select id="ea-learning-provider" onchange="updateModelSelect('ea-learning-provider','ea-learning-model')">
+              <option value="">（使用默认）</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label style="font-size:12px">Learning Model</label>
+            <select id="ea-learning-model">
+              <option value="">（使用默认）</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label style="font-size:12px">Multimodal Provider · 多模态</label>
+            <select id="ea-multimodal-provider" onchange="updateModelSelect('ea-multimodal-provider','ea-multimodal-model')">
+              <option value="">（使用默认）</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label style="font-size:12px">Multimodal Model</label>
+            <select id="ea-multimodal-model">
+              <option value="">（使用默认）</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label style="font-size:12px">Coding Provider · 编码</label>
+            <select id="ea-coding-provider" onchange="updateModelSelect('ea-coding-provider','ea-coding-model')">
+              <option value="">（使用默认）</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label style="font-size:12px">Coding Model</label>
+            <select id="ea-coding-model">
+              <option value="">（使用默认）</option>
+            </select>
+          </div>
+          <div class="form-group" style="margin-top:4px">
+            <label style="font-size:12px;display:flex;align-items:center;gap:6px;cursor:pointer">
+              <input type="checkbox" id="ea-mm-supports-tools">
+              <span>支持工具调用 (Tools)</span>
+            </label>
+            <div id="ea-mm-tools-hint" style="font-size:11px;margin-top:3px;padding:4px 8px;border-radius:4px;display:none"></div>
+          </div>
+        </div>
+
+        <!-- 乙(a): extra_llms 任意命名 slot -->
+        <div style="margin-top:12px;padding:10px;background:var(--surface3);border-radius:8px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+            <div style="font-size:12px;color:var(--text2)">额外 LLM 插槽 · Extra LLM Slots</div>
+            <button type="button" class="btn btn-ghost btn-sm" onclick="eaAddExtraLlmRow()">
+              <span class="material-symbols-outlined" style="font-size:14px">add</span> 添加
+            </button>
+          </div>
+          <div style="font-size:11px;color:var(--text3);margin-bottom:8px;line-height:1.4">
+            每行一个具名 slot，例如 <code>big_model</code> / <code>vision_model</code> / <code>code_review</code>。
+            Task 可以通过 <code>llm_label</code> 显式命中某个 slot，或由下方「自动路由」按输入类型挑选。
+          </div>
+          <div id="ea-extra-llms-rows"></div>
+        </div>
+
+        <!-- 乙(b): auto_route 启发式 -->
+        <div style="margin-top:12px;padding:10px;background:var(--surface3);border-radius:8px">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;margin-bottom:8px">
+            <input type="checkbox" id="ea-ar-enabled">
+            <span>启用自动路由 · Auto-route by input type</span>
+          </label>
+          <div style="font-size:11px;color:var(--text3);margin-bottom:8px;line-height:1.4">
+            没显式指定 llm_label 时，按输入类型自动挑 extra_llms 里的某个 slot（填 label 即可，留空 = 用默认 Provider/Model）。
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <div class="form-group" style="margin-bottom:6px">
+              <label style="font-size:12px">日常 default →</label>
+              <input id="ea-ar-default" placeholder="留空 = 默认模型" style="font-size:12px">
+            </div>
+            <div class="form-group" style="margin-bottom:6px">
+              <label style="font-size:12px">复杂 complex →</label>
+              <input id="ea-ar-complex" placeholder="slot label 例如 big_model" style="font-size:12px">
+            </div>
+            <div class="form-group" style="margin-bottom:6px">
+              <label style="font-size:12px">图片/多模态 →</label>
+              <input id="ea-ar-multimodal" placeholder="slot label 例如 vision_model" style="font-size:12px">
+            </div>
+            <div class="form-group" style="margin-bottom:6px">
+              <label style="font-size:12px">编码 coding →</label>
+              <input id="ea-ar-coding" placeholder="slot label 例如 code_model" style="font-size:12px">
+            </div>
+            <div class="form-group" style="margin-bottom:6px">
+              <label style="font-size:12px">复杂阈值 (字符数)</label>
+              <input id="ea-ar-threshold" type="number" min="1" value="2000" style="font-size:12px">
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="border-top:1px solid var(--border);margin:12px 0;padding-top:12px">
+      <div style="font-size:12px;color:var(--text2);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px">Profile</div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div class="form-group">
+        <label>Personality</label>
+        <input id="ea-personality" placeholder="e.g. Friendly and helpful">
+      </div>
+      <div class="form-group">
+        <label>Communication Style</label>
+        <input id="ea-style" placeholder="e.g. Clear and concise">
+      </div>
+    </div>
+    <div class="form-group">
+      <label>专长 & 技能 Expertise & Skills</label>
+      <div id="ea-tags-display" style="min-height:32px;padding:6px 8px;background:var(--surface3);border-radius:6px;margin-bottom:6px;display:flex;flex-wrap:wrap;gap:6px;align-items:center"></div>
+      <input id="ea-expertise" placeholder="输入后按 Enter 添加"
+             onkeydown="if(event.key==='Enter'){event.preventDefault();eaAddTags(this)}"
+             style="font-size:13px">
+    </div>
+    <div class="form-group">
+      <label>头像选择 Robot Avatar</label>
+      <div id="ea-avatar-grid" style="display:grid;grid-template-columns:repeat(6,1fr);gap:8px;padding:8px;background:var(--surface3);border-radius:8px"></div>
+    </div>
+    <div class="form-group">
+      <label>Language</label>
+      <select id="ea-language">
+        <option value="auto">Auto</option>
+        <option value="en">English</option>
+        <option value="zh-CN">中文</option>
+        <option value="es">Spanish</option>
+        <option value="fr">French</option>
+        <option value="de">German</option>
+        <option value="ja">Japanese</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Custom Instructions</label>
+      <textarea id="ea-prompt" rows="3" placeholder="Additional instructions..."></textarea>
+    </div>
+    <div style="margin:12px 0;padding:12px;background:var(--surface2);border-radius:8px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <span class="material-symbols-outlined" style="font-size:18px;color:var(--primary)">psychology</span>
+        <span style="font-weight:600;font-size:13px">Self-Improvement (经验库)</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+          <input type="checkbox" id="ea-self-improve"> Enable Self-Improvement
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+          <input type="checkbox" id="ea-import-exp"> Import Experience Library
+        </label>
+      </div>
+      <div id="ea-exp-info" style="font-size:11px;color:var(--text3);margin-top:6px"></div>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="hideModal('edit-agent')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveAgentProfile()">Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="modal-add-node">
+  <div class="modal">
+    <h3>Connect Remote Node</h3>
+    <div class="form-group">
+      <label>Node Name</label>
+      <input id="an-name" placeholder="e.g. build-server">
+    </div>
+    <div class="form-group">
+      <label>Node URL</label>
+      <input id="an-url" placeholder="http://192.168.1.100:9090">
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="hideModal('add-node')">Cancel</button>
+      <button class="btn btn-primary" onclick="addNode()">Connect</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="modal-create-token">
+  <div class="modal">
+    <h3>Create New Token</h3>
+    <div class="form-group">
+      <label>Token Name</label>
+      <input id="ct-name" placeholder="e.g. CI/CD Pipeline">
+    </div>
+    <div class="form-group">
+      <label>Role</label>
+      <select id="ct-role">
+        <option value="admin">Admin</option>
+        <option value="operator">Operator</option>
+        <option value="viewer">Viewer</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Bind to Admin</label>
+      <select id="ct-admin-bind">
+        <option value="">-- No binding (legacy) --</option>
+      </select>
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">Token will inherit this admin's permissions and agent visibility.</div>
+    </div>
+    <div id="ct-result" class="hidden">
+      <p style="color:var(--text3);margin-bottom:8px">Token created. Save this immediately, it won't be shown again:</p>
+      <div class="approval-args" id="ct-token-display"></div>
+      <button class="btn btn-primary" onclick="copyToken()">Copy</button>
+      <button class="btn btn-ghost" onclick="hideModal('create-token');refresh()">Done</button>
+    </div>
+    <div id="ct-form">
+      <div class="form-actions">
+        <button class="btn btn-ghost" onclick="hideModal('create-token')">Cancel</button>
+        <button class="btn btn-primary" onclick="createToken()">Create</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="modal-delegate">
+  <div class="modal">
+    <h3>Delegate Task</h3>
+    <div class="form-group">
+      <label>From Agent</label>
+      <select id="del-from"></select>
+    </div>
+    <div class="form-group">
+      <label>To Agent</label>
+      <select id="del-to"></select>
+    </div>
+    <div class="form-group">
+      <label>Task</label>
+      <textarea id="del-task" rows="4" placeholder="Describe the task..."></textarea>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="hideModal('delegate')">Cancel</button>
+      <button class="btn btn-primary" onclick="delegateTask()">Send Task</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="modal-add-provider">
+  <div class="modal">
+    <h3>Add LLM Provider</h3>
+    <div class="form-group">
+      <label>Name</label>
+      <input id="ap-name" placeholder="e.g. My OpenAI, Local Ollama 2">
+    </div>
+    <div class="form-group">
+      <label>Protocol</label>
+      <select id="ap-kind">
+        <option value="openai">OpenAI-compatible (OpenAI, vLLM, Unsloth, LiteLLM...)</option>
+        <option value="ollama">Ollama</option>
+        <option value="claude">Claude (Anthropic)</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Base URL</label>
+      <input id="ap-url" placeholder="e.g. https://api.openai.com/v1">
+    </div>
+    <div class="form-group">
+      <label>API Key (optional)</label>
+      <input id="ap-key" type="password" placeholder="sk-...">
+    </div>
+    <div class="form-group">
+      <label>Models (manual)</label>
+      <div id="ap-model-tags" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;min-height:28px"></div>
+      <div style="display:flex;gap:6px">
+        <input id="ap-model-input" class="input" placeholder="Enter model name, press Enter" style="flex:1" onkeydown="if(event.key==='Enter'){event.preventDefault();addModelTag('ap')}">
+        <button class="btn btn-ghost btn-sm" type="button" onclick="addModelTag('ap')" style="white-space:nowrap">+ Add</button>
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">Add the model names you want to use from this provider.</div>
+    </div>
+    <div style="border-top:1px solid var(--border-light);margin:12px 0;padding-top:12px">
+      <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:10px;display:flex;align-items:center;gap:6px"><span class="material-symbols-outlined" style="font-size:16px">tune</span>Concurrency &amp; Rate Limit</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="form-group" style="margin-bottom:0">
+          <label style="font-size:11px">Max Concurrent (Platform)</label>
+          <input id="ap-max-concurrent" type="number" min="1" max="100" value="1" style="width:100%">
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label style="font-size:11px">RPM Limit (0=unlimited)</label>
+          <input id="ap-rate-limit-rpm" type="number" min="0" max="10000" value="0" style="width:100%">
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label style="font-size:11px">Schedule Strategy</label>
+          <select id="ap-schedule-strategy" style="width:100%">
+            <option value="serial">Serial (串行)</option>
+            <option value="concurrent">Concurrent (并行)</option>
+            <option value="burst">Burst (突发)</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label style="font-size:11px">Scope</label>
+          <select id="ap-scope" style="width:100%">
+            <option value="local">Local</option>
+            <option value="cloud">Cloud</option>
+          </select>
+        </div>
+      </div>
+      <div style="font-size:10px;color:var(--text3);margin-top:6px">Per-model concurrency overrides can be set after creation via Edit.</div>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="hideModal('add-provider')">Cancel</button>
+      <button class="btn btn-primary" onclick="addProvider()">Add Provider</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="modal-edit-provider">
+  <div class="modal">
+    <h3>Edit Provider</h3>
+    <div class="form-group">
+      <label>Name</label>
+      <input id="ep-name">
+    </div>
+    <div class="form-group">
+      <label>Protocol</label>
+      <select id="ep-kind">
+        <option value="openai">OpenAI-compatible</option>
+        <option value="ollama">Ollama</option>
+        <option value="claude">Claude (Anthropic)</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Base URL</label>
+      <input id="ep-url">
+    </div>
+    <div class="form-group">
+      <label>API Key</label>
+      <input id="ep-key" type="password">
+    </div>
+    <div class="form-group">
+      <label>Enabled</label>
+      <select id="ep-enabled">
+        <option value="true">Yes</option>
+        <option value="false">No</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Models (manual)</label>
+      <div id="ep-model-tags" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;min-height:28px"></div>
+      <div style="display:flex;gap:6px">
+        <input id="ep-model-input" class="input" placeholder="Enter model name, press Enter" style="flex:1" onkeydown="if(event.key==='Enter'){event.preventDefault();addModelTag('ep')}">
+        <button class="btn btn-ghost btn-sm" type="button" onclick="addModelTag('ep')" style="white-space:nowrap">+ Add</button>
+      </div>
+    </div>
+    <div style="border-top:1px solid var(--border-light);margin:12px 0;padding-top:12px">
+      <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:10px;display:flex;align-items:center;gap:6px"><span class="material-symbols-outlined" style="font-size:16px">tune</span>Concurrency &amp; Rate Limit</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="form-group" style="margin-bottom:0">
+          <label style="font-size:11px">Max Concurrent (Platform)</label>
+          <input id="ep-max-concurrent" type="number" min="1" max="100" value="1" style="width:100%">
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label style="font-size:11px">RPM Limit (0=unlimited)</label>
+          <input id="ep-rate-limit-rpm" type="number" min="0" max="10000" value="0" style="width:100%">
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label style="font-size:11px">Schedule Strategy</label>
+          <select id="ep-schedule-strategy" style="width:100%">
+            <option value="serial">Serial (串行)</option>
+            <option value="concurrent">Concurrent (并行)</option>
+            <option value="burst">Burst (突发)</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label style="font-size:11px">Scope</label>
+          <select id="ep-scope" style="width:100%">
+            <option value="local">Local</option>
+            <option value="cloud">Cloud</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label style="font-size:11px">Context Length (0=auto)</label>
+          <input id="ep-context-length" type="number" min="0" max="1000000" value="0" style="width:100%" placeholder="e.g. 32768">
+          <div style="font-size:10px;color:var(--text3);margin-top:2px">Set to match your LM Studio / Ollama config. 0 = auto-detect from model name.</div>
+        </div>
+      </div>
+      <div style="margin-top:10px">
+        <label style="font-size:11px;font-weight:600;color:var(--text2)">Per-Model Concurrency Overrides</label>
+        <div id="ep-model-concurrency" style="margin-top:6px"></div>
+        <div style="font-size:10px;color:var(--text3);margin-top:4px">Leave empty to use platform max. Set per-model if a specific model can handle more/fewer concurrent requests.</div>
+      </div>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="hideModal('edit-provider')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveProvider()">Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="modal-add-channel">
+  <div class="modal">
+    <h3>Add Channel</h3>
+    <div class="form-group">
+      <label>Channel Name</label>
+      <input id="ac-name" placeholder="e.g. #dev-team-slack">
+    </div>
+    <div class="form-group">
+      <label>Platform</label>
+      <select id="ac-type">
+        <option value="webhook">Webhook (Generic)</option>
+        <option value="slack">Slack</option>
+        <option value="telegram">Telegram</option>
+        <option value="discord">Discord</option>
+        <option value="dingtalk">DingTalk (钉钉)</option>
+        <option value="feishu">Feishu (飞书)</option>
+        <option value="wechat_work">WeChat Work (企业微信)</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Bind to Agent</label>
+      <select id="ac-agent"></select>
+    </div>
+    <div class="form-group">
+      <label>Inbound Mode</label>
+      <select id="ac-mode" onchange="document.getElementById('ac-webhook-group').style.display=this.value==='webhook'?'':'none'">
+        <option value="polling">Polling (内网可用，无需公网)</option>
+        <option value="webhook">Webhook (需要公网地址)</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Bot Token</label>
+      <input id="ac-token" type="password" placeholder="Platform bot token">
+    </div>
+    <div class="form-group">
+      <label>Signing Secret</label>
+      <input id="ac-secret" type="password" placeholder="Webhook verification secret (optional)">
+    </div>
+    <div class="form-group" id="ac-webhook-group" style="display:none">
+      <label>Outbound Webhook URL</label>
+      <input id="ac-webhook" placeholder="https://...">
+    </div>
+    <div class="form-group">
+      <label>App ID (DingTalk/Feishu)</label>
+      <input id="ac-appid" placeholder="Optional">
+    </div>
+    <div class="form-group">
+      <label>App Secret (DingTalk/Feishu)</label>
+      <input id="ac-appsecret" type="password" placeholder="Optional">
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="hideModal('add-channel')">Cancel</button>
+      <button class="btn btn-primary" onclick="addChannel()">Add Channel</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="modal-edit-channel">
+  <div class="modal">
+    <h3>Edit Channel</h3>
+    <div class="form-group">
+      <label>Channel Name</label>
+      <input id="ec-name">
+    </div>
+    <div class="form-group">
+      <label>Platform</label>
+      <select id="ec-type">
+        <option value="webhook">Webhook (Generic)</option>
+        <option value="slack">Slack</option>
+        <option value="telegram">Telegram</option>
+        <option value="discord">Discord</option>
+        <option value="dingtalk">DingTalk (钉钉)</option>
+        <option value="feishu">Feishu (飞书)</option>
+        <option value="wechat_work">WeChat Work (企业微信)</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Bind to Agent</label>
+      <select id="ec-agent"></select>
+    </div>
+    <div class="form-group">
+      <label>Inbound Mode</label>
+      <select id="ec-mode" onchange="document.getElementById('ec-webhook-group').style.display=this.value==='webhook'?'':'none'">
+        <option value="polling">Polling (内网可用)</option>
+        <option value="webhook">Webhook (需公网)</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Bot Token</label>
+      <input id="ec-token" type="password">
+    </div>
+    <div class="form-group">
+      <label>Signing Secret</label>
+      <input id="ec-secret" type="password">
+    </div>
+    <div class="form-group" id="ec-webhook-group">
+      <label>Outbound Webhook URL</label>
+      <input id="ec-webhook">
+    </div>
+    <div class="form-group">
+      <label>App ID</label>
+      <input id="ec-appid">
+    </div>
+    <div class="form-group">
+      <label>App Secret</label>
+      <input id="ec-appsecret" type="password">
+    </div>
+    <div class="form-group">
+      <label>Enabled</label>
+      <select id="ec-enabled">
+        <option value="true">Yes</option>
+        <option value="false">No</option>
+      </select>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="hideModal('edit-channel')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveChannel()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Portal main application scripts (bundled) -->
+<script src="/static/js/portal_bundle.js"></script>
+</body>
+</html>

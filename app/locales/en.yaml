@@ -1,0 +1,120 @@
+# TudouClaw English locale
+# Mirror of zh-CN.yaml; keep keys in sync
+
+common:
+  ok: "OK"
+  cancel: "Cancel"
+  save: "Save"
+  delete: "Delete"
+  edit: "Edit"
+  loading: "Loading..."
+  unknown: "Unknown"
+  enabled: "Enabled"
+  disabled: "Disabled"
+  ready: "Ready"
+  not_ready: "Not Ready"
+  pending: "Pending"
+
+skills:
+  module_title: "Skill Library"
+  module_description: "Capability packs assignable to agents, depending on underlying MCP channels"
+  install: "Install Skill"
+  uninstall: "Uninstall"
+  install_from_file: "Import from File"
+  install_from_url: "Install from URL"
+  grant_to_agent: "Grant to Agent"
+  revoke_from_agent: "Revoke"
+  invoke: "Invoke"
+  test_run: "Test Run"
+
+  status:
+    ready: "Ready"
+    needs_dependencies: "Missing Dependencies"
+    error: "Error"
+    disabled: "Disabled"
+
+  fields:
+    name: "Name"
+    version: "Version"
+    description: "Description"
+    author: "Author"
+    runtime: "Runtime"
+    triggers: "Triggers"
+    inputs: "Inputs"
+    outputs: "Outputs"
+    depends_on_mcp: "MCP Dependencies"
+    depends_on_llm: "LLM Dependencies"
+    granted_agents: "Granted Agents"
+    sensitive: "Sensitive"
+
+  errors:
+    manifest_invalid: "Invalid manifest: {reason}"
+    manifest_missing_field: "Manifest missing required field: {field}"
+    manifest_unsupported_runtime: "Unsupported runtime: {runtime}"
+    not_found: "Skill not found: {id}"
+    already_installed: "Skill already installed: {id}"
+    dependency_missing: "Missing MCP dependency: {mcp_id}"
+    dependency_tool_missing: "MCP {mcp_id} missing tool: {tool}"
+    not_granted: "Agent {agent_id} not granted skill {skill_id}"
+    forbidden_import: "Skill code contains forbidden import: {module}"
+    forbidden_io: "Skill code contains forbidden IO operation"
+    hardcoded_credential: "Skill code hardcodes credential '{name}' at line {line}; read it via ctx.env('...') (os.environ is blocked)"
+    forbidden_env_access: "Skill code accesses '{name}' at line {line}; use ctx.env('KEY') instead (keys must be declared in manifest.env_vars)"
+    runtime_error: "Skill runtime error: {error}"
+    approval_denied: "Call denied by approval policy"
+    approval_pending: "Call queued for approval"
+
+  install_success: "Skill {name} installed"
+  uninstall_success: "Skill {name} uninstalled"
+  granted_success: "Skill {skill} granted to {agent}"
+  revoked_success: "Skill {skill} revoked from {agent}"
+
+  prompt_injection_header: "You have the following skills (invoke via skill_call)"
+  prompt_injection_item: "- {name}: {description} (triggers: {triggers})"
+
+mcp:
+  module_title: "MCP Servers"
+  module_description: "Underlying connection and credential configuration (admin only)"
+  status_online: "Online"
+  status_offline: "Offline"
+
+approval:
+  module_title: "Tools & Approvals"
+  policy_tab: "Approval Policy"
+  queue_tab: "Pending Queue"
+  history_tab: "History"
+
+  escalate:
+    by_skill: "Escalate by Skill"
+    by_tool: "Escalate by MCP Tool"
+    by_arg_pattern: "Escalate by Arg Pattern"
+    by_role: "Escalate by Agent Role"
+    by_time: "Escalate by Time Window"
+    by_frequency: "Escalate by Call Frequency"
+
+  decision:
+    approve: "Approve"
+    deny: "Deny"
+    pending: "Pending"
+
+projects:
+  module_title: "Projects"
+  paused: "Paused"
+  active: "Active"
+  completed: "Completed"
+
+agents:
+  module_title: "Agents"
+  granted_skills: "Granted Skills"
+  no_skills: "No skills granted yet"
+
+nav:
+  workspace: "Workspace"
+  projects: "Projects"
+  agents: "Agents"
+  knowledge_memory: "Knowledge & Memory"
+  roles_skills: "Roles & Skills"
+  tools_approvals: "Tools & Approvals"
+  integrations: "Integrations"
+  system_settings: "System Settings"
+  admin: "Admin"

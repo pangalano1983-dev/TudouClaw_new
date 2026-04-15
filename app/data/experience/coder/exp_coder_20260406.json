@@ -1,0 +1,58 @@
+[
+ {
+  "id": "DEV-001",
+  "exp_type": "retrospective",
+  "source": "编码规范复盘",
+  "scene": "开发工程师编写或修改代码时",
+  "core_knowledge": "所有外部输入必须校验，所有异常必须处理，不要信任任何外部数据",
+  "action_rules": [
+   "每个函数入口添加参数校验",
+   "使用try-except包裹外部调用",
+   "写完代码先自测3个异常场景"
+  ],
+  "taboo_rules": [
+   "禁止直接信任外部输入",
+   "禁止空的except块"
+  ],
+  "priority": "high",
+  "success_count": 0,
+  "fail_count": 0,
+  "consecutive_fails": 0,
+  "is_valid": true,
+  "role": "coder",
+  "tags": [
+   "coding",
+   "validation"
+  ],
+  "created_at": 1775500228.543623,
+  "updated_at": 1775500228.543624
+ },
+ {
+  "id": "DEV-002",
+  "exp_type": "active_learning",
+  "source": "代码质量方法论",
+  "scene": "开发工程师重构或优化代码时",
+  "core_knowledge": "单一职责原则：每个函数只做一件事，每个模块只负责一个领域",
+  "action_rules": [
+   "函数不超过50行",
+   "提取重复代码为公共函数",
+   "添加清晰的注释说明'为什么'而非'做什么'"
+  ],
+  "taboo_rules": [
+   "禁止一个函数做超过3件事",
+   "禁止复制粘贴代码"
+  ],
+  "priority": "medium",
+  "success_count": 0,
+  "fail_count": 0,
+  "consecutive_fails": 0,
+  "is_valid": true,
+  "role": "coder",
+  "tags": [
+   "refactor",
+   "quality"
+  ],
+  "created_at": 1775500228.546282,
+  "updated_at": 1775500228.546282
+ }
+]

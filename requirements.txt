@@ -1,0 +1,50 @@
+# ============================================================
+# TudouClaw (土豆爪) — Multi-Agent AI Assistant Platform
+# Python >= 3.10 required
+#
+# Install:  pip install -r requirements.txt
+# Quick:    python -m app portal --port 9090 --secret mykey123
+# ============================================================
+
+# ── Core (required) ──────────────────────────────────────────
+requests>=2.31,<3.0          # HTTP client for LLM API calls, inter-node communication
+
+# ── Optional: Web Screenshot ─────────────────────────────────
+# Uncomment if you want agents to take web page screenshots.
+# After pip install, run: playwright install chromium
+# playwright>=1.40
+
+# ── Optional: Enhanced capabilities ──────────────────────────
+# Uncomment the lines you need:
+
+# Pillow>=10.0                # Image processing (resize, crop, format conversion)
+pymupdf>=1.23                 # PDF text extraction and manipulation
+# openpyxl>=3.1               # Excel (.xlsx) read/write
+python-docx>=1.0              # Word (.docx) read/write
+pdfplumber>=0.10              # PDF table extraction (alternative to pymupdf)
+beautifulsoup4>=4.12          # Better HTML parsing for web_fetch
+lxml>=5.0                     # Fast XML/HTML parser (used by beautifulsoup4)
+
+# ── Optional: Database drivers ───────────────────────────────
+# Uncomment if agents need direct database access:
+
+# pymysql>=1.1                # MySQL / MariaDB
+# psycopg2-binary>=2.9        # PostgreSQL
+# redis>=5.0                  # Redis
+
+# ── FastAPI Backend (frontend-backend separation) ────────────
+fastapi>=0.115,<1.0           # ASGI web framework
+uvicorn[standard]>=0.27       # ASGI server with uvloop & httptools
+pydantic>=2.5,<3.0            # Data validation & serialization (FastAPI core)
+python-jose[cryptography]>=3.3 # JWT token encode/decode
+passlib[bcrypt]>=1.7          # Password hashing (bcrypt backend)
+
+# ── Optional: MCP server transports ─────────────────────────
+# websockets>=12.0            # WebSocket-based MCP transport
+# sse-starlette>=1.6          # SSE transport for MCP (requires starlette)
+
+# ── Development & Testing ────────────────────────────────────
+# pytest>=8.0
+# pytest-asyncio>=0.23
+# httpx>=0.27                 # Async HTTP client for tests
+# ruff>=0.3                   # Linter + formatter

@@ -1,0 +1,30 @@
+[
+ {
+  "id": "CTO-001",
+  "exp_type": "active_learning",
+  "source": "技术选型最佳实践",
+  "scene": "CTO做架构决策或技术选型时",
+  "core_knowledge": "技术选型优先考虑团队熟悉度>社区活跃度>性能，避免过度设计",
+  "action_rules": [
+   "选型前做至少2个备选方案的POC对比",
+   "考虑团队学习成本和维护成本",
+   "写ADR记录决策过程和原因"
+  ],
+  "taboo_rules": [
+   "禁止仅因为'新'就采用未经验证的技术",
+   "禁止没有ADR记录就做技术决策"
+  ],
+  "priority": "high",
+  "success_count": 0,
+  "fail_count": 0,
+  "consecutive_fails": 0,
+  "is_valid": true,
+  "role": "cto",
+  "tags": [
+   "architecture",
+   "tech-selection"
+  ],
+  "created_at": 1775548477.277646,
+  "updated_at": 1775548477.277648
+ }
+]

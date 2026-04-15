@@ -1,0 +1,38 @@
+<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <!-- Body -->
+  <rect x="20" y="32" width="24" height="20" fill="#9370DB"/>
+  <rect x="16" y="28" width="32" height="8" fill="#9370DB"/>
+
+  <!-- Head -->
+  <rect x="18" y="12" width="28" height="20" fill="#9370DB"/>
+
+  <!-- Magnifying glass eye (Reviewer detail) -->
+  <!-- Large eye circle outer -->
+  <rect x="28" y="16" width="2" height="2" fill="#000"/>
+  <rect x="26" y="18" width="6" height="2" fill="#000"/>
+  <rect x="24" y="20" width="2" height="2" fill="#000"/>
+  <rect x="30" y="20" width="2" height="2" fill="#000"/>
+  <rect x="26" y="22" width="6" height="2" fill="#000"/>
+  <!-- Magnifying glass handle -->
+  <rect x="32" y="24" width="2" height="4" fill="#FFD700"/>
+
+  <!-- Other eye -->
+  <rect x="40" y="18" width="2" height="2" fill="#000"/>
+
+  <!-- Mouth -->
+  <rect x="24" y="26" width="2" height="2" fill="#000"/>
+  <rect x="26" y="26" width="2" height="2" fill="#000"/>
+  <rect x="28" y="26" width="2" height="2" fill="#000"/>
+
+  <!-- Arms -->
+  <rect x="10" y="34" width="8" height="6" fill="#9370DB"/>
+  <rect x="46" y="34" width="8" height="6" fill="#9370DB"/>
+
+  <!-- Legs -->
+  <rect x="22" y="52" width="4" height="8" fill="#9370DB"/>
+  <rect x="32" y="52" width="4" height="8" fill="#9370DB"/>
+
+  <!-- Feet -->
+  <rect x="20" y="60" width="8" height="2" fill="#8A2BE2"/>
+  <rect x="32" y="60" width="8" height="2" fill="#8A2BE2"/>
+</svg>

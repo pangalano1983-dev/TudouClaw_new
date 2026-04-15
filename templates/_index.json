@@ -1,0 +1,920 @@
+{
+  "templates": [
+    {
+      "id": "product_design",
+      "name": "产品设计模版 (Product Design)",
+      "filename": "product_design.md",
+      "description": "需求分析、用户故事地图、PRD 结构、功能优先级划分、线框图规划和接收标准",
+      "roles": [
+        "Product Manager",
+        "Business Analyst",
+        "Designer"
+      ],
+      "tags": [
+        "product-design",
+        "requirements",
+        "prd",
+        "user-stories"
+      ],
+      "category": "Product Management",
+      "created_at": 1775315077.6877193,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "market_research",
+      "name": "市场调查模版 (Market Research)",
+      "filename": "market_research.md",
+      "description": "市场规模评估 (TAM/SAM/SOM)、竞争对手分析、SWOT 分析、用户研究、趋势分析和定价策略",
+      "roles": [
+        "Business Analyst",
+        "Product Manager",
+        "Market Researcher"
+      ],
+      "tags": [
+        "market-research",
+        "competitive-analysis",
+        "swot",
+        "pricing-strategy"
+      ],
+      "category": "Market Intelligence",
+      "created_at": 1775315077.6877265,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "code_review",
+      "name": "代码审查模版 (Code Review)",
+      "filename": "code_review.md",
+      "description": "安全检查、性能分析、代码质量指标、SOLID 原则、错误处理和测试覆盖评估",
+      "roles": [
+        "Code Reviewer",
+        "QA Engineer",
+        "Senior Developer"
+      ],
+      "tags": [
+        "code-review",
+        "quality-assurance",
+        "testing",
+        "best-practices"
+      ],
+      "category": "Quality Assurance",
+      "created_at": 1775315077.6877294,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "architecture_design",
+      "name": "架构设计模版 (Architecture Design)",
+      "filename": "architecture_design.md",
+      "description": "系统设计过程、C4 模型、可扩展性分析、技术选择标准、权衡分析和非功能需求检查",
+      "roles": [
+        "Architect",
+        "Tech Lead",
+        "System Designer"
+      ],
+      "tags": [
+        "architecture",
+        "system-design",
+        "scalability",
+        "technology-stack"
+      ],
+      "category": "Technical Design",
+      "created_at": 1775315077.687732,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "security_audit",
+      "name": "安全审计模版 (Security Audit)",
+      "filename": "security_audit.md",
+      "description": "OWASP Top 10 核查清单、漏洞评估、渗透测试计划、合规性检查和修复计划",
+      "roles": [
+        "Security Officer",
+        "Penetration Tester",
+        "Security Architect"
+      ],
+      "tags": [
+        "security",
+        "vulnerability-assessment",
+        "compliance",
+        "penetration-testing"
+      ],
+      "category": "Security & Compliance",
+      "created_at": 1775315077.6877341,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "devops_deployment",
+      "name": "DevOps 部署模版 (DevOps & Deployment)",
+      "filename": "devops_deployment.md",
+      "description": "CI/CD 管道设计、容器化检查清单、监控设置、事件响应手册和回滚策略",
+      "roles": [
+        "DevOps Engineer",
+        "Release Manager",
+        "Infrastructure Engineer"
+      ],
+      "tags": [
+        "devops",
+        "ci-cd",
+        "deployment",
+        "infrastructure",
+        "monitoring"
+      ],
+      "category": "Operations",
+      "created_at": 1775315077.6877363,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "api_design",
+      "name": "API 设计模版 (API Design)",
+      "filename": "api_design.md",
+      "description": "RESTful 设计原则、端点命名规范、版本控制、错误处理、速率限制和文档要求",
+      "roles": [
+        "API Designer",
+        "Backend Developer",
+        "Technical Architect"
+      ],
+      "tags": [
+        "api-design",
+        "rest",
+        "api-documentation",
+        "versioning"
+      ],
+      "category": "Technical Design",
+      "created_at": 1775315077.687739,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "testing_strategy",
+      "name": "测试策略模版 (Testing Strategy)",
+      "filename": "testing_strategy.md",
+      "description": "测试金字塔、单元/集成/E2E 测试策略、边界值分析、性能测试和测试执行计划",
+      "roles": [
+        "QA Engineer",
+        "Test Automation Engineer",
+        "Quality Lead"
+      ],
+      "tags": [
+        "testing",
+        "qa",
+        "test-automation",
+        "quality-assurance"
+      ],
+      "category": "Quality Assurance",
+      "created_at": 1775315077.6877413,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "technical_writing",
+      "name": "技术文档模版 (Technical Writing)",
+      "filename": "technical_writing.md",
+      "description": "文档结构、README 模版、API 文档、变更日志、安装指南和文档维护",
+      "roles": [
+        "Technical Writer",
+        "Developer",
+        "Documentation Manager"
+      ],
+      "tags": [
+        "documentation",
+        "technical-writing",
+        "api-docs",
+        "readme"
+      ],
+      "category": "Documentation",
+      "created_at": 1775315077.6877434,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "data_analysis",
+      "name": "数据分析模版 (Data Analysis)",
+      "filename": "data_analysis.md",
+      "description": "数据收集方法、统计分析、数据可视化最佳实践、洞察报告和 A/B 测试设计",
+      "roles": [
+        "Data Analyst",
+        "Product Analyst",
+        "Business Analyst"
+      ],
+      "tags": [
+        "data-analysis",
+        "analytics",
+        "a-b-testing",
+        "insights"
+      ],
+      "category": "Analytics",
+      "created_at": 1775315077.6877456,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "project_management",
+      "name": "项目管理模版 (Project Management)",
+      "filename": "project_management.md",
+      "description": "项目启动、冲刺规划、风险管理、利益相关者沟通、里程碑跟踪和项目回顾",
+      "roles": [
+        "Project Manager",
+        "Scrum Master",
+        "Product Owner"
+      ],
+      "tags": [
+        "project-management",
+        "agile",
+        "sprint",
+        "stakeholder-management"
+      ],
+      "category": "Project Management",
+      "created_at": 1775315077.6877472,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "frontend_development",
+      "name": "前端开发模版 (Frontend Development)",
+      "filename": "frontend_development.md",
+      "description": "组件设计、状态管理、性能优化、可访问性、响应式设计和前端测试",
+      "roles": [
+        "Frontend Developer",
+        "UI Developer",
+        "Frontend Architect"
+      ],
+      "tags": [
+        "frontend",
+        "ui-development",
+        "component-design",
+        "performance"
+      ],
+      "category": "Development",
+      "created_at": 1775315077.6877506,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "backend_development",
+      "name": "后端开发模版 (Backend Development)",
+      "filename": "backend_development.md",
+      "description": "数据库设计、API 实现、身份验证、缓存策略、错误处理和后端检查清单",
+      "roles": [
+        "Backend Developer",
+        "Database Engineer",
+        "System Designer"
+      ],
+      "tags": [
+        "backend",
+        "database",
+        "api-implementation",
+        "caching"
+      ],
+      "category": "Development",
+      "created_at": 1775315077.6877525,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "troubleshooting",
+      "name": "故障排查模版 (Troubleshooting)",
+      "filename": "troubleshooting.md",
+      "description": "根本原因分析、5Why 方法、分层诊断、常见问题诊断、性能问题和恢复清单",
+      "roles": [
+        "DevOps Engineer",
+        "SRE",
+        "Support Engineer",
+        "Technical Lead"
+      ],
+      "tags": [
+        "troubleshooting",
+        "debugging",
+        "root-cause-analysis",
+        "incident-management"
+      ],
+      "category": "Operations",
+      "created_at": 1775315077.6877544,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "enhanced_customer_support",
+      "name": "客户支持增强提示词 (Enhanced Customer Support)",
+      "filename": "enhanced_customer_support.md",
+      "description": "客户支持增强提示词 (Enhanced Customer Support)",
+      "roles": [
+        "Customer Support Manager",
+        "Support Engineer",
+        "Technical Support",
+        "Service Desk Manager",
+        "Customer Success Manager"
+      ],
+      "tags": [
+        "customer-support",
+        "service",
+        "helpdesk",
+        "ticket",
+        "satisfaction",
+        "客服",
+        "客户支持",
+        "工单",
+        "满意度",
+        "SLA"
+      ],
+      "category": "Enhanced Intelligence",
+      "created_at": 1775316628.19505,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "enhanced_data_engineer",
+      "name": "数据工程师增强提示词 (Enhanced Data Engineer)",
+      "filename": "enhanced_data_engineer.md",
+      "description": "数据工程师增强提示词 (Enhanced Data Engineer)",
+      "roles": [
+        "Data Engineer",
+        "Data Architect",
+        "Analytics Engineer",
+        "BI Engineer",
+        "Data Platform Engineer"
+      ],
+      "tags": [
+        "data-engineering",
+        "etl",
+        "data-pipeline",
+        "warehouse",
+        "analytics",
+        "数据工程",
+        "数据仓库",
+        "ETL",
+        "数据治理",
+        "大数据"
+      ],
+      "category": "Enhanced Intelligence",
+      "created_at": 1775316628.19535,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "enhanced_designer",
+      "name": "设计师增强提示词 (Enhanced Designer)",
+      "filename": "enhanced_designer.md",
+      "description": "设计师增强提示词 (Enhanced Designer)",
+      "roles": [
+        "UX Designer",
+        "UI Designer",
+        "Interaction Designer",
+        "Product Designer",
+        "Visual Designer"
+      ],
+      "tags": [
+        "design",
+        "ui",
+        "ux",
+        "interaction",
+        "visual",
+        "prototype",
+        "设计",
+        "交互",
+        "视觉",
+        "原型",
+        "用户体验"
+      ],
+      "category": "Enhanced Intelligence",
+      "created_at": 1775316628.1955736,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "enhanced_developer",
+      "name": "开发工程师增强提示词 (Enhanced Developer)",
+      "filename": "enhanced_developer.md",
+      "description": "开发工程师增强提示词 (Enhanced Developer)",
+      "roles": [
+        "Developer",
+        "Senior Developer",
+        "Tech Lead",
+        "Full-Stack Developer",
+        "Software Engineer"
+      ],
+      "tags": [
+        "developer",
+        "coding",
+        "programming",
+        "architecture",
+        "code-quality",
+        "debug",
+        "开发",
+        "编程",
+        "代码",
+        "架构",
+        "调试",
+        "重构"
+      ],
+      "category": "Enhanced Intelligence",
+      "created_at": 1775316628.1958032,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "enhanced_devops",
+      "name": "运维工程师增强提示词 (Enhanced DevOps/SRE Engineer)",
+      "filename": "enhanced_devops.md",
+      "description": "运维工程师增强提示词 (Enhanced DevOps/SRE Engineer)",
+      "roles": [
+        "DevOps Engineer",
+        "SRE",
+        "Infrastructure Engineer",
+        "Platform Engineer",
+        "Release Engineer"
+      ],
+      "tags": [
+        "devops",
+        "sre",
+        "infrastructure",
+        "monitoring",
+        "deployment",
+        "ci-cd",
+        "运维",
+        "部署",
+        "监控",
+        "容器",
+        "云原生"
+      ],
+      "category": "Enhanced Intelligence",
+      "created_at": 1775316628.1961222,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "enhanced_finance",
+      "name": "财务/财经分析师增强提示词 (Enhanced Finance Analyst)",
+      "filename": "enhanced_finance.md",
+      "description": "财务/财经分析师增强提示词 (Enhanced Finance Analyst)",
+      "roles": [
+        "Finance Analyst",
+        "CFO",
+        "Financial Controller",
+        "Accountant",
+        "Investment Analyst"
+      ],
+      "tags": [
+        "finance",
+        "accounting",
+        "budget",
+        "financial-analysis",
+        "财务",
+        "财经",
+        "预算",
+        "成本",
+        "利润",
+        "现金流",
+        "投资"
+      ],
+      "category": "Enhanced Intelligence",
+      "created_at": 1775316628.1963975,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "enhanced_hr",
+      "name": "人力资源增强提示词 (Enhanced HR Manager)",
+      "filename": "enhanced_hr.md",
+      "description": "人力资源增强提示词 (Enhanced HR Manager)",
+      "roles": [
+        "HR Manager",
+        "HRBP",
+        "Talent Acquisition",
+        "People Operations",
+        "HR Director",
+        "Chief People Officer"
+      ],
+      "tags": [
+        "hr",
+        "human-resources",
+        "recruitment",
+        "talent",
+        "culture",
+        "人力资源",
+        "招聘",
+        "绩效",
+        "培训",
+        "组织",
+        "文化"
+      ],
+      "category": "Enhanced Intelligence",
+      "created_at": 1775316628.1966343,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "enhanced_legal",
+      "name": "法务/合规增强提示词 (Enhanced Legal & Compliance)",
+      "filename": "enhanced_legal.md",
+      "description": "法务/合规增强提示词 (Enhanced Legal & Compliance)",
+      "roles": [
+        "Legal Counsel",
+        "Compliance Officer",
+        "Legal Advisor",
+        "Contract Manager",
+        "IP Attorney",
+        "Risk Manager"
+      ],
+      "tags": [
+        "legal",
+        "compliance",
+        "contract",
+        "regulation",
+        "risk",
+        "法务",
+        "合规",
+        "合同",
+        "法规",
+        "知识产权",
+        "风控"
+      ],
+      "category": "Enhanced Intelligence",
+      "created_at": 1775316628.1968632,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "enhanced_market_analyst",
+      "name": "市场分析师增强提示词 (Enhanced Market Analyst)",
+      "filename": "enhanced_market_analyst.md",
+      "description": "市场分析师增强提示词 (Enhanced Market Analyst)",
+      "roles": [
+        "Market Analyst",
+        "Market Researcher",
+        "Business Analyst",
+        "Growth Hacker"
+      ],
+      "tags": [
+        "market-analyst",
+        "market-research",
+        "competitive-analysis",
+        "trend-analysis",
+        "user-research",
+        "insight",
+        "市场",
+        "调研",
+        "竞品",
+        "趋势"
+      ],
+      "category": "Enhanced Intelligence",
+      "created_at": 1775316628.1970866,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "enhanced_operations",
+      "name": "运营增强提示词 (Enhanced Operations Manager)",
+      "filename": "enhanced_operations.md",
+      "description": "运营增强提示词 (Enhanced Operations Manager)",
+      "roles": [
+        "Operations Manager",
+        "Growth Hacker",
+        "Content Operations",
+        "User Operations",
+        "Community Manager"
+      ],
+      "tags": [
+        "operations",
+        "growth",
+        "user-growth",
+        "retention",
+        "content",
+        "运营",
+        "增长",
+        "留存",
+        "转化",
+        "活跃",
+        "内容运营"
+      ],
+      "category": "Enhanced Intelligence",
+      "created_at": 1775316628.197289,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "enhanced_pr_marketing",
+      "name": "公关/品牌营销增强提示词 (Enhanced PR & Brand Marketing)",
+      "filename": "enhanced_pr_marketing.md",
+      "description": "公关/品牌营销增强提示词 (Enhanced PR & Brand Marketing)",
+      "roles": [
+        "PR Manager",
+        "Brand Manager",
+        "Marketing Director",
+        "Communications Director",
+        "Social Media Manager",
+        "Content Marketing Manager"
+      ],
+      "tags": [
+        "pr",
+        "marketing",
+        "brand",
+        "communication",
+        "media",
+        "公关",
+        "品牌",
+        "营销",
+        "传播",
+        "媒体",
+        "危机公关"
+      ],
+      "category": "Enhanced Intelligence",
+      "created_at": 1775316628.1975536,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "enhanced_product_manager",
+      "name": "产品经理增强提示词 (Enhanced Product Manager)",
+      "filename": "enhanced_product_manager.md",
+      "description": "产品经理增强提示词 (Enhanced Product Manager)",
+      "roles": [
+        "Product Manager",
+        "Product Owner",
+        "Business Analyst",
+        "Product Lead"
+      ],
+      "tags": [
+        "product-manager",
+        "requirements",
+        "prd",
+        "user-stories",
+        "roadmap",
+        "产品",
+        "需求",
+        "规划",
+        "用户故事",
+        "优先级"
+      ],
+      "category": "Enhanced Intelligence",
+      "created_at": 1775316628.1977544,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "enhanced_project_director",
+      "name": "项目总监/PMO增强提示词 (Enhanced Project Director/PMO)",
+      "filename": "enhanced_project_director.md",
+      "description": "项目总监/PMO增强提示词 (Enhanced Project Director/PMO)",
+      "roles": [
+        "Project Director",
+        "PMO Director",
+        "Program Manager",
+        "Portfolio Manager",
+        "Delivery Manager"
+      ],
+      "tags": [
+        "project-management",
+        "pmo",
+        "program",
+        "portfolio",
+        "risk",
+        "项目管理",
+        "PMO",
+        "项目群",
+        "风险",
+        "资源"
+      ],
+      "category": "Enhanced Intelligence",
+      "created_at": 1775316628.197972,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "enhanced_qa_engineer",
+      "name": "测试工程师增强提示词 (Enhanced QA Engineer)",
+      "filename": "enhanced_qa_engineer.md",
+      "description": "测试工程师增强提示词 (Enhanced QA Engineer)",
+      "roles": [
+        "QA Engineer",
+        "Test Automation Engineer",
+        "Quality Lead",
+        "SDET"
+      ],
+      "tags": [
+        "qa",
+        "testing",
+        "automation",
+        "quality",
+        "test-strategy",
+        "bug",
+        "测试",
+        "质量",
+        "自动化",
+        "用例"
+      ],
+      "category": "Enhanced Intelligence",
+      "created_at": 1775316628.1981688,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "enhanced_researcher",
+      "name": "研究员/技术研究增强提示词 (Enhanced Technical Researcher)",
+      "filename": "enhanced_researcher.md",
+      "description": "研究员/技术研究增强提示词 (Enhanced Technical Researcher)",
+      "roles": [
+        "Technical Researcher",
+        "R&D Engineer",
+        "Innovation Lead",
+        "Research Scientist",
+        "Technology Analyst"
+      ],
+      "tags": [
+        "research",
+        "technical-research",
+        "innovation",
+        "poc",
+        "benchmark",
+        "研究",
+        "技术调研",
+        "创新",
+        "原型",
+        "评估"
+      ],
+      "category": "Enhanced Intelligence",
+      "created_at": 1775316628.1983652,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "enhanced_sales",
+      "name": "销售/商务增强提示词 (Enhanced Sales & Business Development)",
+      "filename": "enhanced_sales.md",
+      "description": "销售/商务增强提示词 (Enhanced Sales & Business Development)",
+      "roles": [
+        "Sales Manager",
+        "Business Development",
+        "Account Executive",
+        "Sales Director",
+        "Partnership Manager",
+        "Channel Manager"
+      ],
+      "tags": [
+        "sales",
+        "business-development",
+        "crm",
+        "negotiation",
+        "pipeline",
+        "销售",
+        "商务",
+        "客户",
+        "谈判",
+        "成交",
+        "渠道"
+      ],
+      "category": "Enhanced Intelligence",
+      "created_at": 1775316628.1986873,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "enhanced_security_officer",
+      "name": "信息安全官增强提示词 (Enhanced Security Officer / CISO)",
+      "filename": "enhanced_security_officer.md",
+      "description": "信息安全官增强提示词 (Enhanced Security Officer / CISO)",
+      "roles": [
+        "CISO",
+        "Security Officer",
+        "Security Analyst",
+        "Penetration Tester",
+        "Security Architect",
+        "SOC Analyst"
+      ],
+      "tags": [
+        "security",
+        "cybersecurity",
+        "infosec",
+        "vulnerability",
+        "compliance",
+        "安全",
+        "信息安全",
+        "漏洞",
+        "渗透",
+        "等保"
+      ],
+      "category": "Enhanced Intelligence",
+      "created_at": 1775316628.1989608,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "enhanced_strategy",
+      "name": "战略分析师增强提示词 (Enhanced Strategy Analyst)",
+      "filename": "enhanced_strategy.md",
+      "description": "战略分析师增强提示词 (Enhanced Strategy Analyst)",
+      "roles": [
+        "Strategy Analyst",
+        "Strategy Director",
+        "Business Consultant",
+        "CEO Advisor",
+        "Management Consultant"
+      ],
+      "tags": [
+        "strategy",
+        "business-strategy",
+        "competitive-strategy",
+        "战略",
+        "商业模式",
+        "竞争战略",
+        "增长战略",
+        "并购"
+      ],
+      "category": "Enhanced Intelligence",
+      "created_at": 1775316628.1992097,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "enhanced_supply_chain",
+      "name": "供应链管理增强提示词 (Enhanced Supply Chain Manager)",
+      "filename": "enhanced_supply_chain.md",
+      "description": "供应链管理增强提示词 (Enhanced Supply Chain Manager)",
+      "roles": [
+        "Supply Chain Manager",
+        "Procurement Manager",
+        "Logistics Manager",
+        "Inventory Planner",
+        "Sourcing Specialist"
+      ],
+      "tags": [
+        "supply-chain",
+        "procurement",
+        "logistics",
+        "inventory",
+        "供应链",
+        "采购",
+        "物流",
+        "库存",
+        "供应商",
+        "成本优化"
+      ],
+      "category": "Enhanced Intelligence",
+      "created_at": 1775316628.199444,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "enhanced_trainer",
+      "name": "培训/教育增强提示词 (Enhanced Training & Education)",
+      "filename": "enhanced_trainer.md",
+      "description": "培训/教育增强提示词 (Enhanced Training & Education)",
+      "roles": [
+        "Training Manager",
+        "Instructional Designer",
+        "L&D Manager",
+        "Corporate Trainer",
+        "Onboarding Specialist"
+      ],
+      "tags": [
+        "training",
+        "education",
+        "learning",
+        "courseware",
+        "onboarding",
+        "培训",
+        "教育",
+        "课程",
+        "入职",
+        "学习发展"
+      ],
+      "category": "Enhanced Intelligence",
+      "created_at": 1775316628.1997185,
+      "created_by": "system",
+      "enabled": true
+    },
+    {
+      "id": "enhanced_video_producer",
+      "name": "视频制作工程师增强提示词 (Enhanced Video Production Engineer)",
+      "filename": "enhanced_video_producer.md",
+      "description": "视频制作工程师增强提示词 (Enhanced Video Production Engineer)",
+      "roles": [
+        "Video Producer",
+        "Video Editor",
+        "Motion Graphics Designer",
+        "Streaming Engineer",
+        "Post-Production Specialist"
+      ],
+      "tags": [
+        "video",
+        "production",
+        "editing",
+        "motion-graphics",
+        "streaming",
+        "视频",
+        "制作",
+        "剪辑",
+        "特效",
+        "直播",
+        "后期"
+      ],
+      "category": "Enhanced Intelligence",
+      "created_at": 1775316628.2001216,
+      "created_by": "system",
+      "enabled": true
+    }
+  ]
+}

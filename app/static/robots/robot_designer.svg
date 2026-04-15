@@ -1,0 +1,39 @@
+<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <!-- Body -->
+  <rect x="20" y="32" width="24" height="20" fill="#FF69B4"/>
+  <rect x="16" y="28" width="32" height="8" fill="#FF69B4"/>
+
+  <!-- Head -->
+  <rect x="18" y="12" width="28" height="20" fill="#FF69B4"/>
+
+  <!-- Eyes -->
+  <rect x="22" y="18" width="2" height="2" fill="#000"/>
+  <rect x="30" y="18" width="2" height="2" fill="#000"/>
+
+  <!-- Mouth -->
+  <rect x="24" y="24" width="2" height="2" fill="#000"/>
+  <rect x="26" y="24" width="2" height="2" fill="#000"/>
+  <rect x="28" y="24" width="2" height="2" fill="#000"/>
+
+  <!-- Paintbrush on chest (Designer detail) -->
+  <!-- Brush handle -->
+  <rect x="28" y="36" width="2" height="6" fill="#8B4513"/>
+  <!-- Brush bristles -->
+  <rect x="26" y="34" width="6" height="2" fill="#FFD700"/>
+  <rect x="24" y="32" width="10" height="2" fill="#FF1493"/>
+  <!-- Paint drops -->
+  <rect x="22" y="38" width="2" height="2" fill="#00BFFF"/>
+  <rect x="34" y="38" width="2" height="2" fill="#32CD32"/>
+
+  <!-- Arms -->
+  <rect x="10" y="34" width="8" height="6" fill="#FF69B4"/>
+  <rect x="46" y="34" width="8" height="6" fill="#FF69B4"/>
+
+  <!-- Legs -->
+  <rect x="22" y="52" width="4" height="8" fill="#FF69B4"/>
+  <rect x="32" y="52" width="4" height="8" fill="#FF69B4"/>
+
+  <!-- Feet -->
+  <rect x="20" y="60" width="8" height="2" fill="#FF1493"/>
+  <rect x="32" y="60" width="8" height="2" fill="#FF1493"/>
+</svg>
