@@ -554,7 +554,7 @@ class SkillStore:
                 shutil.rmtree(install_dir)
             shutil.copytree(entry.catalog_path, install_dir)
             # Fabricate a minimal manifest so registry._save + list_all stay consistent.
-            from . import skills as _sk
+            from . import engine as _sk
             manifest = _sk.SkillManifest(
                 id=f"{entry.name}@{entry.version}",
                 name=entry.name,

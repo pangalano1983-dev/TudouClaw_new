@@ -310,17 +310,43 @@ def parse_manifest(manifest_dict: dict, install_dir: str = "") -> SkillManifest:
     desc_str, desc_i18n = _parse_description(manifest_dict.get("description"))
 
     deps = manifest_dict.get("depends_on", {}) or {}
-    mcp_deps = [MCPDependency.from_dict(d) for d in (deps.get("mcp", []) or [])]
-    llm_deps = [LLMDependency.from_dict(d) for d in (deps.get("llm", []) or [])]
+    if isinstance(deps, str):
+        deps = {}
+    raw_mcp = deps.get("mcp", []) or []
+    if isinstance(raw_mcp, str):
+        raw_mcp = [raw_mcp]
+    mcp_deps = []
+    for d in raw_mcp:
+        if isinstance(d, str):
+            mcp_deps.append(MCPDependency(id=d))
+        elif isinstance(d, dict):
+            mcp_deps.append(MCPDependency.from_dict(d))
+    raw_llm = deps.get("llm", []) or []
+    if isinstance(raw_llm, str):
+        raw_llm = [raw_llm]
+    llm_deps = []
+    for d in raw_llm:
+        if isinstance(d, str):
+            llm_deps.append(LLMDependency(capability=d))
+        elif isinstance(d, dict):
+            llm_deps.append(LLMDependency.from_dict(d))
     # 显式拒绝 skill 间依赖（即使 manifest 声明了也忽略并警告）
     if deps.get("skills"):
         logger.warning("Skill manifest declared depends_on.skills which is not allowed; ignoring")
 
-    inputs = [SkillInput.from_dict(i) for i in (manifest_dict.get("inputs", []) or [])]
+    raw_inputs = manifest_dict.get("inputs", []) or []
+    inputs = []
+    for i in raw_inputs:
+        if isinstance(i, dict):
+            inputs.append(SkillInput.from_dict(i))
+        elif isinstance(i, str):
+            inputs.append(SkillInput(name=i))
     outputs = list(manifest_dict.get("outputs", []) or [])
     triggers = list(manifest_dict.get("triggers", []) or [])
 
     hint = manifest_dict.get("hint", {}) or {}
+    if isinstance(hint, str):
+        hint = {}
 
     # env_vars 支持两种写法：
     #   env_vars: [VOLC_ACCESSKEY, VOLC_SECRETKEY]
