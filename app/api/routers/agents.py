@@ -456,6 +456,8 @@ async def update_agent_profile(
                 "multimodal": str(raw_ar.get("multimodal") or "").strip(),
                 "complex_threshold_chars": max(1, _threshold),
             }
+        if "department" in body:
+            agent.department = (body.get("department") or "").strip()
         if "robot_avatar" in body:
             agent.robot_avatar = body["robot_avatar"]
         agent.profile = AgentProfile(

@@ -52,8 +52,8 @@ async function loginAdmin() {
       errEl.textContent = data.detail || data.error || '登录失败';
     } else {
       if(data.session_id) {
-        // Note: HttpOnly cannot be set from JavaScript (server-only). Use secure session attributes.
-        document.cookie = 'td_sess=' + data.session_id + '; path=/; SameSite=Lax; max-age=86400; Secure';
+        var securePart = location.protocol === 'https:' ? '; Secure' : '';
+        document.cookie = 'td_sess=' + data.session_id + '; path=/; SameSite=Lax; max-age=86400' + securePart;
       }
       window.location.href = '/';
     }
@@ -87,8 +87,8 @@ async function login() {
       errEl.textContent = data.detail || data.error || 'Login failed (status ' + resp.status + ')';
     } else {
       if(data.session_id) {
-        // Note: HttpOnly cannot be set from JavaScript (server-only). Use secure session attributes.
-        document.cookie = 'td_sess=' + data.session_id + '; path=/; SameSite=Lax; max-age=86400; Secure';
+        var securePart = location.protocol === 'https:' ? '; Secure' : '';
+        document.cookie = 'td_sess=' + data.session_id + '; path=/; SameSite=Lax; max-age=86400' + securePart;
       }
       window.location.href = '/';
       return;

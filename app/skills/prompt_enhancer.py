@@ -210,16 +210,38 @@ def parse_skill_md(path: str) -> PromptPack | None:
 # BM25 Ranker
 # ---------------------------------------------------------------------------
 
+_BM25_STOPWORDS = frozenset({
+    # URL/web noise — these appear in almost every skill doc and user message
+    "http", "https", "www", "com", "org", "net", "cn", "io", "html", "htm",
+    "url", "api", "json", "xml", "css", "js",
+    # Common filler
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "to", "of",
+    "and", "or", "in", "on", "at", "for", "with", "from", "by", "it", "this",
+    "that", "as", "not", "but", "if", "do", "does", "did", "will", "can",
+    # Chinese filler
+    "的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都", "一",
+    "个", "上", "也", "很", "到", "说", "要", "去", "你", "会", "着",
+    "把", "那", "得", "过", "下", "么", "能", "好", "出", "来",
+})
+
+
 def _tokenize(text: str) -> list[str]:
-    """Simple CJK-aware tokenizer: split on non-alphanumeric, keep CJK chars individually."""
+    """CJK-aware tokenizer: ASCII words + CJK bigrams for better precision."""
     tokens = []
-    # Split ASCII words
+    # Split ASCII words (skip stopwords and single chars)
     for word in re.findall(r"[a-zA-Z0-9_]+", text.lower()):
-        tokens.append(word)
-    # Add individual CJK characters
-    for ch in text:
-        if '\u4e00' <= ch <= '\u9fff':
-            tokens.append(ch)
+        if word not in _BM25_STOPWORDS and len(word) > 1:
+            tokens.append(word)
+    # Extract CJK characters, then generate bigrams for better matching.
+    # Single CJK chars are too ambiguous (e.g. "内" matches everything with "内容").
+    # Bigrams like "内容", "制作", "报告" are much more precise.
+    cjk_chars = [ch for ch in text if '\u4e00' <= ch <= '\u9fff' and ch not in _BM25_STOPWORDS]
+    if len(cjk_chars) >= 2:
+        for i in range(len(cjk_chars) - 1):
+            bigram = cjk_chars[i] + cjk_chars[i + 1]
+            tokens.append(bigram)
+    elif len(cjk_chars) == 1:
+        tokens.append(cjk_chars[0])
     return tokens
 
 
@@ -456,8 +478,17 @@ class PromptPackRegistry:
                     boosted.append((skill_id, score))
             ranked = sorted(boosted, key=lambda x: x[1], reverse=True)
 
+        # Minimum relevance threshold: filter out low-confidence matches.
+        # This prevents injecting unrelated skills when the user query
+        # only accidentally shares a common keyword with a skill doc.
+        # With bigram tokenizer: "打开http://example.com"→2.8, "做Excel表格"→2.1, "写PPTX"→7.5
+        # Use relative threshold: at least 25% of top score, with floor of 2.0
+        top_score = ranked[0][1] if ranked else 0
+        MIN_SCORE = max(2.0, top_score * 0.25)
         results = []
         for skill_id, score in ranked[:top_k]:
+            if score < MIN_SCORE:
+                continue
             record = self.store.get(skill_id)
             if record and record.is_active:
                 results.append(record)

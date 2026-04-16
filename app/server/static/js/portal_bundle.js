@@ -9,27 +9,126 @@ let _adminCtx = { user_id: '', username: '', role: '', display_name: '', agent_i
 let _settingsSubTab = 'providers'; // Current sub-tab inside Settings view
 let _agentsSubTab = null; // Current node tab inside Agents view (null = first node)
 
-// ============ Global soft toast (replaces alert) ============
+// ============ Toast / Confirm / Prompt — zero native popups ============
 (function() {
+  // ── Toast notifications (stacking, right-aligned) ──
+  var _toastId = 0;
+  var ICONS = {success:'check_circle', error:'error', warning:'warning', info:'info'};
+
   window._toast = function(msg, type) {
-    var old = document.getElementById('global-toast');
-    if (old) old.remove();
-    var isErr = type === 'err' || /失败|错误|error|fail|invalid/i.test(msg);
-    var isOk = type === 'ok' || /成功|已|完成|saved|success|✓/i.test(msg);
-    var bg = isErr ? '#ef4444' : isOk ? '#10b981' : '#60a5fa';
+    if (!type) {
+      // Auto-detect type from content
+      if (/失败|错误|error|fail|invalid|出错/i.test(msg)) type = 'error';
+      else if (/成功|已|完成|saved|success|✓|✅/i.test(msg)) type = 'success';
+      else if (/警告|warn|注意/i.test(msg)) type = 'warning';
+      else type = 'info';
+    }
+    var container = document.getElementById('toast-container');
+    if (!container) {
+      container = document.createElement('div');
+      container.id = 'toast-container';
+      document.body.appendChild(container);
+    }
+    var id = 'toast-' + (++_toastId);
     var el = document.createElement('div');
-    el.id = 'global-toast';
-    el.style.cssText = 'position:fixed;top:24px;left:50%;transform:translateX(-50%);z-index:99999;'
-      + 'padding:12px 28px;border-radius:8px;font-size:13px;color:#fff;background:' + bg + ';'
-      + 'box-shadow:0 4px 16px rgba(0,0,0,.3);transition:opacity .4s;opacity:1;max-width:500px;text-align:center;'
-      + 'white-space:pre-line;pointer-events:auto;cursor:pointer';
-    el.textContent = msg;
-    el.onclick = function() { el.remove(); };
-    document.body.appendChild(el);
-    setTimeout(function(){ el.style.opacity = '0'; }, 4000);
-    setTimeout(function(){ el.remove(); }, 4500);
+    el.id = id;
+    el.className = 'toast toast-' + type;
+    el.innerHTML =
+      '<span class="material-symbols-outlined toast-icon">' + (ICONS[type]||'info') + '</span>' +
+      '<span class="toast-msg">' + String(msg).replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</span>' +
+      '<span class="toast-close" onclick="this.parentNode.classList.add(\'removing\');setTimeout(function(){document.getElementById(\''+id+'\')&&document.getElementById(\''+id+'\').remove()},300)">&times;</span>';
+    container.appendChild(el);
+    // Auto-dismiss after 4s
+    setTimeout(function(){
+      if (document.getElementById(id)) {
+        el.classList.add('removing');
+        setTimeout(function(){ el.remove(); }, 300);
+      }
+    }, 4000);
+    // Keep max 5 toasts visible
+    while (container.children.length > 5) container.removeChild(container.firstChild);
   };
+
+  // Override native alert
   window.alert = function(msg) { window._toast(String(msg)); };
+
+  // ── Inline confirm (replaces native confirm()) ──
+  window._confirm = function(message, onYes, onNo) {
+    var overlay = document.createElement('div');
+    overlay.className = 'confirm-overlay';
+    var panel = document.createElement('div');
+    panel.className = 'confirm-panel';
+    panel.innerHTML =
+      '<h4>确认操作</h4>' +
+      '<p>' + String(message).replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</p>' +
+      '<div class="confirm-actions">' +
+        '<button class="btn btn-ghost" id="_confirm-no">取消</button>' +
+        '<button class="btn btn-primary" id="_confirm-yes">确定</button>' +
+      '</div>';
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+
+    // Focus the confirm button
+    panel.querySelector('#_confirm-yes').focus();
+
+    function close(result) {
+      overlay.remove();
+      if (result && onYes) onYes();
+      if (!result && onNo) onNo();
+    }
+    panel.querySelector('#_confirm-yes').onclick = function() { close(true); };
+    panel.querySelector('#_confirm-no').onclick = function() { close(false); };
+    overlay.onclick = function(e) { if (e.target === overlay) close(false); };
+    // ESC to cancel
+    function onKey(e) { if (e.key === 'Escape') { document.removeEventListener('keydown', onKey); close(false); } }
+    document.addEventListener('keydown', onKey);
+  };
+
+  // ── Inline prompt (replaces native prompt()) ──
+  window._prompt = function(message, defaultVal, onOk, onCancel) {
+    var overlay = document.createElement('div');
+    overlay.className = 'confirm-overlay';
+    var panel = document.createElement('div');
+    panel.className = 'confirm-panel prompt-panel';
+    panel.innerHTML =
+      '<h4>' + String(message).replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</h4>' +
+      '<input type="text" id="_prompt-input" value="' + (defaultVal||'').replace(/"/g,'&quot;') + '" />' +
+      '<div class="confirm-actions">' +
+        '<button class="btn btn-ghost" id="_prompt-no">取消</button>' +
+        '<button class="btn btn-primary" id="_prompt-yes">确定</button>' +
+      '</div>';
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+
+    var input = panel.querySelector('#_prompt-input');
+    input.focus();
+    input.select();
+
+    function close(val) {
+      overlay.remove();
+      if (val !== null && onOk) onOk(val);
+      if (val === null && onCancel) onCancel();
+    }
+    panel.querySelector('#_prompt-yes').onclick = function() { close(input.value); };
+    panel.querySelector('#_prompt-no').onclick = function() { close(null); };
+    input.onkeydown = function(e) { if (e.key === 'Enter') close(input.value); };
+    overlay.onclick = function(e) { if (e.target === overlay) close(null); };
+    function onKey(e) { if (e.key === 'Escape') { document.removeEventListener('keydown', onKey); close(null); } }
+    document.addEventListener('keydown', onKey);
+  };
+
+  // ── Override native confirm/prompt with inline panels ──
+  // Returns a Promise so callers can: if (!await confirm('...')) return;
+  window.confirm = function(msg) {
+    return new Promise(function(resolve) {
+      window._confirm(msg, function() { resolve(true); }, function() { resolve(false); });
+    });
+  };
+  window.prompt = function(msg, defaultVal) {
+    return new Promise(function(resolve) {
+      window._prompt(msg, defaultVal, function(val) { resolve(val); }, function() { resolve(null); });
+    });
+  };
 })();
 
 // ============ API helper ============
@@ -651,21 +750,8 @@ function _renderAgentCard(a) {
 // Inline edit an agent's department from the list
 var _DEFAULT_DEPARTMENTS_CACHE = ['管理层','研发','产品','设计','运营','市场','销售','客服','数据','财务','人事','法务'];
 async function editAgentDepartment(agentId, current) {
-  var list = _DEFAULT_DEPARTMENTS_CACHE;
-  var lines = list.map(function(d,i){ return (i+1)+'. '+d + (d===current?' ✓':''); }).join('\n');
-  var hint = '选择部门 (输入编号)，或直接输入新部门名，留空=未分配：\n\n'+lines;
-  var input = prompt(hint, current||'');
-  if (input === null) return;
-  var val = input.trim();
-  var idx = parseInt(val, 10);
-  if (!isNaN(idx) && idx >= 1 && idx <= list.length && String(idx) === val) {
-    val = list[idx-1];
-  }
-  try {
-    await api('POST', '/api/portal/agent/'+agentId+'/department', {department: val});
-    await loadData();
-    renderAgentsList();
-  } catch(e) { alert('Error: '+e.message); }
+  // Redirect to the edit agent modal instead of ugly prompt
+  editAgentProfile(agentId);
 }
 
 // Group summary: agent count per department, rendered as a horizontal bar
@@ -2684,12 +2770,63 @@ function _createProgressBar(agentId) {
           '<div style="position:absolute;bottom:-2px;right:-6px;font-size:10px;animation:robotTyping 0.4s steps(3) infinite">⌨️</div>' +
         '</div>' +
       '</div>' +
-      '<span class="chat-progress-phase" id="chat-progress-phase-'+agentId+'" style="font-size:12px;color:var(--text2)">Preparing...</span>' +
+      '<div style="flex:1;min-width:0">' +
+        '<span class="chat-progress-phase" id="chat-progress-phase-'+agentId+'" style="font-size:12px;color:var(--text2)">Preparing...</span>' +
+        '<div id="tool-log-'+agentId+'" class="tool-activity-log" style="margin-top:6px;max-height:120px;overflow-y:auto;font-size:11px;line-height:1.6;color:var(--text3,#999);scrollbar-width:thin"></div>' +
+      '</div>' +
       '<button class="chat-progress-abort" id="chat-progress-abort-'+agentId+'" onclick="_abortTask(\''+agentId+'\')" title="Stop task">✕</button>' +
     '</div>';
   el.appendChild(bar);
   el.scrollTop = el.scrollHeight;
   return bar;
+}
+
+// Tool activity log — tracks tool calls inline during execution
+var _toolLogCounter = {};
+
+function _appendToolCall(agentId, toolName, args) {
+  var log = document.getElementById('tool-log-'+agentId);
+  if (!log) return;
+  if (!_toolLogCounter[agentId]) _toolLogCounter[agentId] = 0;
+  _toolLogCounter[agentId]++;
+  var idx = _toolLogCounter[agentId];
+
+  var entry = document.createElement('div');
+  entry.id = 'tool-entry-'+agentId+'-'+idx;
+  entry.style.cssText = 'display:flex;align-items:flex-start;gap:4px;padding:2px 0;border-bottom:1px solid var(--border,rgba(255,255,255,0.06));opacity:0;transition:opacity 0.3s';
+
+  // Truncate args for display
+  var argsStr = args || '';
+  if (argsStr.length > 80) argsStr = argsStr.substring(0, 80) + '...';
+  // Escape HTML
+  argsStr = argsStr.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  var safeName = (toolName||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+  entry.innerHTML =
+    '<span style="flex-shrink:0;color:var(--primary)">▸</span>' +
+    '<span style="flex-shrink:0;color:var(--text2);font-weight:500">' + safeName + '</span>' +
+    '<span class="tool-entry-status" style="flex-shrink:0;color:var(--warning,#f0ad4e)">⏳</span>' +
+    (argsStr ? '<span style="color:var(--text3);opacity:0.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + argsStr + '</span>' : '');
+
+  log.appendChild(entry);
+  // Fade in
+  requestAnimationFrame(function(){ entry.style.opacity = '1'; });
+  // Auto-scroll to bottom
+  log.scrollTop = log.scrollHeight;
+  // Also scroll chat container
+  var chatEl = document.getElementById('chat-msgs-'+agentId);
+  if (chatEl) chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+function _markToolResult(agentId, resultSnippet) {
+  var idx = _toolLogCounter[agentId] || 0;
+  var entry = document.getElementById('tool-entry-'+agentId+'-'+idx);
+  if (!entry) return;
+  var statusEl = entry.querySelector('.tool-entry-status');
+  if (statusEl) {
+    statusEl.textContent = '✓';
+    statusEl.style.color = 'var(--success,#5cb85c)';
+  }
 }
 
 function _updateProgress(agentId, progress, phase) {
@@ -2723,6 +2860,7 @@ function _updateProgress(agentId, progress, phase) {
 function _removeProgressBar(agentId) {
   var bar = document.getElementById('chat-progress-'+agentId);
   if(bar && bar.parentNode) bar.remove();
+  delete _toolLogCounter[agentId];
 }
 
 async function _abortTask(agentId) {
@@ -2763,7 +2901,7 @@ async function _saveToFile(btn, agentId) {
   else if(content.indexOf('def ') !== -1 || content.indexOf('import ') !== -1) defaultName = 'output.py';
   else if(content.indexOf('function ') !== -1 || content.indexOf('const ') !== -1) defaultName = 'output.js';
   else if(content.indexOf('{') !== -1 && content.indexOf('"') !== -1) defaultName = 'output.json';
-  var filename = prompt('Save as (relative to agent working directory):', defaultName);
+  var filename = await prompt('Save as (relative to agent working directory):', defaultName);
   if(!filename) return;
   btn.disabled = true;
   btn.innerHTML = '<span class="material-symbols-outlined" style="font-size:14px">hourglass_top</span> Saving...';
@@ -2893,10 +3031,12 @@ async function _streamTaskEvents(agentId, taskId, thinkDiv, progressBar) {
               // Update progress bar phase text instead of separate thinkDiv
               _updateProgress(agentId, 0, evt.content || 'Thinking...');
             } else if(evt.type==='tool_call') {
-              // Show tool name in progress bar
+              // Show tool name in progress bar + append to tool log
               _updateProgress(agentId, 0, '🔧 ' + esc(evt.name||''));
+              _appendToolCall(agentId, evt.name||'', evt.args||'');
             } else if(evt.type==='tool_result') {
-              // Reset progress bar to thinking state
+              // Mark last tool as done + reset progress bar
+              _markToolResult(agentId, evt.content||'');
               _updateProgress(agentId, 0, 'Thinking...');
             } else if(evt.type==='approval_request') {
               if (thinkDiv.parentNode) thinkDiv.remove();
@@ -3551,7 +3691,7 @@ function copyToken() {
 }
 
 async function revokeToken(tokenId) {
-  if (!confirm('Revoke this token?')) return;
+  if (!await confirm('Revoke this token?')) return;
   await api('DELETE', '/api/auth/tokens/' + tokenId);
   loadTokens();
 }
@@ -3639,7 +3779,7 @@ function renderNodes(container) {
 
 async function refreshNode(nodeId) { await api('POST','/api/hub/refresh',{node_id:nodeId}); refresh(); }
 async function removeNode(nodeId) {
-  if (!confirm('Disconnect this node?')) return;
+  if (!await confirm('Disconnect this node?')) return;
   await api('DELETE','/api/hub/node/'+nodeId);
   refresh();
 }
@@ -4739,7 +4879,7 @@ async function _kbSave() {
 }
 
 async function _kbDelete(id, title) {
-  if (!confirm('Delete "' + title + '"?')) return;
+  if (!await confirm('Delete "' + title + '"?')) return;
   try {
     await api('POST', '/api/portal/knowledge/' + id + '/delete');
     _kbLoadEntries();
@@ -4889,7 +5029,7 @@ async function _rpSaveNew() {
 }
 
 async function _rpDelete(roleKey) {
-  if (!confirm('确定删除角色预设 "'+roleKey+'" 吗？')) return;
+  if (!await confirm('确定删除角色预设 "'+roleKey+'" 吗？')) return;
   try {
     await api('POST', '/api/portal/role-presets/delete', { key: roleKey });
     renderConfig(document.getElementById('settings-content'));
@@ -5046,7 +5186,7 @@ async function saveNodeConfigItem(nodeId) {
 }
 
 async function deleteNodeConfigItem(nodeId, key) {
-  if (!confirm('Delete config "' + key + '" from node ' + nodeId + '?')) return;
+  if (!await confirm('Delete config "' + key + '" from node ' + nodeId + '?')) return;
   await api('POST', '/api/portal/node/' + nodeId + '/config', {
     action: 'delete', key: key
   });
@@ -5243,7 +5383,7 @@ async function saveEditTemplate(templateId) {
 }
 
 async function deleteTemplate(templateId) {
-  if (!confirm('确定要删除这个技能吗?')) return;
+  if (!await confirm('确定要删除这个技能吗?')) return;
   await api('POST', '/api/portal/templates', { action: 'delete', template_id: templateId });
   closeModal();
   renderTemplateLibrary();
@@ -5537,7 +5677,7 @@ async function toggleJob(jobId, enabled) {
 }
 
 async function deleteJob(jobId) {
-  if (!confirm('Delete this scheduled job?')) return;
+  if (!await confirm('Delete this scheduled job?')) return;
   await api('POST', '/api/portal/scheduler/jobs', {action:'delete', job_id:jobId});
   renderScheduler();
 }
@@ -6367,7 +6507,7 @@ async function toggleMCPBind(nodeId, agentId, mcpId, bind) {
 }
 
 async function removeMCPFromNode(nodeId, mcpId) {
-  if (!confirm('Remove this MCP server from the node?')) return;
+  if (!await confirm('Remove this MCP server from the node?')) return;
   await api('POST', '/api/portal/mcp/manage', {action:'remove_mcp', node_id:nodeId, mcp_id:mcpId});
   renderMCPConfig();
 }
@@ -6518,13 +6658,13 @@ async function applySelectedEnhancements(agentId) {
   refresh();
 }
 
-function enableCustomEnhancement(agentId) {
-  const domain = prompt('输入自定义技能名称 (如: blockchain, game_dev):');
+async function enableCustomEnhancement(agentId) {
+  const domain = await prompt('输入自定义技能名称 (如: blockchain, game_dev):');
   if (domain) enableEnhancement(agentId, domain.trim());
 }
 
 async function disableEnhancement(agentId) {
-  if (!confirm('确定要卸载所有技能吗？学习记忆将丢失。')) return;
+  if (!await confirm('确定要卸载所有技能吗？学习记忆将丢失。')) return;
   await api('POST', '/api/portal/agent/' + agentId + '/enhancement', {action:'disable'});
   closeModal();
   refresh();
@@ -6608,7 +6748,7 @@ async function saveMemoryEntry(agentId) {
 }
 
 async function removeEnhItem(agentId, action, idKey, idVal) {
-  if (!confirm('确定要删除这个条目吗？')) return;
+  if (!await confirm('确定要删除这个条目吗？')) return;
   var body = {action: action};
   body[idKey] = idVal;
   await api('POST', '/api/portal/agent/' + agentId + '/enhancement', body);
@@ -6742,7 +6882,7 @@ async function showSkillPanel(agentId) {
 // Revoke a granted skill package from an agent (uses the existing skill-pkgs
 // revoke endpoint, which clears both registry grant and agent.granted_skills).
 async function revokeGrantedSkill(agentId, skillInstallId) {
-  if (!confirm('确认撤销对该 agent 的技能授权？')) return;
+  if (!await confirm('确认撤销对该 agent 的技能授权？')) return;
   try {
     await api('POST', '/api/portal/skill-pkgs/' + encodeURIComponent(skillInstallId) + '/revoke', {agent_id: agentId});
     showSkillPanel(agentId);
@@ -7683,7 +7823,7 @@ async function saveProvider() {
 }
 
 async function deleteProvider(id) {
-  if (!confirm('Delete this provider?')) return;
+  if (!await confirm('Delete this provider?')) return;
   await api('DELETE', `/api/portal/providers/${id}`);
   loadAvailableModels();
   renderProviders();
@@ -8726,6 +8866,28 @@ async function editAgentProfile(agentId) {
   // Populate core fields
   document.getElementById('ea-name').value = agent.name || '';
   document.getElementById('ea-role').value = agent.role || 'general';
+  // Department field
+  var eaDeptSel = document.getElementById('ea-department');
+  var eaDeptCustom = document.getElementById('ea-department-custom');
+  if (eaDeptSel && eaDeptCustom) {
+    var dept = agent.department || '';
+    // Check if dept is one of the predefined options
+    var found = false;
+    for (var i = 0; i < eaDeptSel.options.length; i++) {
+      if (eaDeptSel.options[i].value === dept) { found = true; break; }
+    }
+    if (found || !dept) {
+      eaDeptSel.value = dept;
+      eaDeptSel.style.display = 'block';
+      eaDeptCustom.style.display = 'none';
+      eaDeptCustom.value = '';
+    } else {
+      // Custom department: hide select, show input
+      eaDeptSel.style.display = 'none';
+      eaDeptCustom.style.display = 'block';
+      eaDeptCustom.value = dept;
+    }
+  }
   document.getElementById('ea-workdir').value = agent.working_dir || '';
   // Populate provider and model selects
   document.getElementById('ea-provider').value = agent.provider || '';
@@ -8866,9 +9028,19 @@ async function saveAgentProfile() {
     var cdp = document.getElementById('ea-coding-provider');
     var cdm = document.getElementById('ea-coding-model');
     var mmToolsCb = document.getElementById('ea-mm-supports-tools');
+    // Collect department
+    var eaDeptSel2 = document.getElementById('ea-department');
+    var eaDeptCustom2 = document.getElementById('ea-department-custom');
+    var deptVal = '';
+    if (eaDeptCustom2 && eaDeptCustom2.style.display !== 'none' && eaDeptCustom2.value.trim()) {
+      deptVal = eaDeptCustom2.value.trim();
+    } else if (eaDeptSel2 && eaDeptSel2.value && eaDeptSel2.value !== '__custom__') {
+      deptVal = eaDeptSel2.value;
+    }
     const payload = {
       name: name,
       role: roleEl ? roleEl.value : 'general',
+      department: deptVal,
       working_dir: workdirEl ? workdirEl.value.trim() : '',
       provider: providerEl ? providerEl.value : '',
       model: modelEl ? modelEl.value : '',
@@ -8920,7 +9092,7 @@ async function saveAgentProfile() {
 }
 
 async function deleteAgent(agentId) {
-  if(!confirm('Delete this agent permanently?')) return;
+  if(!await confirm('Delete this agent permanently?')) return;
   await api('DELETE', '/api/portal/agent/' + agentId);
   currentView = 'dashboard';
   currentAgent = '';
@@ -8928,7 +9100,7 @@ async function deleteAgent(agentId) {
 }
 
 async function clearAgent(agentId) {
-  if(!confirm('Clear all messages and conversation history for this agent?')) return;
+  if(!await confirm('Clear all messages and conversation history for this agent?')) return;
   await api('POST', '/api/portal/agent/' + agentId + '/clear');
   // Re-render agent chat immediately to show empty state
   if (currentView === 'agent' && currentAgent === agentId) {
@@ -9096,7 +9268,7 @@ async function saveChannel() {
 }
 
 async function deleteChannel(id) {
-  if (!confirm('Delete this channel?')) return;
+  if (!await confirm('Delete this channel?')) return;
   await api('DELETE', `/api/portal/channels/${id}`);
   renderChannels();
 }
@@ -9929,20 +10101,20 @@ async function _submitGoal(projId, btn) {
   btn.closest('div[style*=fixed]').remove();
   loadProjectTabContent(projId, 'goals');
 }
-function updateGoalProgressPrompt(projId, goalId, metric) {
+async function updateGoalProgressPrompt(projId, goalId, metric) {
   if (metric === 'boolean') {
-    var ok = confirm('标记为已达成？');
+    var ok = await confirm('标记为已达成？');
     api('POST', '/api/portal/projects/'+projId+'/goals/'+goalId+'/progress', {done: ok})
       .then(function(){ loadProjectTabContent(projId, 'goals'); });
   } else {
-    var v = parseFloat(prompt('当前进度值:', '0') || 'NaN');
+    var v = parseFloat(await prompt('当前进度值:', '0') || 'NaN');
     if (isNaN(v)) return;
     api('POST', '/api/portal/projects/'+projId+'/goals/'+goalId+'/progress', {current_value: v})
       .then(function(){ loadProjectTabContent(projId, 'goals'); });
   }
 }
-function deleteGoal(projId, goalId) {
-  if (!confirm('删除此目标？')) return;
+async function deleteGoal(projId, goalId) {
+  if (!await confirm('删除此目标？')) return;
   api('POST', '/api/portal/projects/'+projId+'/goals/'+goalId+'/delete', {})
     .then(function(){ loadProjectTabContent(projId, 'goals'); });
 }
@@ -10026,8 +10198,8 @@ async function _submitReview(projId, dvId, approved, btn) {
   var active = (window._projectDetailTab && window._projectDetailTab[projId]) || 'deliverables';
   loadProjectTabContent(projId, active);
 }
-function deleteDeliverable(projId, dvId) {
-  if (!confirm('删除此交付件？')) return;
+async function deleteDeliverable(projId, dvId) {
+  if (!await confirm('删除此交付件？')) return;
   api('POST', '/api/portal/projects/'+projId+'/deliverables/'+dvId+'/delete', {})
     .then(function(){ loadProjectTabContent(projId, 'deliverables'); });
 }
@@ -10110,8 +10282,8 @@ async function _submitResolve(projId, issId, btn) {
   btn.closest('div[style*=fixed]').remove();
   loadProjectTabContent(projId, 'issues');
 }
-function deleteIssue(projId, issId) {
-  if (!confirm('删除此问题？')) return;
+async function deleteIssue(projId, issId) {
+  if (!await confirm('删除此问题？')) return;
   api('POST', '/api/portal/projects/'+projId+'/issues/'+issId+'/delete', {})
     .then(function(){ loadProjectTabContent(projId, 'issues'); });
 }
@@ -10493,7 +10665,7 @@ async function toggleWfStep(projId, taskId, newStatus) {
 }
 
 async function approveWfStep(projId, taskId) {
-  if (!confirm('确认批准该步骤启动？\n批准后将立即唤醒负责 Agent 开始执行。')) return;
+  if (!await confirm('确认批准该步骤启动？\n批准后将立即唤醒负责 Agent 开始执行。')) return;
   try {
     await api('POST', '/api/portal/projects/'+projId+'/tasks/'+taskId+'/approve-step', {});
     renderProjectDetail(projId);
@@ -10501,14 +10673,14 @@ async function approveWfStep(projId, taskId) {
 }
 
 async function deleteProject(projId) {
-  if (!confirm('确定要删除这个项目吗？所有聊天记录和任务将丢失。')) return;
+  if (!await confirm('确定要删除这个项目吗？所有聊天记录和任务将丢失。')) return;
   await api('POST', '/api/portal/projects', {action:'delete', project_id:projId});
   currentView = 'projects';
   renderCurrentView();
 }
 
 async function deleteProjectTask(projId, taskId) {
-  if (!confirm('确定要删除这个任务吗？')) return;
+  if (!await confirm('确定要删除这个任务吗？')) return;
   await api('POST', '/api/portal/projects/'+projId+'/task-update', {task_id:taskId, status:'deleted'});
   renderProjectDetail(projId);
 }
@@ -10578,7 +10750,7 @@ async function editTaskSteps(projId, taskId) {
       steps.push({ name: n, manual_review: !!mrEl.checked });
     }
     if (steps.length === 0) {
-      if (!confirm('未填写任何步骤，将清空当前任务的所有 step（task 退化为单次执行）。继续？')) return;
+      if (!await confirm('未填写任何步骤，将清空当前任务的所有 step（task 退化为单次执行）。继续？')) return;
     }
     try {
       await api('POST', '/api/portal/projects/'+projId+'/task-steps', {
@@ -10594,11 +10766,11 @@ async function editTaskSteps(projId, taskId) {
 async function reviewStep(projId, taskId, stepId, action) {
   var body = { task_id: taskId, step_id: stepId, action: action };
   if (action === 'reject') {
-    var reason = prompt('驳回原因（可选，会作为提示传给 agent 重新执行）:', '');
+    var reason = await prompt('驳回原因（可选，会作为提示传给 agent 重新执行）:', '');
     if (reason === null) return;
     body.reason = reason;
   } else {
-    var override = prompt('确认通过这个 step。\n如需修改 agent 的草稿结果，请在下方编辑（留空保持原样）:', '');
+    var override = await prompt('确认通过这个 step。\n如需修改 agent 的草稿结果，请在下方编辑（留空保持原样）:', '');
     if (override === null) return;
     if (override) body.result = override;
   }
@@ -10614,7 +10786,7 @@ async function reviewStep(projId, taskId, stepId, action) {
 }
 
 async function pauseProject(projId) {
-  var reason = prompt('暂停原因（可选）:', '') || '';
+  var reason = await prompt('暂停原因（可选）:', '') || '';
   await api('POST', '/api/portal/projects/'+projId+'/pause', {reason:reason});
   renderProjectDetail(projId);
 }
@@ -10637,11 +10809,11 @@ async function changeProjectStatus(projId, newStatus) {
   var needReason = (newStatus === 'cancelled' || newStatus === 'suspended' || newStatus === 'completed');
   var reason = '';
   if (needReason) {
-    var r1 = prompt('请输入『' + label + '』的原因（可留空，回车即可）:', '');
+    var r1 = await prompt('请输入『' + label + '』的原因（可留空，回车即可）:', '');
     if (r1 === null) return;  // user cancelled
     reason = r1;
   } else {
-    if (!confirm('确认将项目状态变更为『' + label + '』?')) return;
+    if (!await confirm('确认将项目状态变更为『' + label + '』?')) return;
   }
   try {
     var r = await api('POST', '/api/portal/projects/'+projId+'/status', {status:newStatus, reason:reason});
@@ -10671,7 +10843,7 @@ async function confirmMilestone(projId, msId) {
 }
 
 async function rejectMilestone(projId, msId) {
-  var reason = prompt('驳回原因:', '') || '';
+  var reason = await prompt('驳回原因:', '') || '';
   await api('POST', '/api/portal/projects/'+projId+'/milestones/'+msId+'/reject', {reason:reason});
   renderProjectDetail(projId);
 }
@@ -10790,7 +10962,7 @@ function filterWfCatalog(cat) {
 }
 
 async function useWfCatalog(catalogId) {
-  if (!confirm('从模板市场创建工作流？')) return;
+  if (!await confirm('从模板市场创建工作流？')) return;
   try {
     var data = await api('POST', '/api/portal/workflows', {
       action: 'create_from_catalog',
@@ -11494,7 +11666,7 @@ async function startWorkflow(wfId) {
 }
 
 async function abortWorkflow(wfId) {
-  if (!confirm('确定要中止这个工作流吗？')) return;
+  if (!await confirm('确定要中止这个工作流吗？')) return;
   await api('POST', '/api/portal/workflows/' + wfId + '/abort', {});
   renderCurrentView();
 }
@@ -11590,7 +11762,7 @@ function moveWfStep(idx, direction) {
 }
 
 async function deleteWorkflow(wfId) {
-  if (!confirm('确定要删除这个工作流吗？')) return;
+  if (!await confirm('确定要删除这个工作流吗？')) return;
   await api('POST', '/api/portal/workflows', {action:'delete', workflow_id:wfId});
   renderCurrentView();
 }
@@ -12688,7 +12860,7 @@ async function meetingInviteParticipant(mid) {
     var agList = (window._cachedAgents||agents||[]).filter(function(a){ return !present.has(a.id); });
     if (!agList.length) { alert('已没有可邀请的 Agent'); return; }
     var lines = agList.map(function(a, i){ return (i+1)+'. '+(a.name||a.id)+(a.role?' · '+a.role:''); }).join('\n');
-    var pick = prompt('选择要邀请的 Agent (输入编号):\n\n'+lines);
+    var pick = await prompt('选择要邀请的 Agent (输入编号):\n\n'+lines);
     if (!pick) return;
     var idx = parseInt(pick, 10) - 1;
     if (isNaN(idx) || idx < 0 || idx >= agList.length) { alert('无效编号'); return; }
@@ -12699,7 +12871,7 @@ async function meetingInviteParticipant(mid) {
 }
 
 async function meetingRemoveParticipant(mid, agentId, agentName) {
-  if (!confirm('确定将 '+(agentName||agentId)+' 移出会议？')) return;
+  if (!await confirm('确定将 '+(agentName||agentId)+' 移出会议？')) return;
   try {
     await api('DELETE', '/api/portal/meetings/'+mid+'/participants/'+encodeURIComponent(agentId));
     openMeetingDetail(mid);
@@ -12707,7 +12879,7 @@ async function meetingRemoveParticipant(mid, agentId, agentName) {
 }
 
 async function meetingCloseWithSummary(mid) {
-  var s = prompt('会议纪要 / 结论 (可留空):') || '';
+  var s = await prompt('会议纪要 / 结论 (可留空):') || '';
   try {
     await api('POST', '/api/portal/meetings/'+mid+'/close', {summary: s});
     openMeetingDetail(mid);
@@ -12997,7 +13169,7 @@ async function updateStandaloneTask(tid, fields) {
   catch(e) { alert('Error: '+e.message); }
 }
 async function deleteStandaloneTask(tid) {
-  if (!confirm('删除此任务？')) return;
+  if (!await confirm('删除此任务？')) return;
   try { await api('POST', '/api/portal/standalone-tasks/'+tid+'/delete', {}); loadTaskCenter(); }
   catch(e) { alert('Error: '+e.message); }
 }
@@ -13299,7 +13471,7 @@ async function _kmSaveNewEntry() {
 }
 
 async function _kmDeleteEntry(id) {
-  if (!confirm('确定删除此知识条目？')) return;
+  if (!await confirm('确定删除此知识条目？')) return;
   try {
     await api('POST', '/api/portal/knowledge/'+id+'/delete');
     _renderKmShared();
@@ -13644,7 +13816,7 @@ async function _kmSaveEditDomainKb(kbId) {
 }
 
 async function _kmDeleteDomainKb(kbId, name) {
-  if (!confirm('确定删除知识库 "'+name+'" 吗？\\n\\n注意：删除后知识库中的所有文档将被永久移除！')) return;
+  if (!await confirm('确定删除知识库 "'+name+'" 吗？\\n\\n注意：删除后知识库中的所有文档将被永久移除！')) return;
   try {
     await api('POST', '/api/portal/domain-kb/delete', {id:kbId});
     _renderKmPrivate();
@@ -13709,8 +13881,8 @@ async function _kmDoDomainImport(kbId) {
   }
 }
 
-function _kmSearchDomainKb(kbId, kbName) {
-  var q = prompt('在 "'+kbName+'" 中检索:');
+async function _kmSearchDomainKb(kbId, kbName) {
+  var q = await prompt('在 "'+kbName+'" 中检索:');
   if (!q) return;
   api('POST', '/api/portal/domain-kb/search', {kb_id:kbId, query:q, top_k:5})
     .then(function(data) {
@@ -13794,7 +13966,7 @@ async function _kmSaveProvider() {
 }
 
 async function _kmDeleteProvider(id) {
-  if (!confirm('确定移除此 RAG 提供方？')) return;
+  if (!await confirm('确定移除此 RAG 提供方？')) return;
   try {
     await api('POST', '/api/portal/rag/providers/'+id+'/delete');
     _renderKmRagProviders();
@@ -14075,8 +14247,8 @@ function _catBadge(cat, label, count) {
   return '<span style="font-size:10px;padding:2px 6px;border-radius:3px;background:'+c+'15;color:'+c+'">'+label+' '+count+'</span>';
 }
 
-function compactAgentMemoryFromModal(aid) {
-  if (!confirm('确定要压缩该 agent 的记忆？L1 将被折叠写入 L2。')) return;
+async function compactAgentMemoryFromModal(aid) {
+  if (!await confirm('确定要压缩该 agent 的记忆？L1 将被折叠写入 L2。')) return;
   fetch('/api/portal/agent/'+encodeURIComponent(aid)+'/compact-memory', {method:'POST'})
     .then(function(r){return r.json();}).then(function(d){
       if (d && d.error) { alert('压缩失败: '+d.error); return; }
@@ -14244,7 +14416,7 @@ async function installStoreEntry(entryId) {
 }
 
 async function uninstallStoreEntry(entryId) {
-  if (!confirm('卸载这个技能？对 agent 的授权会同时撤销。')) return;
+  if (!await confirm('卸载这个技能？对 agent 的授权会同时撤销。')) return;
   try {
     var r = await api('POST', '/api/portal/skill-store', {action:'uninstall', entry_id: entryId});
     if (r && r.ok) loadSkillStore();
@@ -14735,8 +14907,8 @@ function submitGrantSkill(sid) {
   }).catch(function(e){ alert('授权失败: '+e); });
 }
 
-function uninstallSkillPkg(sid) {
-  if (!confirm('确定卸载技能 '+sid+'？')) return;
+async function uninstallSkillPkg(sid) {
+  if (!await confirm('确定卸载技能 '+sid+'？')) return;
   fetch('/api/portal/skill-pkgs/'+encodeURIComponent(sid)+'/uninstall', {method:'POST'})
     .then(function(r){return r.json();}).then(function(d){
       if (d.error) { alert('卸载失败: '+d.error); return; }
@@ -15075,10 +15247,10 @@ async function renderPolicyConfig(container) {
 
 // ── Role delegation graph helpers ──
 async function addRoleEdge() {
-  var pr = prompt('父角色名 (parent role)，例如: manager / writer / analyst');
+  var pr = await prompt('父角色名 (parent role)，例如: manager / writer / analyst');
   if (!pr || !pr.trim()) return;
   pr = pr.trim();
-  var raw = prompt('该父角色允许委派的子角色，逗号分隔，例如: analyst, writer, crawler\n（输入空字符串 = 不允许委派任何子角色）', '');
+  var raw = await prompt('该父角色允许委派的子角色，逗号分隔，例如: analyst, writer, crawler\n（输入空字符串 = 不允许委派任何子角色）', '');
   if (raw === null) return;
   var children = raw.split(',').map(function(s){return s.trim();}).filter(function(s){return s.length>0;});
   try {
@@ -15098,7 +15270,7 @@ async function editRoleEdge(pr) {
     var fp = cfg.fork_policy || {};
     var edges = fp.allowed_role_edges || {};
     var current = (edges[pr] || []).join(', ');
-    var raw = prompt('父角色 "'+pr+'" 允许委派的子角色（逗号分隔，留空 = 不允许委派任何子角色）', current);
+    var raw = await prompt('父角色 "'+pr+'" 允许委派的子角色（逗号分隔，留空 = 不允许委派任何子角色）', current);
     if (raw === null) return;
     var children = raw.split(',').map(function(s){return s.trim();}).filter(function(s){return s.length>0;});
     edges[pr] = children;
@@ -15109,7 +15281,7 @@ async function editRoleEdge(pr) {
 }
 
 async function deleteRoleEdge(pr) {
-  if (!confirm('删除父角色 "'+pr+'" 的所有委派规则？删除后该角色将不再受 role-edge 限制（但仍受其他 fork_policy 限制）。')) return;
+  if (!await confirm('删除父角色 "'+pr+'" 的所有委派规则？删除后该角色将不再受 role-edge 限制（但仍受其他 fork_policy 限制）。')) return;
   try {
     var cfg = await api('GET', '/api/portal/policy');
     var fp = cfg.fork_policy || {};
@@ -15155,11 +15327,11 @@ async function updatePolicyGlobal(key, value) {
   } catch(e) { alert('Error: '+e.message); }
 }
 
-function showAddToolRiskPrompt() {
-  var toolName = prompt('Enter custom tool name (e.g. my_custom_tool):');
+async function showAddToolRiskPrompt() {
+  var toolName = await prompt('Enter custom tool name (e.g. my_custom_tool):');
   if (!toolName || !toolName.trim()) return;
   toolName = toolName.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_');
-  var risk = prompt('Risk level for "' + toolName + '":\\n  red = 红线(deny)\\n  high = 高风险(admin approval)\\n  moderate = 中风险(agent/auto)\\n  low = 低风险(auto)', 'moderate');
+  var risk = await prompt('Risk level for "' + toolName + '":\\n  red = 红线(deny)\\n  high = 高风险(admin approval)\\n  moderate = 中风险(agent/auto)\\n  low = 低风险(auto)', 'moderate');
   if (!risk || ['red','high','moderate','low'].indexOf(risk) < 0) {
     alert('Invalid risk level. Use: red, high, moderate, low');
     return;
@@ -15334,7 +15506,7 @@ async function saveAdminEdit() {
 }
 
 async function deleteAdminUser(userId, username) {
-  if (!confirm('Delete admin "'+username+'"? This cannot be undone.')) return;
+  if (!await confirm('Delete admin "'+username+'"? This cannot be undone.')) return;
   var data = await api('POST', '/api/portal/admins/delete', { user_id: userId });
   if (data && data.ok) {
     renderAdminManage();

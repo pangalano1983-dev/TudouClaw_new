@@ -875,6 +875,60 @@ body {
 .token-actions { display: flex; gap: 8px; margin-left: 12px; }
 /* ---- Hidden ---- */
 .hidden { display: none !important; }
+
+/* ═══ Toast Notification System ═══ */
+#toast-container {
+  position: fixed; top: 16px; right: 16px; z-index: 9999;
+  display: flex; flex-direction: column; gap: 8px;
+  pointer-events: none; max-width: 380px;
+}
+.toast {
+  pointer-events: auto;
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 16px; border-radius: 10px;
+  font-size: 13px; line-height: 1.4;
+  color: #fff; box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+  backdrop-filter: blur(8px);
+  animation: toastIn 0.3s ease-out;
+  cursor: pointer; transition: opacity 0.3s, transform 0.3s;
+}
+.toast:hover { opacity: 0.85; }
+.toast.removing { opacity: 0; transform: translateX(40px); }
+.toast-success { background: rgba(22,163,74,0.92); }
+.toast-error   { background: rgba(220,38,38,0.92); }
+.toast-warning { background: rgba(234,179,8,0.88); color: #1a1a1a; }
+.toast-info    { background: rgba(37,99,235,0.92); }
+.toast-icon { font-size: 18px; flex-shrink: 0; }
+.toast-msg { flex: 1; word-break: break-word; }
+.toast-close { flex-shrink: 0; opacity: 0.7; font-size: 16px; cursor: pointer; padding: 2px; }
+.toast-close:hover { opacity: 1; }
+@keyframes toastIn { from { opacity:0; transform:translateX(40px); } to { opacity:1; transform:translateX(0); } }
+
+/* ═══ Inline Confirm Panel ═══ */
+.confirm-overlay {
+  position: fixed; top:0; left:0; right:0; bottom:0;
+  background: rgba(0,0,0,0.55); backdrop-filter: blur(3px);
+  z-index: 10000; display: flex; align-items: center; justify-content: center;
+  animation: fadeIn 0.15s ease-out;
+}
+.confirm-panel {
+  background: var(--surface, #1a2027); border: 1px solid var(--border, #2a3040);
+  border-radius: 14px; padding: 24px 28px; min-width: 340px; max-width: 440px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+}
+.confirm-panel h4 { margin: 0 0 12px; font-size: 15px; color: var(--text, #e2e8f0); }
+.confirm-panel p { margin: 0 0 20px; font-size: 13px; color: var(--text2, #94a3b8); line-height: 1.5; }
+.confirm-actions { display: flex; gap: 10px; justify-content: flex-end; }
+
+/* ═══ Inline Prompt Panel ═══ */
+.prompt-panel input {
+  width: 100%; padding: 8px 12px; margin-bottom: 16px;
+  border-radius: 8px; border: 1px solid var(--border, #2a3040);
+  background: var(--bg, #0e141b); color: var(--text, #e2e8f0);
+  font-size: 13px; outline: none;
+}
+.prompt-panel input:focus { border-color: var(--primary, #2563eb); }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 </style>
 </head>
 <body>
@@ -1257,6 +1311,29 @@ body {
           <option value="devops">DevOps — 运维工程师</option>
           <option value="data">Data — 数据分析师</option>
         </select>
+      </div>
+      <div class="form-group">
+        <label>Department · 部门</label>
+        <div style="display:flex;gap:6px">
+          <select id="ea-department" style="flex:1" onchange="if(this.value==='__custom__'){this.style.display='none';document.getElementById('ea-department-custom').style.display='block';document.getElementById('ea-department-custom').focus();}">
+            <option value="">— 未分配 —</option>
+            <option value="管理层">管理层</option>
+            <option value="研发">研发</option>
+            <option value="产品">产品</option>
+            <option value="设计">设计</option>
+            <option value="运营">运营</option>
+            <option value="市场">市场</option>
+            <option value="销售">销售</option>
+            <option value="客服">客服</option>
+            <option value="数据">数据</option>
+            <option value="财务">财务</option>
+            <option value="人事">人事</option>
+            <option value="法务">法务</option>
+            <option value="__custom__">＋ 自定义…</option>
+          </select>
+          <input id="ea-department-custom" placeholder="输入自定义部门名称" style="display:none;flex:1"
+                 onblur="if(!this.value.trim()){this.style.display='none';document.getElementById('ea-department').style.display='block';document.getElementById('ea-department').value='';}">
+        </div>
       </div>
       <div class="form-group">
         <label>Provider</label>
@@ -1797,6 +1874,9 @@ body {
     </div>
   </div>
 </div>
+
+<!-- Toast container -->
+<div id="toast-container"></div>
 
 <!-- Portal main application scripts (bundled) -->
 <script src="/static/js/portal_bundle.js"></script>

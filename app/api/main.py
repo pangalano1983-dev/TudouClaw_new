@@ -162,6 +162,18 @@ async def lifespan(app: FastAPI):
     except Exception as _se:
         logger.warning("MCP sync failed: %s", _se)
 
+    # ── Skill Registry (PromptPack / BM25 matching) ─────────────
+    try:
+        from ..core.prompt_enhancer import init_prompt_pack_registry
+        _skill_scan_dirs = []
+        for _rel in ("data/skills_installed", "data/skill_catalog/imported"):
+            _abs = os.path.join(os.getcwd(), _rel)
+            if os.path.isdir(_abs):
+                _skill_scan_dirs.append(_abs)
+        init_prompt_pack_registry(data_dir=data_dir, extra_scan_dirs=_skill_scan_dirs)
+    except Exception as _sr:
+        logger.warning("Skill registry init failed: %s", _sr)
+
     # ── SkillForge ─────────────────────────────────────────────────
     try:
         from ..skills._skill_forge import get_skill_forge

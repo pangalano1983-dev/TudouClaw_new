@@ -1039,6 +1039,7 @@ class AgentExecutionMixin:
                                         "Analyzing...", prog)
                         task.push_event({
                             "type": "tool_result",
+                            "name": evt.data.get("name", ""),
                             "content": evt.data.get("result", "")[:500],
                         })
                         task.push_event({"type": "thinking",
