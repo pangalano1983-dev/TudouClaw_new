@@ -244,6 +244,15 @@ async def update_agent_soul(
     return {"ok": True, "agent_id": agent_id}
 
 
+@router.get("/supervisor/status")
+async def supervisor_status(
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Return process isolation supervisor status (worker health, uptime)."""
+    return hub.supervisor.get_status()
+
+
 @router.get("/departments")
 async def list_departments(
     hub=Depends(get_hub),
@@ -558,7 +567,8 @@ async def send_chat(
             suffix = "\n" + " ".join(f"📎{r}" for r in saved_refs)
             chat_content = (chat_content + suffix) if chat_content else suffix.lstrip()
 
-    task = agent.chat_async(chat_content, source="admin")
+    # Route through supervisor (handles both isolated and in-process)
+    task = hub.supervisor.chat_async(agent.id, chat_content, source="admin")
     return {
         "task_id": task.id,
         "status": task.status.value,

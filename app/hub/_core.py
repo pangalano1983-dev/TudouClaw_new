@@ -95,6 +95,13 @@ class Hub:
         self._sync_all_project_dirs()
         # Agent messages (inter-agent)
         self._load_messages()
+        # ── Agent Supervisor (process isolation) ──
+        from ..supervisor import AgentSupervisor
+        self.supervisor = AgentSupervisor(
+            data_dir=self._data_dir,
+            get_agent_fn=lambda aid: self.agents.get(aid),
+            save_fn=self._save_agents,
+        )
         # Project chat engine
         self.project_chat_engine = ProjectChatEngine(
             agent_chat_fn=self._workflow_chat,
@@ -261,6 +268,10 @@ class Hub:
             if self._shutdown_done:
                 return
             self._shutdown_done = True
+            try:
+                self.supervisor.shutdown()
+            except Exception as _e:
+                logger.debug("Supervisor shutdown: %s", _e)
             try:
                 self._save_agents()
                 logger.info("Shutdown: saved %d agents", len(self.agents))
@@ -525,10 +536,16 @@ class Hub:
                         "(status=pending/delivered)", stale_msg_count)
 
     def _workflow_chat(self, agent_id: str, message) -> str:
-        """Workflow engine 调用的 agent chat 接口。支持 str 或 list[dict] (multimodal)。"""
-        agent = self.agents.get(agent_id)
-        if agent:
-            return agent.delegate(message, from_agent="workflow")
+        """Workflow engine 调用的 agent chat 接口。支持 str 或 list[dict] (multimodal)。
+
+        When agent isolation is enabled (TUDOU_AGENT_ISOLATION=1), the call
+        is routed to an isolated worker subprocess via the Supervisor.
+        """
+        # Local agent — route through supervisor (handles both isolated
+        # and in-process paths transparently)
+        if agent_id in self.agents:
+            return self.supervisor.delegate(agent_id, message,
+                                            from_agent="workflow")
         # Try remote (remote only supports string)
         node = self.find_agent_node(agent_id)
         if node:
@@ -2088,8 +2105,7 @@ class Hub:
         return self.send_message(from_agent, to_agent, content, msg_type=msg_type)
 
     def _deliver_local(self, msg: AgentMessage):
-        agent = self.agents.get(msg.to_agent)
-        if not agent:
+        if msg.to_agent not in self.agents:
             msg.status = "error"
             self._update_message_status(msg)
             return
@@ -2097,7 +2113,8 @@ class Hub:
         self._update_message_status(msg)
 
         def _run():
-            result = agent.delegate(msg.content, from_agent=msg.from_agent)
+            result = self.supervisor.delegate(
+                msg.to_agent, msg.content, from_agent=msg.from_agent)
             msg.status = "completed"
             self._update_message_status(msg)
             if msg.from_agent:
@@ -2152,9 +2169,9 @@ class Hub:
         threads = []
 
         def _work(aid: str):
-            agent = self.agents.get(aid)
-            if agent:
-                results[aid] = agent.delegate(task, from_agent="orchestrator")
+            if aid in self.agents:
+                results[aid] = self.supervisor.delegate(
+                    aid, task, from_agent="orchestrator")
 
         for aid in targets:
             t = threading.Thread(target=_work, args=(aid,))

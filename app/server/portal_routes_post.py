@@ -571,7 +571,8 @@ def _do_post_inner(handler, path: str):
             len(chat_content) if isinstance(chat_content, list)
             else len(str(chat_content)),
         )
-        task = agent.chat_async(chat_content, source="admin")
+        # Route through supervisor (handles isolated / in-process)
+        task = hub.supervisor.chat_async(agent.id, chat_content, source="admin")
         handler._json({
             "task_id": task.id,
             "status": task.status.value,

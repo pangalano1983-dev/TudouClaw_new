@@ -111,12 +111,16 @@ def _scrub_env(env: Dict[str, str]) -> Dict[str, str]:
 # Jail setup
 # ---------------------------------------------------------------------------
 
-def _setup_jail(work_dir: str) -> Path:
+def _setup_jail(work_dir: str, *, full_agent: bool = False) -> Path:
     """Pin cwd / HOME / TMPDIR / PWD to the work_dir.
 
     All of these are set BEFORE app.tools / app.sandbox are imported
     so any module that caches a home-dir or tmp-dir at import time
     gets the jailed one.
+
+    When *full_agent* is True the worker hosts a complete Agent (including
+    LLM calls), so LLM API keys must survive — only non-LLM credentials
+    are scrubbed.
     """
     root = Path(work_dir).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -129,10 +133,16 @@ def _setup_jail(work_dir: str) -> Path:
     for d in (config_dir, cache_dir, data_dir, state_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    # Scrub credentials first.
-    scrubbed = _scrub_env(os.environ)
-    os.environ.clear()
-    os.environ.update(scrubbed)
+    if full_agent:
+        # In full_agent mode, keep LLM credentials — only scrub dangerous
+        # vars that could escape the jail or escalate privileges.
+        for k in list(_CREDENTIAL_EXACT):
+            os.environ.pop(k, None)
+    else:
+        # Scrub credentials first.
+        scrubbed = _scrub_env(os.environ)
+        os.environ.clear()
+        os.environ.update(scrubbed)
 
     # Pin filesystem-relevant env vars to the jail.
     os.environ["HOME"] = str(root)
@@ -211,6 +221,12 @@ class WorkerState:
         self.allow_list: list[str] = list(boot.get("allow_list") or [])
         self.started_at: float = time.time()
         self.lock = threading.Lock()
+        # full_agent mode: worker hosts a complete Agent instance
+        self.mode: str = boot.get("mode", "tool_sandbox")  # "tool_sandbox" | "full_agent"
+        self.agent_persist_dict: Optional[Dict[str, Any]] = boot.get("agent_persist_dict")
+        self.data_dir: str = boot.get("data_dir", "")
+        self._agent: Any = None  # lazy-loaded Agent instance (full_agent mode)
+        self._agent_lock = threading.Lock()
 
     def allowed_dirs(self) -> list[str]:
         """All read/write dirs this worker is allowed to touch (in addition to work_dir).
@@ -223,6 +239,23 @@ class WorkerState:
             dirs.append(self.shared_workspace)
         dirs.extend(self.authorized_workspaces)
         return dirs
+
+    def get_agent(self):
+        """Lazy-load the Agent instance (full_agent mode only)."""
+        if self._agent is not None:
+            return self._agent
+        with self._agent_lock:
+            if self._agent is not None:
+                return self._agent
+            if self.mode != "full_agent" or not self.agent_persist_dict:
+                return None
+            from app.agent import Agent
+            self._agent = Agent.from_persist_dict(self.agent_persist_dict)
+            sys.stderr.write(
+                f"[agent_worker] Agent {self.agent_id[:8]} "
+                f"({self._agent.name}) loaded in full_agent mode\n")
+            sys.stderr.flush()
+            return self._agent
 
     def apply_capability_update(self, payload: Dict[str, Any]) -> None:
         """Merge a capability update pushed by the main process."""
@@ -303,6 +336,75 @@ def _dispatch_tool_call(state: WorkerState, params: Dict[str, Any]) -> Dict[str,
 
 
 # ---------------------------------------------------------------------------
+# Agent-level handlers (full_agent mode)
+# ---------------------------------------------------------------------------
+
+def _handle_delegate(state: WorkerState, req_id: str,
+                     params: Dict[str, Any]) -> "object":
+    """Synchronous delegate — blocks until the agent finishes."""
+    from app.isolation.protocol import Frame
+
+    agent = state.get_agent()
+    if agent is None:
+        return Frame.response_err(req_id, "not_full_agent",
+                                  "Worker not in full_agent mode")
+    content = params.get("content", "")
+    from_agent = params.get("from_agent", "hub")
+    try:
+        result = agent.delegate(content, from_agent=from_agent)
+        return Frame.response_ok(req_id, {"result": result})
+    except Exception as e:
+        return Frame.response_err(req_id, "delegate_error",
+                                  f"{type(e).__name__}: {e}")
+
+
+def _handle_chat(state: WorkerState, req_id: str,
+                 params: Dict[str, Any]) -> "object":
+    """Run agent.chat() with event streaming back to Hub.
+
+    Events are sent as EVENT frames (kind2="chat_event") during execution.
+    The final RESPONSE frame carries the result text.
+    """
+    from app.isolation.protocol import Frame, DEFAULT_CHAN_ID
+
+    agent = state.get_agent()
+    if agent is None:
+        return Frame.response_err(req_id, "not_full_agent",
+                                  "Worker not in full_agent mode")
+
+    content = params.get("content", "")
+    source = params.get("source", "admin")
+    task_id = params.get("task_id", req_id)
+    _, stdout_b = _get_binary_stdio()
+    from app.isolation.protocol import write_frame
+
+    def _on_event(evt):
+        """Stream agent events back to Hub as EVENT frames."""
+        try:
+            evt_data = {
+                "task_id": task_id,
+                "req_id": req_id,
+                "kind": evt.kind,
+                "data": evt.data if isinstance(evt.data, dict) else {"raw": str(evt.data)},
+            }
+            write_frame(stdout_b,
+                        Frame.event("chat_event", evt_data),
+                        DEFAULT_CHAN_ID)
+        except Exception:
+            pass  # never break the chat loop for event delivery
+
+    try:
+        result = agent.chat(content, on_event=_on_event, source=source)
+        return Frame.response_ok(req_id, {
+            "result": result,
+            "task_id": task_id,
+        })
+    except Exception as e:
+        return Frame.response_err(req_id, "chat_error",
+                                  f"{type(e).__name__}: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 
@@ -331,6 +433,24 @@ def _handle_request(state: WorkerState, frame) -> "object":
                                       {k: v for k, v in err.items()
                                        if k not in ("type", "message")})
         return Frame.response_ok(req_id, result)
+
+    if method == "delegate":
+        return _handle_delegate(state, req_id, params)
+
+    if method == "chat":
+        # chat is async — runs in a thread, streams events, then sends response
+        return _handle_chat(state, req_id, params)
+
+    if method == "get_state":
+        agent = state.get_agent()
+        if agent is None:
+            return Frame.response_err(req_id, "not_full_agent",
+                                      "Worker not in full_agent mode")
+        return Frame.response_ok(req_id, {
+            "agent_id": agent.id,
+            "persist_dict": agent.to_persist_dict(),
+            "messages_count": len(agent.messages),
+        })
 
     if method == "shutdown":
         return Frame.response_ok(req_id, {"shutdown": True})
@@ -463,10 +583,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not work_dir:
         _boot_fail("boot config missing 'work_dir'")
 
+    is_full_agent = boot.get("mode") == "full_agent"
+
     # IMPORTANT ORDER: jail setup must happen before we import the
     # tools / sandbox modules. That way any module-level code that
     # touches HOME/TMPDIR/os.getcwd() sees the jailed values.
-    _setup_jail(work_dir)
+    _setup_jail(work_dir, full_agent=is_full_agent)
     _redirect_user_output()
 
     # Make sure the app package on disk is importable. The main
