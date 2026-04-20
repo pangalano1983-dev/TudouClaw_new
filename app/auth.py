@@ -630,143 +630,26 @@ class ToolPolicy:
     def check_tool(self, tool_name: str, arguments: dict,
                    agent_id: str = "", agent_name: str = "",
                    agent_priority: int = 3) -> tuple[str, str]:
-        """
-        Check if a tool call should be allowed.
+        """Check if a tool call should be allowed.
 
         Returns: ("allow"|"deny"|"needs_approval"|"agent_approvable", reason)
 
-        Decision flow:
-          1. RED → deny (unconditional)
-          2. Session pre-approved → allow
-          3. Bash special analysis (deny patterns, safe patterns, structural checks)
-          4. Sensitive path checks for write/edit
-          5. LOW → allow
-          6. MODERATE → allow if auto_approve_moderate, else "agent_approvable"
-          7. HIGH → "needs_approval" (human/admin only)
+        The actual decision logic lives in ``app.auth_rules`` as a chain
+        of independent rule functions. Their priority order is the file
+        order of ``auth_rules.RULES``. See that package's docstring for
+        how to add/move/test individual rules.
         """
-        risk = self.get_risk(tool_name)
-
-        # ── Global denylist (admin-configurable) ──
-        # Highest precedence after RED: even LOW-risk tools are refused
-        # if admin has put them on the global denylist. Used to retire
-        # legacy tools like ``create_pptx_advanced`` without touching
-        # per-agent profiles.
-        if tool_name in self.global_denylist:
-            return "deny", (
-                f"🚫 Tool '{tool_name}' is on the global denylist. "
-                "Admin can remove it from 工具与审批 settings."
-            )
-
-        # ── RED — 红线: always deny ──
-        if risk == "red":
-            return "deny", f"🚫 红线操作: '{tool_name}' is permanently blocked (risk: RED)"
-
-        # ── LOW — 低风险: always allow ──
-        if risk == "low":
-            return "allow", ""
-
-        # ── Skill-grant shortcut ───────────────────────────────────
-        # If admin has granted a skill to this agent via 技能商店
-        # ("Grant skill" button), and the skill's manifest declares
-        # ``tool_name`` in its tool whitelist, auto-allow the call.
-        # Rationale: a skill grant IS an admin approval for the set
-        # of tools the skill needs. Re-asking per-call is noise.
-        # Only applies when agent_id is provided (REST/agent path).
-        if agent_id:
-            try:
-                import sys as _sys
-                mod = _sys.modules.get("app.llm")
-                hub = getattr(mod, "_active_hub", None) if mod else None
-                reg = getattr(hub, "skill_registry", None) if hub else None
-                if reg is not None and hasattr(reg, "list_for_agent"):
-                    for inst in reg.list_for_agent(agent_id):
-                        whitelist = set(getattr(inst.manifest, "tools", []) or [])
-                        if tool_name in whitelist:
-                            return "allow", (
-                                f"Covered by granted skill "
-                                f"'{inst.manifest.name}'")
-            except Exception:
-                pass  # registry unavailable → fall through to risk check
-
-        # ── Session-scoped pre-approval ──
-        if agent_id and (agent_id, tool_name) in self.session_approvals:
-            return "allow", "Session-approved"
-
-        # ── Bash special handling — 智能子命令分析 ──
-        if tool_name == "bash":
-            cmd = arguments.get("command", "")
-
-            # Step 1: 绝对黑名单 (deny patterns — 无论如何都拒绝)
-            for pattern in self.deny_patterns:
-                if re.search(pattern, cmd, re.IGNORECASE):
-                    return "deny", f"🚫 Command matches blocked pattern: {pattern}"
-
-            # Step 2: 结构安全检查 (命令注入、数据外泄)
-            if re.search(r'`[^`]+`', cmd) or re.search(r'\$\([^)]+\)', cmd):
-                inner = re.findall(r'`([^`]+)`|\$\(([^)]+)\)', cmd)
-                for groups in inner:
-                    subcmd = groups[0] or groups[1]
-                    sensitive_subcmd = any(
-                        kw in subcmd.lower()
-                        for kw in ("secret", "password", "token", "key",
-                                   "credential", "/etc/shadow", "/etc/passwd",
-                                   "ssh", ".env", "aws", "api_key")
-                    )
-                    if sensitive_subcmd:
-                        return "deny", f"Command injection accessing sensitive data: {subcmd}"
-
-            if re.search(r'\b(env|printenv|set)\b.*\|\s*(curl|wget|nc)',
-                         cmd, re.IGNORECASE):
-                return "deny", "Environment variable exfiltration attempt"
-
-            if re.search(r'(base64\s+-d|xxd\s+-r|python.*-c.*exec|eval\s)', cmd,
-                         re.IGNORECASE):
-                return "needs_approval", "Command uses encoding/eval that may obfuscate intent"
-
-            # Step 3: 删除类命令 → 红线
-            # 覆盖: rm, xargs rm, find -delete, find -exec rm
-            if re.search(r'\brm\s+', cmd):
-                return "deny", "🚫 红线: rm (delete) commands are blocked by default"
-            if re.search(r'\bxargs\s+rm\b', cmd):
-                return "deny", "🚫 红线: xargs rm (piped delete) is blocked by default"
-            if re.search(r'-delete\b', cmd):
-                return "deny", "🚫 红线: find -delete is blocked by default"
-            if re.search(r'-exec\s+rm\b', cmd):
-                return "deny", "🚫 红线: find -exec rm is blocked by default"
-
-            # Step 4: 智能子命令分析 — 拆分并逐个评估
-            # 这里是核心改进: 不再一刀切，而是区分每条子命令的实际风险
-            cmd_risk, cmd_reason = analyze_bash_command(cmd)
-
-            if cmd_risk == "low":
-                # 所有子命令都是只读/安全的 → 自动通过
-                return "allow", f"Bash auto-approved: {cmd_reason}"
-            elif cmd_risk == "moderate":
-                # 包含构建/安装类操作 → 按中风险处理
-                if self.auto_approve_moderate:
-                    return "allow", f"Bash moderate auto-approved: {cmd_reason}"
-                return "agent_approvable", f"Bash moderate: {cmd_reason}"
-            # cmd_risk == "high" → 继续走下面的高风险流程
-
-        # ── write_file / edit_file: sensitive path check ──
-        if tool_name in ("write_file", "edit_file"):
-            path = arguments.get("path", "")
-            sensitive = ["/etc/", "/usr/", "/bin/", "/sbin/", "/boot/",
-                         "/sys/", "/proc/", "~/.ssh/", "~/.bashrc",
-                         ".env", "credentials", "secret", "password"]
-            for s in sensitive:
-                if s in path.lower():
-                    return "needs_approval", f"Writing to sensitive path: {path}"
-
-        # ── MODERATE — 中风险 ──
-        if risk == "moderate":
-            if self.auto_approve_moderate:
-                return "allow", ""
-            # Not auto-approved → agent with authority can approve
-            return "agent_approvable", f"Tool '{tool_name}' is moderate risk — agent approval or admin approval needed"
-
-        # ── HIGH — 高风险: admin/human approval ──
-        return "needs_approval", f"⚠️ 高风险: Tool '{tool_name}' requires admin approval (risk: HIGH)"
+        from .auth_rules import ToolCheckContext, run_rules
+        ctx = ToolCheckContext(
+            tool_name=tool_name,
+            arguments=arguments or {},
+            agent_id=agent_id or "",
+            agent_name=agent_name or "",
+            agent_priority=int(agent_priority),
+            risk=self.get_risk(tool_name),
+            policy=self,
+        )
+        return run_rules(ctx)
 
     def check_skill_call(self, skill_id: str, skill_name: str,
                          agent_id: str, agent_role: str,
