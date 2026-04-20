@@ -21,6 +21,7 @@ from .global_denylist import rule_global_denylist
 from .red_line import rule_red_line
 from .low_risk_allow import rule_low_risk_allow
 from .granted_skill import rule_covered_by_granted_skill
+from .granted_skill_mcp import rule_covered_by_granted_skill_mcp
 from .session_approved import rule_session_approved
 from .bash_analyzer import rule_bash_analyzer
 from .sensitive_path import rule_sensitive_path
@@ -34,17 +35,19 @@ from .high_default import rule_high_default
 #   2. red_line             — unconditional deny
 #   3. low_risk_allow       — baseline read-only tools
 #   4. granted_skill        — skill grant implies tool approval
-#   5. session_approved     — "approve for session" button
-#   6. bash_analyzer        — per-subcommand analysis; may delegate
+#   5. granted_skill_mcp    — skill grant implies mcp_call approval
+#   6. session_approved     — "approve for session" button
+#   7. bash_analyzer        — per-subcommand analysis; may delegate
 #                              high-risk bash to moderate/high rules
-#   7. sensitive_path       — write/edit to /etc/, ~/.ssh/, .env, ...
-#   8. moderate_gate        — MODERATE → allow / agent_approvable
-#   9. high_default         — terminal; always returns a verdict
+#   8. sensitive_path       — write/edit to /etc/, ~/.ssh/, .env, ...
+#   9. moderate_gate        — MODERATE → allow / agent_approvable
+#  10. high_default         — terminal; always returns a verdict
 RULES: list[Rule] = [
     rule_global_denylist,
     rule_red_line,
     rule_low_risk_allow,
     rule_covered_by_granted_skill,
+    rule_covered_by_granted_skill_mcp,
     rule_session_approved,
     rule_bash_analyzer,
     rule_sensitive_path,
@@ -76,7 +79,7 @@ __all__ = [
     "RULES", "run_rules",
     # Individual rules exported for unit tests
     "rule_global_denylist", "rule_red_line", "rule_low_risk_allow",
-    "rule_covered_by_granted_skill", "rule_session_approved",
-    "rule_bash_analyzer", "rule_sensitive_path",
+    "rule_covered_by_granted_skill", "rule_covered_by_granted_skill_mcp",
+    "rule_session_approved", "rule_bash_analyzer", "rule_sensitive_path",
     "rule_moderate_gate", "rule_high_default",
 ]
