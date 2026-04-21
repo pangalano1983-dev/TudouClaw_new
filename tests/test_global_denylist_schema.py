@@ -93,7 +93,12 @@ def test_global_denylist_strips_tool_schemas(isolated_tudou_home):
 
 
 def test_global_denylist_empty_leaves_all_tools(isolated_tudou_home):
-    """Edge case: empty denylist file → no filtering."""
+    """Edge case: empty denylist file → no denylist-based filtering.
+
+    Capability-skill filtering still applies (separate concern). To
+    verify "denylist didn't strip anything" we grant pptx-author so
+    create_pptx would be reachable if not for the (empty) denylist.
+    """
     (isolated_tudou_home / "tool_denylist.json").write_text(
         json.dumps({"denied": []}), encoding="utf-8",
     )
@@ -104,12 +109,12 @@ def test_global_denylist_empty_leaves_all_tools(isolated_tudou_home):
         name="tester",
         role="general",
         profile=AgentProfile(),
+        granted_skills=["pptx-author"],
     )
     effective = agent._get_effective_tools()
-    # All base tools present.
     names = {t["function"]["name"] for t in effective}
-    assert "create_pptx" in names
-    assert "read_file" in names
+    assert "create_pptx" in names  # pptx-author grants unlock it
+    assert "read_file" in names    # core, always on
 
 
 def test_per_agent_deny_and_global_deny_compose(isolated_tudou_home):
