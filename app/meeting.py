@@ -57,6 +57,10 @@ class MeetingMessage:
     role: str = "agent"         # "user" | "agent" | "system"
     content: str = ""
     attachments: list = field(default_factory=list)  # list[{name,mime,size,data_base64}]
+    # Agent-execution events captured during this message's generation:
+    # tool_call / tool_result / ui_block. See app.agent_event_capture.
+    # Rendered by the meeting chat frontend for UX parity with agent chat.
+    blocks: list = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict:
@@ -71,6 +75,8 @@ class MeetingMessage:
             role=d.get("role", "agent"),
             content=d.get("content", ""),
             attachments=list(d.get("attachments", []) or []),
+            # Backward-compat: older persisted messages lack this field.
+            blocks=list(d.get("blocks", []) or []),
             created_at=d.get("created_at", time.time()),
         )
 
@@ -179,11 +185,13 @@ class Meeting:
 
     # ── chat ──
     def add_message(self, sender: str, content: str, role: str = "agent",
-                    sender_name: str = "", attachments: list | None = None) -> MeetingMessage:
+                    sender_name: str = "", attachments: list | None = None,
+                    blocks: list | None = None) -> MeetingMessage:
         m = MeetingMessage(
             sender=sender, sender_name=sender_name or sender,
             role=role, content=content,
             attachments=list(attachments or []),
+            blocks=list(blocks or []),
         )
         with self._lock:
             self.messages.append(m)
@@ -816,13 +824,23 @@ def meeting_agent_reply(meeting: "Meeting",
             # can route produced tasks to the Standalone Task registry tagged
             # with this meeting_id, instead of creating scheduled jobs.
             from .meeting_context import set_meeting_context
+            from .agent_event_capture import (
+                snapshot_event_count,
+                capture_events_since,
+            )
             set_meeting_context(meeting.id)
+            # Snapshot position in the agent event log so we can extract
+            # tool_call / ui_block events emitted during THIS reply for
+            # render in the meeting chat (UX parity with agent chat).
+            events_cursor = snapshot_event_count(ag)
             try:
                 reply = agent_chat_fn(aid, chat_msg)
             finally:
                 set_meeting_context("")
+            captured_blocks = capture_events_since(ag, events_cursor)
         except Exception as e:
             reply = f"❌ 回复失败: {e}"
+            captured_blocks = []
         # -- Post-LLM interrupt check: if user interrupted while this agent
         #    was talking, drop its stale reply instead of polluting the log --
         if gen is not None and current_meeting_reply_gen(meeting.id) != gen:
@@ -839,6 +857,7 @@ def meeting_agent_reply(meeting: "Meeting",
                 sender_name=f"{role}-{aname}",
                 role="assistant",
                 content=reply or "",
+                blocks=captured_blocks,
             )
             registry.save()
         except Exception:

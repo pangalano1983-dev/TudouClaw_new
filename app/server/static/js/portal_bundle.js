@@ -3449,6 +3449,69 @@ if (typeof window !== 'undefined') {
   window._renderChecklistBlock = _renderChecklistBlock;
 }
 
+// ────────────────────────────────────────────────────────────────
+// Non-streaming event block rendering (project + meeting chat)
+// Takes the `blocks` array posted alongside a message and replays
+// tool_call / tool_result / ui_block events into a compact inline
+// area under the message body. This gives project/meeting chat the
+// same execution-story UX that agent chat's SSE stream provides.
+// ────────────────────────────────────────────────────────────────
+
+function _renderCompactToolCall(data) {
+  // data: {name, args}
+  var name = _escHtml(data.name || '');
+  var rawArgs = data.args || '';
+  var primary = (typeof _extractPrimaryArg === 'function'
+                   ? _extractPrimaryArg(rawArgs) : '') || '';
+  var preview = _escHtml(primary || _truncateArg(rawArgs, 80));
+  var fullAttr = _escHtml(rawArgs);
+  return (
+    '<div style="display:flex;gap:4px;padding:2px 0;font-size:12px;font-family:ui-monospace,monospace">' +
+      '<span style="color:var(--primary);flex-shrink:0">▸</span>' +
+      '<span style="color:var(--text2);font-weight:500;flex-shrink:0" title="' + fullAttr + '">' + name + '</span>' +
+      (preview ? '<span style="color:var(--text3);opacity:0.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + fullAttr + '">' + preview + '</span>' : '') +
+    '</div>'
+  );
+}
+
+function _appendMessageBlocks(agentId, msgDiv, blocks) {
+  if (!blocks || !blocks.length) return;
+  var toolLog = null;  // Lazy-init — only created when we have a tool_call to show.
+  blocks.forEach(function(evt) {
+    if (!evt || !evt.kind) return;
+    if (evt.kind === 'tool_call') {
+      if (!toolLog) {
+        toolLog = document.createElement('div');
+        toolLog.style.cssText = 'margin-top:8px;padding:6px 10px;background:rgba(255,255,255,0.03);border-left:2px solid var(--primary);border-radius:4px';
+        msgDiv.appendChild(toolLog);
+      }
+      toolLog.insertAdjacentHTML('beforeend', _renderCompactToolCall(evt.data || {}));
+    } else if (evt.kind === 'ui_block') {
+      // Reuse the agent-chat ui_block renderer; same payload shape.
+      try {
+        var block = (evt.data || {}).block;
+        if (block && typeof _appendUiBlock === 'function') {
+          _appendUiBlock(agentId || 'project', msgDiv, block);
+        }
+      } catch (e) {
+        console.warn('[blocks] ui_block render failed', e);
+      }
+    } else if (evt.kind === 'ellipsis') {
+      if (toolLog) {
+        var drop = (evt.data || {}).dropped || 0;
+        toolLog.insertAdjacentHTML('beforeend',
+          '<div style="color:var(--text3);font-size:11px;opacity:0.6;padding:2px 0">… (' + drop + ' more events truncated)</div>');
+      }
+    }
+    // tool_result handled implicitly — we don't need a separate row;
+    // its presence just means the preceding tool_call completed.
+  });
+}
+
+if (typeof window !== 'undefined') {
+  window._appendMessageBlocks = _appendMessageBlocks;
+}
+
 function _markToolResult(agentId, resultSnippet) {
   var idx = _toolLogCounter[agentId] || 0;
   var entry = document.getElementById('tool-entry-'+agentId+'-'+idx);
@@ -11193,6 +11256,14 @@ async function loadProjectChat(projId) {
           _appendFileCards(cardHost, m.refs);
         }
       } catch(e) { console.log('[projectChat] file card attach failed', e); }
+      // Render captured agent events (tool_call / ui_block) so project
+      // chat shows the same execution story as the dedicated agent
+      // page. Sender id used as the scope for ui_block button clicks.
+      try {
+        if (m.blocks && m.blocks.length) {
+          _appendMessageBlocks(m.sender || projId, div, m.blocks);
+        }
+      } catch(e) { console.log('[projectChat] block render failed', e); }
       el.appendChild(div);
     });
 
@@ -13472,7 +13543,13 @@ async function openMeetingDetail(mid) {
     var msgHtml = (m.messages||[]).map(function(x, _i){
       var ts = x.created_at ? new Date(x.created_at*1000).toLocaleTimeString() : '';
       var anchor = 'mtg-msg-card-' + mid + '-' + _i;
-      _mtgMsgRefs.push({anchor: anchor, refs: x.refs || []});
+      // Capture refs AND blocks so post-render can attach both.
+      _mtgMsgRefs.push({
+        anchor: anchor,
+        refs: x.refs || [],
+        blocks: x.blocks || [],
+        sender: x.sender || '',
+      });
       var isUser = (x.role === 'user');
       var isSystem = (x.role === 'system');
 
@@ -13662,15 +13739,21 @@ async function openMeetingDetail(mid) {
     // -- Post-render: scroll to bottom --
     if (chatScroll) chatScroll.scrollTop = chatScroll.scrollHeight;
 
-    // -- Post-render: attach file cards --
+    // -- Post-render: attach file cards + execution event blocks --
     try {
       for (var _ri = 0; _ri < _mtgMsgRefs.length; _ri++) {
         var rec = _mtgMsgRefs[_ri];
-        if (!rec || !rec.refs || !rec.refs.length) continue;
+        if (!rec) continue;
         var host = document.getElementById(rec.anchor);
-        if (host && typeof _appendFileCards === 'function') _appendFileCards(host, rec.refs);
+        if (!host) continue;
+        if (rec.refs && rec.refs.length && typeof _appendFileCards === 'function') {
+          _appendFileCards(host, rec.refs);
+        }
+        if (rec.blocks && rec.blocks.length && typeof _appendMessageBlocks === 'function') {
+          _appendMessageBlocks(rec.sender || mid, host, rec.blocks);
+        }
       }
-    } catch(_e) { console.log('[meetingDetail] file card attach failed', _e); }
+    } catch(_e) { console.log('[meetingDetail] file card / block attach failed', _e); }
 
     // -- Post-render: load files list --
     if (m.workspace_dir) _loadMeetingFiles(mid);

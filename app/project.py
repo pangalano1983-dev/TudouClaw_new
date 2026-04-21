@@ -267,6 +267,11 @@ class ProjectMessage:
     content: str = ""
     msg_type: str = "chat"         # chat / task_update / system
     task_id: str = ""              # 关联的任务 ID（可选）
+    # Agent-execution events captured during this message's generation:
+    # tool_call / tool_result / ui_block. Rendered by the project chat
+    # frontend so the user sees the SAME execution story they would get
+    # on the dedicated agent chat page (UX consistency).
+    blocks: list[dict] = field(default_factory=list)
     timestamp: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict:
@@ -277,6 +282,7 @@ class ProjectMessage:
             "content": self.content,
             "msg_type": self.msg_type,
             "task_id": self.task_id,
+            "blocks": self.blocks,
             "timestamp": self.timestamp,
         }
 
@@ -294,6 +300,8 @@ class ProjectMessage:
             content=d.get("content", ""),
             msg_type=d.get("msg_type", "chat"),
             task_id=d.get("task_id", ""),
+            # Backward-compat: older persisted messages lack this field.
+            blocks=list(d.get("blocks") or []),
             timestamp=d.get("timestamp", time.time()),
         )
 
@@ -1120,7 +1128,8 @@ class Project:
     def post_message(self, sender: str, sender_name: str, content: str,
                      msg_type: str = "chat",
                      task_id: str = "",
-                     sender_role: str = "") -> ProjectMessage:
+                     sender_role: str = "",
+                     blocks: list[dict] | None = None) -> ProjectMessage:
         # 默认推断角色：user→admin, system→system, 其它→agent
         if not sender_role:
             if sender == "user":
@@ -1134,6 +1143,7 @@ class Project:
             sender_role=sender_role,
             content=content, msg_type=msg_type,
             task_id=task_id,
+            blocks=list(blocks or []),
         )
         with self._lock:
             self.chat_history.append(msg)
@@ -1767,19 +1777,31 @@ class ProjectChatEngine:
             #    submit_deliverable, create_goal, create_milestone) discover
             #    the project id without threading it through every tool call. ──
             from .project_context import set_project_context
+            from .agent_event_capture import (
+                snapshot_event_count,
+                capture_events_since,
+            )
             set_project_context(project.id)
+            # Capture events the agent emits during this chat call so the
+            # project UI can show the same tool_call / ui_block story the
+            # dedicated agent page shows (UX consistency with agent chat).
+            events_cursor = snapshot_event_count(agent)
             try:
                 result = self._chat(agent_id, prompt)
             finally:
                 set_project_context("")
+            captured_blocks = capture_events_since(agent, events_cursor)
             name = f"{agent.role}-{agent.name}" if agent else agent_id
-            logger.info("Project chat [%s] agent %s responded (%d chars)",
-                        project.name, name, len(result))
+            logger.info(
+                "Project chat [%s] agent %s responded (%d chars, %d events)",
+                project.name, name, len(result), len(captured_blocks),
+            )
             project.post_message(
                 sender=agent_id,
                 sender_name=name,
                 content=result,
                 msg_type="chat",
+                blocks=captured_blocks,
             )
             # B: auto-registration from chat replies is disabled on purpose —
             # deliverables should only come from explicit submit_deliverable tool
