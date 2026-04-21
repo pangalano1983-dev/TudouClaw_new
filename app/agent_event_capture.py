@@ -36,7 +36,16 @@ from typing import Any
 # Event kinds worth surfacing in non-streaming chat contexts.
 # Keep this list tight — adding more kinds means more storage bloat
 # AND more frontend render paths to maintain.
-_RENDERABLE_EVENT_KINDS = frozenset({"tool_call", "tool_result", "ui_block"})
+_RENDERABLE_EVENT_KINDS = frozenset({
+    "tool_call", "tool_result",
+    "ui_block",
+    # plan_update captures the agent's multi-step execution checklist.
+    # For streaming agent chat the UI updates in real-time; for the
+    # non-streaming project / meeting chat we snapshot the FINAL plan
+    # state at turn end, giving users the same "what did the agent do
+    # step-by-step" view they expect.
+    "plan_update",
+})
 
 # Cap on how many renderable events one chat turn can carry forward.
 # A pathological agent loop can emit hundreds of tool_calls; beyond
@@ -89,6 +98,11 @@ def capture_events_since(agent: Any, start_idx: int) -> list[dict]:
         return []
 
     out: list[dict] = []
+    # plan_update fires once per step mutation; each event carries the
+    # FULL plan snapshot. For non-streaming replay we only need the
+    # final state, so we remember the index of the last plan_update in
+    # `out` and overwrite it as new ones arrive (vs. appending all).
+    last_plan_idx = -1
     for evt in raw_tail:
         # AgentEvent exposes .kind, .data, .timestamp. Duck-type for safety.
         kind = getattr(evt, "kind", None)
@@ -96,11 +110,18 @@ def capture_events_since(agent: Any, start_idx: int) -> list[dict]:
             continue
         data = getattr(evt, "data", None) or {}
         ts = getattr(evt, "timestamp", 0.0)
-        out.append({
+        rendered = {
             "kind": kind,
             "data": _shrink_event_data(kind, data),
             "timestamp": float(ts) if ts else 0.0,
-        })
+        }
+        if kind == "plan_update" and last_plan_idx >= 0:
+            # Replace earlier plan_update snapshot — same plan, newer state.
+            out[last_plan_idx] = rendered
+        else:
+            if kind == "plan_update":
+                last_plan_idx = len(out)
+            out.append(rendered)
         if len(out) >= _MAX_EVENTS_PER_TURN:
             out.append({
                 "kind": "ellipsis",
@@ -128,4 +149,25 @@ def _shrink_event_data(kind: str, data: dict) -> dict:
     if kind == "ui_block":
         # ui_block is already bounded by build_ui_block's caps; pass through.
         return {"block": data.get("block", {})}
+    if kind == "plan_update":
+        # A plan is {summary, steps:[{id,title,status,result_summary}]}.
+        # Agent chat receives deltas and mutates the UI; we only receive
+        # this event for the SNAPSHOT at turn-end so we keep the full
+        # plan structure but truncate each step's verbose fields.
+        plan = data.get("plan") or {}
+        steps = plan.get("steps") or []
+        compact_steps = []
+        for s in steps[:40]:  # matches _MAX_EVENTS_PER_TURN for consistency
+            compact_steps.append({
+                "id": str(s.get("id", ""))[:40],
+                "title": str(s.get("title", ""))[:200],
+                "status": str(s.get("status", "pending"))[:20],
+                "result_summary": str(s.get("result_summary", ""))[:200],
+            })
+        return {
+            "plan": {
+                "task_summary": str(plan.get("task_summary", ""))[:400],
+                "steps": compact_steps,
+            },
+        }
     return dict(data)  # defensive copy

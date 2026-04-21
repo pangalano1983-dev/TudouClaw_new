@@ -3474,6 +3474,45 @@ function _renderCompactToolCall(data) {
   );
 }
 
+// Map plan_step.status → visual chip (icon + color).
+var _PLAN_STEP_CHIP = {
+  'done':        {icon: '✓', color: 'var(--success,#5cb85c)'},
+  'completed':   {icon: '✓', color: 'var(--success,#5cb85c)'},
+  'in_progress': {icon: '◐', color: 'var(--warning,#f0ad4e)'},
+  'running':     {icon: '◐', color: 'var(--warning,#f0ad4e)'},
+  'failed':      {icon: '✗', color: 'var(--error,#d9534f)'},
+  'skipped':     {icon: '⊘', color: 'var(--text3)'},
+  'pending':     {icon: '○', color: 'var(--text3)'},
+};
+
+function _renderPlanBlock(planData) {
+  // planData shape: {task_summary, steps:[{id,title,status,result_summary}]}
+  var plan = (planData || {}).plan || {};
+  var summary = _escHtml(plan.task_summary || '');
+  var steps = plan.steps || [];
+  if (!steps.length && !summary) return '';
+  var stepsHtml = steps.map(function(s) {
+    var chip = _PLAN_STEP_CHIP[s.status] || _PLAN_STEP_CHIP['pending'];
+    var title = _escHtml(s.title || '(untitled)');
+    var result = s.result_summary ? _escHtml(s.result_summary) : '';
+    return (
+      '<div style="display:flex;align-items:flex-start;gap:6px;padding:3px 0;font-size:12px">' +
+        '<span style="flex-shrink:0;color:' + chip.color + ';font-family:ui-monospace,monospace">' + chip.icon + '</span>' +
+        '<div style="flex:1;min-width:0">' +
+          '<div style="color:var(--text)">' + title + '</div>' +
+          (result ? '<div style="color:var(--text3);font-size:11px;opacity:0.75;margin-top:1px">' + result + '</div>' : '') +
+        '</div>' +
+      '</div>'
+    );
+  }).join('');
+  return (
+    '<div class="msg-plan-block" style="margin-top:8px;padding:8px 12px;background:rgba(99,102,241,0.06);border-left:2px solid var(--primary);border-radius:4px">' +
+      (summary ? '<div style="font-size:11px;color:var(--text2);font-weight:500;margin-bottom:4px">' + summary + '</div>' : '') +
+      stepsHtml +
+    '</div>'
+  );
+}
+
 function _appendMessageBlocks(agentId, msgDiv, blocks) {
   if (!blocks || !blocks.length) return;
   var toolLog = null;  // Lazy-init — only created when we have a tool_call to show.
@@ -3486,6 +3525,12 @@ function _appendMessageBlocks(agentId, msgDiv, blocks) {
         msgDiv.appendChild(toolLog);
       }
       toolLog.insertAdjacentHTML('beforeend', _renderCompactToolCall(evt.data || {}));
+    } else if (evt.kind === 'plan_update') {
+      // Execution checklist at the FINAL state of this turn.
+      var planHtml = _renderPlanBlock(evt.data || {});
+      if (planHtml) {
+        msgDiv.insertAdjacentHTML('beforeend', planHtml);
+      }
     } else if (evt.kind === 'ui_block') {
       // Reuse the agent-chat ui_block renderer; same payload shape.
       try {

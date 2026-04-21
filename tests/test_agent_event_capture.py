@@ -52,8 +52,9 @@ def test_capture_returns_empty_when_no_events_after_cursor():
 
 
 def test_capture_only_keeps_renderable_kinds():
-    """message / thinking / plan_update should be filtered out — they
-    either show up elsewhere or are internal noise."""
+    """message / thinking should be filtered out — they either show up
+    elsewhere or are internal noise. plan_update IS kept (execution
+    checklist replay). ui_block IS kept."""
     agent = _fake_agent([
         _fake_event("message", {"text": "hi"}, ts=1.0),
         _fake_event("tool_call", {"name": "read_file",
@@ -61,14 +62,62 @@ def test_capture_only_keeps_renderable_kinds():
         _fake_event("thinking", {"phase": "..."}, ts=3.0),
         _fake_event("tool_result", {"name": "read_file",
                                     "result": "file content"}, ts=4.0),
-        _fake_event("plan_update", {"plan": "..."}, ts=5.0),
+        _fake_event("plan_update", {"plan": {"task_summary": "x",
+                                              "steps": []}}, ts=5.0),
         _fake_event("ui_block", {"block": {"kind": "choice",
                                             "prompt": "go?",
                                             "options": []}}, ts=6.0),
     ])
     out = capture_events_since(agent, 0)
     kinds = [e["kind"] for e in out]
-    assert kinds == ["tool_call", "tool_result", "ui_block"]
+    assert kinds == ["tool_call", "tool_result", "plan_update", "ui_block"]
+
+
+def test_plan_update_keeps_only_final_snapshot():
+    """plan_update fires multiple times per turn (once per step mutation).
+    For non-streaming replay we keep only the LATEST snapshot — agent
+    mutating the same plan in-place should not balloon storage."""
+    plan_v1 = {"task_summary": "demo",
+               "steps": [{"id": "s1", "title": "A", "status": "running"},
+                         {"id": "s2", "title": "B", "status": "pending"}]}
+    plan_v2 = {"task_summary": "demo",
+               "steps": [{"id": "s1", "title": "A", "status": "done"},
+                         {"id": "s2", "title": "B", "status": "running"}]}
+    plan_v3 = {"task_summary": "demo",
+               "steps": [{"id": "s1", "title": "A", "status": "done"},
+                         {"id": "s2", "title": "B", "status": "done"}]}
+    agent = _fake_agent([
+        _fake_event("plan_update", {"plan": plan_v1}),
+        _fake_event("tool_call", {"name": "read_file", "args": ""}),
+        _fake_event("plan_update", {"plan": plan_v2}),
+        _fake_event("tool_call", {"name": "write_file", "args": ""}),
+        _fake_event("plan_update", {"plan": plan_v3}),
+    ])
+    out = capture_events_since(agent, 0)
+    # Exactly ONE plan_update remains — the latest state.
+    plan_events = [e for e in out if e["kind"] == "plan_update"]
+    assert len(plan_events) == 1
+    # And it's the final one (both steps done).
+    final_steps = plan_events[0]["data"]["plan"]["steps"]
+    assert all(s["status"] == "done" for s in final_steps)
+
+
+def test_plan_update_truncates_long_step_fields():
+    """Each step's title / result can be arbitrary — clamp so a
+    runaway agent can't balloon storage."""
+    plan = {
+        "task_summary": "S" * 1000,
+        "steps": [{"id": "x",
+                   "title": "T" * 500,
+                   "status": "done",
+                   "result_summary": "R" * 500}],
+    }
+    agent = _fake_agent([_fake_event("plan_update", {"plan": plan})])
+    out = capture_events_since(agent, 0)
+    got = out[0]["data"]["plan"]
+    assert len(got["task_summary"]) <= 400
+    assert len(got["steps"][0]["title"]) <= 200
+    assert len(got["steps"][0]["result_summary"]) <= 200
 
 
 def test_capture_snapshot_then_capture_isolates_new_events():
