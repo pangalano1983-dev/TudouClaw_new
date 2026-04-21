@@ -41,6 +41,7 @@ def _tool_save_experience(
     exp_type: str = "retrospective",
     source: str = "",
     role: str = "",
+    evidence: list[str] | None = None,
     **ctx: Any,
 ) -> str:
     """Persist an experience entry into the role-based experience library.
@@ -81,6 +82,16 @@ def _tool_save_experience(
 
         from ..experience_library import get_experience_library, Experience
 
+        # Normalize evidence: strip whitespace, drop empties, dedup while
+        # preserving insertion order.
+        evidence_clean: list[str] = []
+        seen_refs: set[str] = set()
+        for ref in (evidence or []):
+            s = str(ref).strip()
+            if s and s not in seen_refs:
+                seen_refs.add(s)
+                evidence_clean.append(s)
+
         lib = get_experience_library()
         exp = Experience(
             exp_type=etype,
@@ -91,6 +102,7 @@ def _tool_save_experience(
             taboo_rules=[str(r).strip() for r in (taboo_rules or []) if str(r).strip()],
             priority=pri,
             tags=[str(t).strip() for t in (tags or []) if str(t).strip()],
+            evidence=evidence_clean,
         )
         saved = lib.add_experience(resolved_role, exp)
         return (

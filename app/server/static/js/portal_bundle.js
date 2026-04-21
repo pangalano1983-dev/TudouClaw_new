@@ -3359,6 +3359,96 @@ if (typeof window !== 'undefined') {
   window._extractPrimaryArg = _extractPrimaryArg;
 }
 
+// ────────────────────────────────────────────────────────────────
+// UI block rendering (Sprint 3.1: choice / checklist inline cards)
+// ────────────────────────────────────────────────────────────────
+
+function _escHtml(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function _renderChoiceBlock(agentId, block) {
+  var prompt = _escHtml(block.prompt || '');
+  var options = (block.options || []).map(function(opt) {
+    var label = _escHtml(opt.label || '');
+    var id = _escHtml(opt.id || '');
+    return (
+      '<button class="ui-block-choice-btn" data-agent-id="' + _escHtml(agentId) +
+      '" data-option-id="' + id + '" data-option-label="' + label + '" ' +
+      'style="padding:6px 14px;margin:4px 6px 0 0;border-radius:6px;' +
+      'border:1px solid var(--border);background:var(--primary-weak,rgba(100,150,255,0.08));' +
+      'color:var(--text);cursor:pointer;font-size:13px">' + label + '</button>'
+    );
+  }).join('');
+  return (
+    '<div class="ui-block ui-block-choice" style="padding:10px 12px;margin:8px 0;' +
+    'border-left:3px solid var(--primary);background:var(--surface);border-radius:6px">' +
+    '<div style="margin-bottom:6px;font-weight:500">' + prompt + '</div>' +
+    '<div>' + options + '</div>' +
+    '</div>'
+  );
+}
+
+function _renderChecklistBlock(block) {
+  var prompt = _escHtml(block.prompt || '');
+  var items = (block.items || []).map(function(item, i) {
+    var checked = item.done ? 'checked' : '';
+    var text = _escHtml(item.text || '');
+    var id = _escHtml(item.id || ('item_' + i));
+    return (
+      '<label style="display:flex;align-items:flex-start;gap:6px;padding:3px 0;cursor:pointer">' +
+      '<input type="checkbox" ' + checked + ' data-item-id="' + id + '" ' +
+      'style="margin-top:3px;flex-shrink:0">' +
+      '<span style="flex:1">' + text + '</span></label>'
+    );
+  }).join('');
+  return (
+    '<div class="ui-block ui-block-checklist" style="padding:10px 12px;margin:8px 0;' +
+    'border-left:3px solid var(--success,#5cb85c);background:var(--surface);border-radius:6px">' +
+    '<div style="margin-bottom:6px;font-weight:500">' + prompt + '</div>' +
+    '<div>' + items + '</div>' +
+    '</div>'
+  );
+}
+
+function _appendUiBlock(agentId, msgDiv, block) {
+  if (!block || !block.kind) return;
+  var wrapper = document.createElement('div');
+  if (block.kind === 'choice') {
+    wrapper.innerHTML = _renderChoiceBlock(agentId, block);
+    msgDiv.appendChild(wrapper);
+    // Wire up click handlers. User click sends the option label as a
+    // follow-up user message, giving the agent feedback in its next turn.
+    var btns = wrapper.querySelectorAll('.ui-block-choice-btn');
+    btns.forEach(function(btn) {
+      btn.addEventListener('click', function(e) {
+        var label = btn.getAttribute('data-option-label') || '';
+        // Disable all sibling buttons so the user sees "I picked X".
+        btns.forEach(function(b) { b.disabled = true; b.style.opacity = '0.5'; });
+        btn.style.background = 'var(--primary)';
+        btn.style.color = '#fff';
+        // Send the label as a chat message — the simplest feedback path.
+        var inputBox = document.getElementById('chat-input-' + agentId);
+        if (inputBox) {
+          inputBox.value = label;
+          var sendBtn = document.getElementById('chat-send-' + agentId);
+          if (sendBtn) sendBtn.click();
+        }
+      });
+    });
+  } else if (block.kind === 'checklist') {
+    wrapper.innerHTML = _renderChecklistBlock(block);
+    msgDiv.appendChild(wrapper);
+    // Checkboxes are purely visual — no feedback to backend in v1.
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window._appendUiBlock = _appendUiBlock;
+  window._renderChoiceBlock = _renderChoiceBlock;
+  window._renderChecklistBlock = _renderChecklistBlock;
+}
+
 function _markToolResult(agentId, resultSnippet) {
   var idx = _toolLogCounter[agentId] || 0;
   var entry = document.getElementById('tool-entry-'+agentId+'-'+idx);
@@ -3593,6 +3683,12 @@ async function _streamTaskEvents(agentId, taskId, thinkDiv, progressBar) {
               // every artifact produced during this assistant turn.
               if (!msgDiv) { msgDiv = addChatBubble(agentId, 'assistant', ''); }
               try { _appendFileCards(msgDiv, evt.refs || []); } catch(e) {}
+            } else if(evt.type==='ui_block') {
+              // Sprint 3.1: interactive choice card or display-only checklist.
+              if (!msgDiv) { msgDiv = addChatBubble(agentId, 'assistant', ''); }
+              try { _appendUiBlock(agentId, msgDiv, evt.block || {}); } catch(e) {
+                console.warn('[ui_block] render failed', e);
+              }
             } else if(evt.type==='error') {
               if (thinkDiv.parentNode) thinkDiv.remove();
               if (!msgDiv) { msgDiv = addChatBubble(agentId, 'assistant', ''); }

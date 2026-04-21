@@ -84,6 +84,13 @@ class Experience:
     is_valid: bool = True              # False = marked for purge
     role: str = ""                     # which role this belongs to
     tags: list[str] = field(default_factory=list)
+    # Sprint 3.2 — evidence references. Each entry is a free-form but
+    # conventionally-shaped pointer to the source of truth this lesson
+    # was mined from: "path/to/file.py:LINE" or "docs/SPEC.md#section".
+    # When the experience is later cited (in prompt injection, portal
+    # display, etc.) these references let the agent / reviewer jump
+    # back to the raw evidence rather than trust the distilled summary.
+    evidence: list[str] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -108,6 +115,7 @@ class Experience:
             "consecutive_fails": self.consecutive_fails,
             "is_valid": self.is_valid, "role": self.role,
             "tags": self.tags,
+            "evidence": self.evidence,
             "created_at": self.created_at, "updated_at": self.updated_at,
         }
 
@@ -128,6 +136,9 @@ class Experience:
             is_valid=d.get("is_valid", True),
             role=d.get("role", ""),
             tags=d.get("tags", []),
+            # Backward-compat: older persisted entries lack this field;
+            # default to empty list so existing libraries still load.
+            evidence=d.get("evidence", []),
             created_at=d.get("created_at", time.time()),
             updated_at=d.get("updated_at", time.time()),
         )
@@ -144,6 +155,14 @@ class Experience:
         if self.taboo_rules:
             for i, r in enumerate(self.taboo_rules, 1):
                 lines.append(f"  禁忌{i}: {r}")
+        # Citations — listed compactly. The agent can fetch details via
+        # read_file when a reference looks like `path:line` or open the
+        # doc if it is a markdown anchor.
+        if self.evidence:
+            refs_display = ", ".join(self.evidence[:5])
+            if len(self.evidence) > 5:
+                refs_display += f" (+{len(self.evidence) - 5} more)"
+            lines.append(f"  依据: {refs_display}")
         return "\n".join(lines)
 
 

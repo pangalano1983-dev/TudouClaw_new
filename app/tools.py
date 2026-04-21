@@ -954,6 +954,20 @@ TOOL_DEFINITIONS: list[dict] = [
                         "type": "string",
                         "description": "Override the role bucket; defaults to the calling agent's role",
                     },
+                    "evidence": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Citation references pointing to the source of "
+                            "truth for this lesson. Conventional formats: "
+                            "'path/to/file.py:LINE' (code), "
+                            "'docs/SPEC.md#section' (doc anchor), "
+                            "or a URL. Listed when the experience is injected "
+                            "into future prompts so agents/reviewers can jump "
+                            "back to the raw evidence. Dedup + whitespace-trim "
+                            "applied automatically."
+                        ),
+                    },
                 },
                 "required": ["scene", "core_knowledge"],
             },
@@ -1591,6 +1605,76 @@ TOOL_DEFINITIONS: list[dict] = [
             },
         },
     },
+    # ---- UI block tools (rich interactive messages) ----
+    {
+        "type": "function",
+        "function": {
+            "name": "emit_ui_block",
+            "description": (
+                "Render an interactive UI block inline in the chat — a choice card (buttons) or a checklist.\n"
+                "Use when: asking the user to pick among concrete options ('Continue / Revert / Show diff?'), "
+                "or surfacing a to-do list for the user to tick off as work progresses.\n"
+                "Not for: free-form yes/no questions (just ask in prose — the user will reply). "
+                "Not for plain progress tracking (use plan_update — visible to user as execution steps). "
+                "Not for sharing artifacts (files auto-render via artifact_refs).\n"
+                "Output: renders a card in the chat. kind='choice' → user click sends a follow-up message "
+                "with the option label as text. kind='checklist' → display-only, no feedback loop.\n"
+                "GOTCHA: at most 8 choice options / 20 checklist items (above that the UI is unwieldy — "
+                "narrow the question). Option/item IDs must be unique within the block. Do NOT follow up "
+                "emit_ui_block with another prose question — the user sees both as separate prompts."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": ["choice", "checklist"],
+                        "description": "Block type: 'choice' = clickable buttons, 'checklist' = display-only list.",
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "The question or header text shown at the top of the block (max 400 chars).",
+                    },
+                    "options": {
+                        "type": "array",
+                        "description": "For kind='choice'. Each item: a string label OR {id, label}.",
+                        "items": {
+                            "oneOf": [
+                                {"type": "string"},
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {"type": "string"},
+                                        "label": {"type": "string"},
+                                    },
+                                    "required": ["label"],
+                                },
+                            ]
+                        },
+                    },
+                    "items": {
+                        "type": "array",
+                        "description": "For kind='checklist'. Each item: a string text OR {id, text, done}.",
+                        "items": {
+                            "oneOf": [
+                                {"type": "string"},
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {"type": "string"},
+                                        "text": {"type": "string"},
+                                        "done": {"type": "boolean"},
+                                    },
+                                    "required": ["text"],
+                                },
+                            ]
+                        },
+                    },
+                },
+                "required": ["kind", "prompt"],
+            },
+        },
+    },
 ]
 
 
@@ -1690,6 +1774,12 @@ from .tools_split.skills import (  # noqa: E402,F401
     _tool_submit_skill,
 )
 
+# UI-block tools — interactive choice + display-only checklist.
+from .tools_split.ui import (  # noqa: E402,F401
+    _tool_emit_ui_block,
+    build_ui_block,
+)
+
 # Web / network tools (already extracted in an earlier commit; import
 # here so the dispatcher below can reference the handlers by name).
 from .tools_split.web import (  # noqa: E402,F401
@@ -1738,6 +1828,9 @@ _TOOL_FUNCS: dict[str, callable] = {
     "knowledge_lookup": _tool_knowledge_lookup,
     "share_knowledge": _tool_share_knowledge,
     "learn_from_peers": _tool_learn_from_peers,
+    # UI-block tools (choice buttons / checklist). Handler validates;
+    # agent_execution.py emits the ui_block event after.
+    "emit_ui_block": _tool_emit_ui_block,
     # Human-in-the-loop tools (handled specially by agent, not dispatched here)
     "request_web_login": lambda **kw: "ERROR: request_web_login must be handled by agent directly",
     # Inter-agent handoff with 3-state handshake (handled specially by agent)

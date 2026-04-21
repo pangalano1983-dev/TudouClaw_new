@@ -893,6 +893,27 @@ class AgentExecutionMixin:
                                 from .agent_types import AgentEvent
                                 _emit(AgentEvent(time.time(), "plan_update",
                                                  {"plan": self.get_current_plan()}))
+                            elif name == "emit_ui_block":
+                                # Validate the block then emit a typed event so
+                                # the portal can render the interactive card.
+                                # Handler returns a short text confirmation for
+                                # the LLM's own history; the actual UI payload
+                                # travels via the ui_block event.
+                                from .tools_split.ui import build_ui_block
+                                block, err = build_ui_block(
+                                    kind=arguments.get("kind", ""),
+                                    prompt=arguments.get("prompt", ""),
+                                    options=arguments.get("options"),
+                                    items=arguments.get("items"),
+                                )
+                                if err:
+                                    result = err
+                                else:
+                                    from .agent_types import AgentEvent
+                                    _emit(AgentEvent(time.time(), "ui_block",
+                                                     {"block": block}))
+                                    result = self._execute_tool_with_policy(
+                                        name, arguments, on_event=on_event)
                             else:
                                 result = self._execute_tool_with_policy(
                                     name, arguments, on_event=on_event)
