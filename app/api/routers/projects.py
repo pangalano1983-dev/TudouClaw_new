@@ -513,7 +513,20 @@ async def get_project_chat(
     try:
         project = _get_project_or_404(hub, project_id)
         msgs = project.get_chat_history(limit=limit) if hasattr(project, "get_chat_history") else []
-        return {"messages": [m.to_dict() if hasattr(m, "to_dict") else m for m in msgs]}
+        msg_dicts = [m.to_dict() if hasattr(m, "to_dict") else m for m in msgs]
+        # Enrich with FileCard refs so the frontend renders clickable
+        # download cards for artifacts the agent produced. The
+        # existing enricher on the stdlib portal route is generic —
+        # it doesn't care whether the messages came from a meeting or
+        # a project, just that the message dicts have sender+content.
+        try:
+            from ...server.portal_routes_get import (
+                _enrich_meeting_messages_with_refs,
+            )
+            _enrich_meeting_messages_with_refs(hub, msg_dicts)
+        except Exception as _e:
+            logger.debug("project chat ref enrichment failed: %s", _e)
+        return {"messages": msg_dicts}
     except HTTPException:
         raise
     except Exception as e:

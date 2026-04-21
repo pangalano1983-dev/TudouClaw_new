@@ -63,7 +63,19 @@ async def get_meeting(
         m = reg.get(meeting_id)
         if not m:
             raise HTTPException(404, "Meeting not found")
-        return m.to_dict()
+        data = m.to_dict()
+        # Enrich messages with file refs so the frontend can render
+        # clickable FileCards for any file/URL an agent mentioned —
+        # same behavior as the legacy stdlib portal route, so meeting
+        # chat has parity with agent chat's artifact display.
+        try:
+            from ...server.portal_routes_get import (
+                _enrich_meeting_messages_with_refs,
+            )
+            _enrich_meeting_messages_with_refs(hub, data.get("messages") or [])
+        except Exception as _e:
+            logger.debug("meeting ref enrichment failed: %s", _e)
+        return data
     except HTTPException:
         raise
     except Exception as e:
@@ -89,6 +101,15 @@ async def get_meeting_messages(
         if not m:
             raise HTTPException(404, "Meeting not found")
         msg_dicts = [x.to_dict() for x in m.messages]
+        # Same refs enrichment as GET /meetings/{id}. Best-effort —
+        # clients still get the raw message list if the enricher fails.
+        try:
+            from ...server.portal_routes_get import (
+                _enrich_meeting_messages_with_refs,
+            )
+            _enrich_meeting_messages_with_refs(hub, msg_dicts)
+        except Exception as _e:
+            logger.debug("meeting ref enrichment failed: %s", _e)
         return {"messages": msg_dicts}
     except HTTPException:
         raise
