@@ -1,0 +1,165 @@
+# Skill routing manifest — single source of truth for SKILL CHAIN + DISAMBIGUATION
+# --------------------------------------------------------------------------------
+# Each per-skill `manifest.yaml` (or SKILL.md frontmatter) owns identity:
+# name, version, runtime, entry, triggers. This file layers on the extras
+# the routing engine needs but that don't belong in individual skill files:
+#
+#   not_for    — explicit exclusion phrases (complements frontmatter triggers)
+#   next       — which skill(s) naturally follow this one (SOP chain)
+#   sop_step   — position in a canonical workflow, if any
+#   requires_mcp — hard MCP dependencies (startup-time check)
+#
+# If a skill is not listed here, it still loads — it just has no routing
+# extras. Add an entry only when you need one of the fields above.
+#
+# Schema version bumped when breaking changes land. See
+# app/skills/manifest_loader.py for the reader.
+
+schemaVersion: 1
+
+skills:
+
+  # ── Presentation + document generation ────────────────────────────
+  pptx-author:
+    not_for:
+      - "simple bullet-only decks"
+      - "editing an existing pptx file"
+    next:
+      - "safe-artifact-paths"   # After writing, verify outputs live in workspace
+    sop_step: null
+
+  # ── Engineering workflow chain (superpowers pack) ─────────────────
+  brainstorming:
+    not_for:
+      - "implementation"
+      - "writing code"
+    next:
+      - "writing-plans"
+    sop_step: 0
+
+  writing-plans:
+    not_for:
+      - "quick one-liners"
+      - "exploratory reading"
+    next:
+      - "using-git-worktrees"
+      - "test-driven-development"
+    sop_step: 1
+
+  using-git-worktrees:
+    not_for:
+      - "one-off edits on main"
+    next:
+      - "test-driven-development"
+    sop_step: 2
+
+  test-driven-development:
+    not_for:
+      - "pure documentation changes"
+      - "trivial refactors with existing coverage"
+    next:
+      - "verification-before-completion"
+    sop_step: 3
+
+  verification-before-completion:
+    not_for:
+      - "still in the middle of implementation"
+    next:
+      - "requesting-code-review"
+    sop_step: 4
+
+  requesting-code-review:
+    not_for:
+      - "FYI broadcasts (use send_message tool instead)"
+    next:
+      - "receiving-code-review"
+    sop_step: 5
+
+  receiving-code-review:
+    not_for:
+      - "giving review (use requesting-code-review from the author side)"
+    next:
+      - "finishing-a-development-branch"
+    sop_step: 6
+
+  finishing-a-development-branch:
+    not_for:
+      - "work still in progress"
+    next: []
+    sop_step: 7
+
+  systematic-debugging:
+    not_for:
+      - "known-cause simple fixes"
+      - "feature work (use test-driven-development)"
+    next:
+      - "test-driven-development"   # Write a regression test before merging fix
+
+  subagent-driven-development:
+    not_for:
+      - "tasks that need your full conversation context"
+      - "single-file edits"
+    next: []
+
+  dispatching-parallel-agents:
+    not_for:
+      - "sequentially-dependent tasks"
+    next: []
+
+  executing-plans:
+    not_for:
+      - "tasks without a written plan (use writing-plans first)"
+    next:
+      - "verification-before-completion"
+
+  writing-skills:
+    not_for:
+      - "USING an existing skill (invoke it directly)"
+    next: []
+
+  using-superpowers:
+    not_for:
+      - "non-engineering tasks"
+    next: []
+
+  # ── Home-grown tudou-builtin skills ───────────────────────────────
+  safe-artifact-paths:
+    not_for:
+      - "read-only operations"
+    next: []
+
+  code-review-guide:
+    not_for:
+      - "authoring code (use the tdd / implementation skills)"
+    next: []
+
+  web-automator:
+    not_for:
+      - "static page reads (use web_fetch tool)"
+      - "one-shot HTTP calls (use http_request tool)"
+    next: []
+
+  action-first:
+    not_for:
+      - "prose-only advisory tasks"
+    next: []
+
+  # ── Python-runtime builtins ───────────────────────────────────────
+  send_email:
+    requires_mcp:
+      - "email"
+    not_for:
+      - "broadcasting to agents (use send_message tool)"
+    next: []
+
+  take_screenshot:
+    requires_mcp:
+      - "screen-capture"
+    not_for:
+      - "web page screenshots (use web_screenshot tool)"
+    next: []
+
+  jimeng_video:
+    not_for:
+      - "stitching existing image frames (use create_video tool)"
+    next: []

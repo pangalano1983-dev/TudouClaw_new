@@ -683,7 +683,9 @@ Context:
 - Core knowledge: {knowledge_text}
 - Source experiences: {exp_summary}
 
-MANDATORY STRUCTURE (every section below is REQUIRED — do not omit any):
+MANDATORY STRUCTURE (every section below is REQUIRED — do not omit any).
+Full specification: app/skills/refs/skill-template.md — read it if in doubt.
+Description format specification: app/skills/refs/tool-description-standard.md.
 
 1. YAML frontmatter with:
    - name: {skill_name}
