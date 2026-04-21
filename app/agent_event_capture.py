@@ -45,6 +45,10 @@ _RENDERABLE_EVENT_KINDS = frozenset({
     # state at turn end, giving users the same "what did the agent do
     # step-by-step" view they expect.
     "plan_update",
+    # skill_match — emitted when the agent matches a skill for the
+    # current turn. Surfaces skill invocations so users can see
+    # which capability the agent leaned on, not just which tools.
+    "skill_match",
 })
 
 # Cap on how many renderable events one chat turn can carry forward.
@@ -149,6 +153,16 @@ def _shrink_event_data(kind: str, data: dict) -> dict:
     if kind == "ui_block":
         # ui_block is already bounded by build_ui_block's caps; pass through.
         return {"block": data.get("block", {})}
+    if kind == "skill_match":
+        # Agent's skill-matching hit. Keep the name + a short reason
+        # string; internal scoring floats aren't meaningful in chat
+        # display.
+        return {
+            "skill_name": str(data.get("skill_name")
+                              or data.get("name") or "")[:80],
+            "reason": str(data.get("reason")
+                          or data.get("triggered_by") or "")[:200],
+        }
     if kind == "plan_update":
         # A plan is {summary, steps:[{id,title,status,result_summary}]}.
         # Agent chat receives deltas and mutates the UI; we only receive

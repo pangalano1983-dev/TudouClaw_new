@@ -3625,9 +3625,25 @@ function _renderPlanBlock(planData) {
   );
 }
 
+function _renderSkillMatchBadge(data) {
+  // data: {skill_name, reason}
+  var name = _escHtml(data.skill_name || '');
+  var reason = _escHtml(data.reason || '');
+  var tooltip = reason ? ' title="' + reason + '"' : '';
+  return (
+    '<span' + tooltip + ' style="display:inline-flex;align-items:center;gap:4px;' +
+    'padding:2px 8px;margin:2px 4px 2px 0;border-radius:10px;' +
+    'background:rgba(167,139,250,0.15);color:#a78bfa;font-size:11px;' +
+    'border:1px solid rgba(167,139,250,0.3)">' +
+    '🎯 ' + name +
+    '</span>'
+  );
+}
+
 function _appendMessageBlocks(agentId, msgDiv, blocks) {
   if (!blocks || !blocks.length) return;
   var toolLog = null;  // Lazy-init — only created when we have a tool_call to show.
+  var skillBar = null; // Lazy-init — only created if we have skill_match events.
   blocks.forEach(function(evt) {
     if (!evt || !evt.kind) return;
     if (evt.kind === 'tool_call') {
@@ -3637,6 +3653,18 @@ function _appendMessageBlocks(agentId, msgDiv, blocks) {
         msgDiv.appendChild(toolLog);
       }
       toolLog.insertAdjacentHTML('beforeend', _renderCompactToolCall(evt.data || {}));
+    } else if (evt.kind === 'skill_match') {
+      // Skill badges render in a single horizontal bar above the
+      // tool log, so users see "the agent brought X skill to bear"
+      // at a glance without it cluttering the tool-call timeline.
+      if (!skillBar) {
+        skillBar = document.createElement('div');
+        skillBar.style.cssText = 'margin-top:6px;display:flex;flex-wrap:wrap;align-items:center;gap:0';
+        // Prepend label
+        skillBar.innerHTML = '<span style="font-size:10px;color:var(--text3);margin-right:4px">Skills:</span>';
+        msgDiv.appendChild(skillBar);
+      }
+      skillBar.insertAdjacentHTML('beforeend', _renderSkillMatchBadge(evt.data || {}));
     } else if (evt.kind === 'plan_update') {
       // Execution checklist at the FINAL state of this turn.
       var planHtml = _renderPlanBlock(evt.data || {});
