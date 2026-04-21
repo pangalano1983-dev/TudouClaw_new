@@ -192,9 +192,14 @@ def test_reply_loop_no_chaining_when_no_mention():
     assert invocations == ["a1"]
 
 
-def test_reply_loop_does_not_reschedule_already_replied():
-    """If Alice @s Bob, Bob replies and @s Alice back — Alice must NOT
-    be re-queued (she already replied this round). Prevents ping-pong."""
+def test_reply_loop_allows_bounded_ping_pong():
+    """Alice @s Bob, Bob replies and @s Alice back, Alice @s Bob again,
+    and so on — each agent is allowed up to max_replies_per_agent turns.
+
+    Prior guard was over-aggressive (seen-once-forever), so a meeting
+    died after one pass. Now bounded ping-pong is allowed — letting
+    real back-and-forth unfold until either per-agent cap or total cap
+    fires."""
     m = _make_meeting(["a1", "a2"])
     agents = {"a1": _fake_agent("a1", "Alice"),
               "a2": _fake_agent("a2", "Bob")}
@@ -203,9 +208,8 @@ def test_reply_loop_does_not_reschedule_already_replied():
 
     def chat_fn(aid: str, _prompt) -> str:
         invocations.append(aid)
-        if aid == "a1":
-            return "@Bob 请验证"
-        return "@Alice 我验证完了"   # Bob @s Alice back
+        # Always @ the other — keeps the chain alive until a cap hits.
+        return "@Bob ..." if aid == "a1" else "@Alice ..."
 
     reg = MagicMock(spec=MeetingRegistry)
     meeting_agent_reply(
@@ -215,9 +219,63 @@ def test_reply_loop_does_not_reschedule_already_replied():
         agent_lookup_fn=agents.get,
         user_msg="kickoff",
         target_agent_ids=["a1"],
+        max_replies_per_agent=3,
     )
-    # Each agent replies once; no ping-pong.
-    assert invocations == ["a1", "a2"]
+    # a1 speaks 3 times, a2 speaks 3 times — per-agent cap holds.
+    # Order: a1 a2 a1 a2 a1 a2.
+    assert invocations == ["a1", "a2", "a1", "a2", "a1", "a2"]
+
+
+def test_reply_loop_respects_max_replies_per_agent():
+    """Setting max_replies_per_agent=1 restores old single-pass."""
+    m = _make_meeting(["a1", "a2"])
+    agents = {"a1": _fake_agent("a1", "Alice"),
+              "a2": _fake_agent("a2", "Bob")}
+
+    invocations: list[str] = []
+
+    def chat_fn(aid: str, _prompt) -> str:
+        invocations.append(aid)
+        return "@Bob ..." if aid == "a1" else "@Alice ..."
+
+    reg = MagicMock(spec=MeetingRegistry)
+    meeting_agent_reply(
+        meeting=m,
+        registry=reg,
+        agent_chat_fn=chat_fn,
+        agent_lookup_fn=agents.get,
+        user_msg="kickoff",
+        target_agent_ids=["a1"],
+        max_replies_per_agent=1,
+    )
+    assert invocations == ["a1", "a2"]  # same as before the new default
+
+
+def test_reply_loop_respects_max_total_replies():
+    """Hard ceiling: even if per-agent cap would allow more, the total
+    number of agent replies stops at max_total_replies."""
+    m = _make_meeting(["a1", "a2"])
+    agents = {"a1": _fake_agent("a1", "Alice"),
+              "a2": _fake_agent("a2", "Bob")}
+
+    invocations: list[str] = []
+
+    def chat_fn(aid: str, _prompt) -> str:
+        invocations.append(aid)
+        return "@Bob ..." if aid == "a1" else "@Alice ..."
+
+    reg = MagicMock(spec=MeetingRegistry)
+    meeting_agent_reply(
+        meeting=m,
+        registry=reg,
+        agent_chat_fn=chat_fn,
+        agent_lookup_fn=agents.get,
+        user_msg="kickoff",
+        target_agent_ids=["a1"],
+        max_replies_per_agent=10,   # high enough not to matter
+        max_total_replies=4,         # hard cap hits first
+    )
+    assert len(invocations) == 4
 
 
 def test_reply_loop_respects_max_participants_cap():

@@ -838,6 +838,8 @@ def meeting_agent_reply(meeting: "Meeting",
                           user_msg: str,
                           target_agent_ids: Optional[list[str]] = None,
                           max_participants: int = 10,
+                          max_replies_per_agent: int = 3,
+                          max_total_replies: int = 12,
                           multimodal_parts: Optional[list[dict]] = None,
                           gen: Optional[int] = None) -> None:
     """Trigger each participant agent to reply in the meeting.
@@ -862,24 +864,35 @@ def meeting_agent_reply(meeting: "Meeting",
     if not targets:
         logger.info("meeting %s: no reply targets, skipping reply sequence", meeting.id)
         return
-    # de-dup, cap, filter empty
-    seen = set()
-    chosen = []
+    # De-dup initial target list but track reply counts per agent so
+    # @-mention chains can re-activate an agent up to max_replies_per_agent
+    # times (letting 小土 → 小安 → 小土 → 小安 play out instead of
+    # dying after one pass).
+    reply_counts: dict[str, int] = {}
+    chosen: list[str] = []
+    distinct_participants: set[str] = set()
     for aid in targets:
-        if not aid or aid in seen:
+        if not aid or aid in distinct_participants:
             continue
-        seen.add(aid)
+        distinct_participants.add(aid)
         chosen.append(aid)
-        if len(chosen) >= max_participants:
+        reply_counts[aid] = 0
+        if len(distinct_participants) >= max_participants:
             break
 
-    # ``chosen`` is iterated by index rather than a traditional for-each
-    # so that agent replies containing ``@<other-participant>`` can
-    # APPEND to the queue mid-loop — the @'d participant speaks next in
-    # the same reply round. ``seen`` keeps the same agent from being
-    # scheduled twice. The cap ``max_participants`` still applies.
+    # Iterate by index so @-mentions discovered mid-round can APPEND to
+    # the queue. Caps enforced at enqueue time:
+    #   - max_replies_per_agent: each agent speaks at most this many
+    #     times per turn (default 3 — enough for short back-and-forth
+    #     but bounded so the meeting doesn't loop forever).
+    #   - max_total_replies:     hard ceiling on the number of agent
+    #     messages this turn produces (default 12 — stops pathological
+    #     chains even if per-agent caps were raised).
+    #   - max_participants:      how many DIFFERENT agents can be
+    #     brought in (default 10).
     loop_i = 0
-    while loop_i < len(chosen):
+    total_replies = 0
+    while loop_i < len(chosen) and total_replies < max_total_replies:
         aid = chosen[loop_i]
         loop_i += 1
         # -- User-priority interrupt check --
@@ -947,27 +960,45 @@ def meeting_agent_reply(meeting: "Meeting",
             registry.save()
         except Exception:
             pass
+        reply_counts[aid] = reply_counts.get(aid, 0) + 1
+        total_replies += 1
 
-        # @-mention chaining: if the reply contains @<participant-name>
-        # of someone who hasn't been scheduled to speak yet, queue them
-        # up. This is how "小土 @s 小安 请验证..." triggers 小安 to
-        # respond in the same round — without requiring 小土 to call
-        # the send_message tool explicitly.
+        # @-mention chaining: scan the reply for @<participant-name> and
+        # re-queue the mentioned participant. Unlike the earlier one-shot
+        # guard, an agent may be re-queued up to max_replies_per_agent
+        # times — so 小土→小安→小土→小安 is allowed, just bounded.
         try:
             mentioned = _find_at_mentioned_agents(
                 reply or "", meeting, agent_lookup_fn,
                 exclude_agent_id=aid,
             )
             for new_target in mentioned:
-                if new_target in seen:
-                    continue
-                if len(chosen) >= max_participants:
+                if total_replies + (len(chosen) - loop_i) >= max_total_replies:
+                    # Would bust the hard total cap even before we pop
+                    # all already-queued items. Stop queueing.
                     break
-                seen.add(new_target)
+                prior = reply_counts.get(new_target, 0)
+                if prior >= max_replies_per_agent:
+                    logger.info(
+                        "meeting %s: %s already replied %d times (cap=%d), "
+                        "not re-queueing on @-mention",
+                        meeting.id, new_target[:8] if new_target else "?",
+                        prior, max_replies_per_agent,
+                    )
+                    continue
+                # Cap on DISTINCT participants (not on reply count).
+                if new_target not in distinct_participants and \
+                        len(distinct_participants) >= max_participants:
+                    break
+                distinct_participants.add(new_target)
                 chosen.append(new_target)
+                reply_counts.setdefault(new_target, 0)
                 logger.info(
-                    "meeting %s: %s @-mentioned a participant, queueing for reply",
-                    meeting.id, aid[:8] if aid else "?",
+                    "meeting %s: %s @-mentioned %s (reply #%d) — queued",
+                    meeting.id,
+                    aid[:8] if aid else "?",
+                    new_target[:8] if new_target else "?",
+                    reply_counts.get(new_target, 0) + 1,
                 )
         except Exception as _mention_err:
             # Never let mention parsing crash the reply sequence.

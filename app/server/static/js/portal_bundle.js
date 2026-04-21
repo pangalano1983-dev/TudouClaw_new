@@ -3753,22 +3753,44 @@ async function _decorateTypingBubbles(container, pendingMap) {
 
     var events = await _fetchAgentActivityEvents(aid, since);
 
-    // Ensure the bubble has a log area (flex-column below the header).
-    var log = bubble.querySelector('.typing-activity-log');
-    if (!log) {
-      log = document.createElement('div');
-      log.className = 'typing-activity-log';
-      log.style.cssText = 'width:100%;margin-top:4px;display:flex;flex-direction:column;gap:1px;font-size:10px;font-family:ui-monospace,monospace';
-      // Ensure bubble can wrap the multi-row log.
-      bubble.style.flexDirection = 'column';
-      bubble.style.alignItems = 'flex-start';
-      bubble.appendChild(log);
+    // Elapsed-time pill. Gives IMMEDIATE proof-of-life even when the
+    // turn is pure discussion (no tool calls → activity log would
+    // otherwise stay empty and the user assumes the agent hung).
+    var elapsedSec = Math.max(0, Math.floor(Date.now() / 1000 - since));
+    var elapsedLabel = elapsedSec < 60
+      ? elapsedSec + 's'
+      : Math.floor(elapsedSec / 60) + 'm' + (elapsedSec % 60) + 's';
+    var elapsedSlot = bubble.querySelector('.typing-elapsed');
+    if (!elapsedSlot) {
+      elapsedSlot = document.createElement('span');
+      elapsedSlot.className = 'typing-elapsed';
+      elapsedSlot.style.cssText = 'font-size:10px;color:var(--text3);opacity:0.7;margin-left:6px;font-family:ui-monospace,monospace';
+      bubble.appendChild(elapsedSlot);
     }
+    elapsedSlot.textContent = '· ' + elapsedLabel;
+
+    // Log area for tool_call / tool_result / skill_match rows. Only
+    // materialized when there's actual activity — keeps pure-discussion
+    // turns from showing a redundant "💭 思考中" under the
+    // already-animated "正在发言 ●●●" header.
+    var log = bubble.querySelector('.typing-activity-log');
 
     // Dedup key per event so repeated polls don't double-render.
     bubble._activityKeys = bubble._activityKeys || {};
 
-    // For tool_result, flip the matching tool_call row from ⏳ → ✓.
+    // Lazy-create the log container only when there's something to
+    // put in it. Avoids the empty-container + redundant-fallback look.
+    var ensureLog = function() {
+      if (log) return log;
+      log = document.createElement('div');
+      log.className = 'typing-activity-log';
+      log.style.cssText = 'width:100%;margin-top:4px;display:flex;flex-direction:column;gap:1px;font-size:10px;font-family:ui-monospace,monospace';
+      bubble.style.flexDirection = 'column';
+      bubble.style.alignItems = 'flex-start';
+      bubble.appendChild(log);
+      return log;
+    };
+
     events.forEach(function(evt) {
       var key = evt.kind + '|' + (evt.timestamp || 0)
               + '|' + ((evt.data || {}).name || '');
@@ -3777,6 +3799,7 @@ async function _decorateTypingBubbles(container, pendingMap) {
 
       var d = evt.data || {};
       if (evt.kind === 'tool_call') {
+        var logEl = ensureLog();
         var argsStr = JSON.stringify(d.arguments || d.args || {});
         var primary = (typeof _extractPrimaryArg === 'function')
                         ? _extractPrimaryArg(argsStr) : '';
@@ -3789,9 +3812,10 @@ async function _decorateTypingBubbles(container, pendingMap) {
           '<span style="color:var(--text2);font-weight:500" class="tool-name">' + _escHtml(d.name || '') + '</span>' +
           '<span class="tool-status" style="color:var(--warning,#f0ad4e)">⏳</span>' +
           (preview ? '<span style="color:var(--text3);opacity:0.75;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + preview + '</span>' : '');
-        log.appendChild(row);
-      } else if (evt.kind === 'tool_result') {
-        // Find the last pending row for this tool and mark it done.
+        logEl.appendChild(row);
+      } else if (evt.kind === 'tool_result' && log) {
+        // Only flip status on existing rows — if the log hasn't been
+        // created yet there's no tool_call row to flip.
         var rows = log.querySelectorAll(
           '[data-tool-name="' + (d.name || '').replace(/"/g, '\\"') + '"] .tool-status');
         for (var j = rows.length - 1; j >= 0; j--) {
@@ -3802,13 +3826,14 @@ async function _decorateTypingBubbles(container, pendingMap) {
           }
         }
       } else if (evt.kind === 'skill_match') {
+        var logEl2 = ensureLog();
         var row2 = document.createElement('div');
         row2.style.cssText = 'display:flex;gap:4px;align-items:baseline';
         row2.innerHTML =
           '<span style="color:#a78bfa">🎯</span>' +
           '<span style="color:#a78bfa;font-weight:500">' + _escHtml(d.skill_name || d.name || '') + '</span>' +
           (d.reason ? '<span style="color:var(--text3);opacity:0.75">' + _escHtml(d.reason).slice(0, 80) + '</span>' : '');
-        log.appendChild(row2);
+        logEl2.appendChild(row2);
       }
     });
   }
