@@ -240,8 +240,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "read_file",
             "description": (
-                "Read the contents of a file. Returns the file text. "
-                "Supports optional offset (start line, 0-based) and limit (number of lines)."
+                "Read UTF-8 text content from a file with optional line range.\n"
+                "Use when: viewing code/config/docs/data files, inspecting a known file path, reading part of a large file with offset+limit.\n"
+                "Not for: searching by content (use search_files) or finding files by name (use glob_files). Binary files return replacement chars.\n"
+                "Output: header line [path — lines N-M of T] + numbered lines (1-based).\n"
+                "GOTCHA: offset is 0-based but output line numbers are 1-based. For binary files prefer file-specific tools (pptx/pdf skills). Path is resolved against the sandbox root."
             ),
             "parameters": {
                 "type": "object",
@@ -264,7 +267,13 @@ TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Write content to a file. Creates parent directories if needed. Overwrites existing content.",
+            "description": (
+                "Create a new file or overwrite an existing one with UTF-8 content. Auto-creates parent directories.\n"
+                "Use when: generating a new file, saving agent output, creating config/scripts.\n"
+                "Not for: surgical edits to an existing file (use edit_file to avoid clobbering). Do not use to append — this is full overwrite.\n"
+                "Output: absolute path and byte count on success. The written path is what artifact cards link to.\n"
+                "GOTCHA: overwrites silently — read_file first if uncertain. Path must be inside the sandbox root."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -280,9 +289,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "edit_file",
             "description": (
-                "Edit a file by performing an exact string replacement. "
-                "Finds old_string in the file and replaces it with new_string. "
-                "The old_string must appear exactly once for a unique match."
+                "Replace an exact substring in an existing file with a new substring. Requires the old_string to appear EXACTLY ONCE in the file.\n"
+                "Use when: making surgical changes to a known file, renaming a unique identifier, adjusting a specific line.\n"
+                "Not for: creating new files (use write_file). Not for replacing strings that appear multiple times — widen old_string with surrounding context to force uniqueness.\n"
+                "Output: confirmation 'Successfully edited PATH (replaced 1 occurrence)'.\n"
+                "GOTCHA: fails with a count error if old_string appears 0 or 2+ times. Whitespace and indentation must match byte-for-byte. Prefer short context anchors over regex patterns."
             ),
             "parameters": {
                 "type": "object",
@@ -299,7 +310,13 @@ TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "Execute a shell command (also aliased as 'exec', 'shell', 'run_command'). Returns stdout/stderr. Dangerous commands require human approval. Configurable timeout (default 30s).",
+            "description": (
+                "Execute a shell command with configurable timeout and sandbox policy enforcement.\n"
+                "Use when: running a compile/test/format command, git operations, quick system queries, any task that is naturally a CLI invocation.\n"
+                "Not for: file reads (use read_file), file searches (use search_files/glob_files), pip installs (use pip_install for clear intent), date math (use datetime_calc).\n"
+                "Output: stdout + stderr (labeled) + exit code. Commands run in the sandbox root (agent's working_dir).\n"
+                "GOTCHA: dangerous commands may be blocked by sandbox policy. Max timeout 600s. Avoid long-running commands that buffer output — no stdout is returned until the process exits or the timeout fires."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -318,8 +335,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "search_files",
             "description": (
-                "Search file contents using a regular expression (like grep -rn). "
-                "Returns matching lines with file path and line number."
+                "Regex-search file contents recursively (like `grep -rn`). Returns matching lines with path and line number.\n"
+                "Use when: finding where a symbol is referenced, hunting a string/pattern across the repo, locating TODO/FIXME comments.\n"
+                "Not for: finding files by name (use glob_files). Not for reading a specific file's content (use read_file). Hidden dirs and node_modules/__pycache__/.git are skipped automatically.\n"
+                "Output: `path:lineno: matching_line` per match, truncated at 200 matches with a notice.\n"
+                "GOTCHA: pattern is a Python regex — escape special chars. Very broad patterns return a truncated sample; narrow with `include` glob (e.g. '*.py') when scanning large trees."
             ),
             "parameters": {
                 "type": "object",
@@ -342,7 +362,13 @@ TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "glob_files",
-            "description": "Find files matching a glob pattern. Returns a list of matching file paths.",
+            "description": (
+                "Find files matching a glob pattern by NAME/PATH. Returns sorted list of paths.\n"
+                "Use when: listing files by extension (**/*.py), finding all tests (**/test_*.py), enumerating a subdirectory.\n"
+                "Not for: searching inside file contents (use search_files). Not for reading (use read_file).\n"
+                "Output: newline-separated paths, capped at 500 with a total-count notice.\n"
+                "GOTCHA: uses Python pathlib glob semantics — `**` must be a full path segment (src/**/*.py works, src/**.py does not). Hidden directories are filtered out."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -364,8 +390,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "web_search",
             "description": (
-                "Search the internet using DuckDuckGo. Returns search results with titles, "
-                "URLs, and snippets. Use this to find up-to-date information from the web."
+                "Search the public web via DuckDuckGo (API + HTML fallback). Returns ranked results with title/URL/snippet.\n"
+                "Use when: finding documentation, recent news/events, research sources, third-party APIs.\n"
+                "Not for: fetching the body of a specific known URL (use web_fetch). Not for searching the local filesystem (use search_files). No deep research chaining — call web_fetch on top results for details.\n"
+                "Output: numbered list with title/URL/snippet blocks, capped at `max_results` (default 8).\n"
+                "GOTCHA: DDG may rate-limit on burst — one search then reading several results is usually fine. Snippets are short; for substance always follow with web_fetch on the best 1-3 URLs."
             ),
             "parameters": {
                 "type": "object",
@@ -385,8 +414,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "web_fetch",
             "description": (
-                "Fetch the text content of a web page URL. Returns the page content as plain text. "
-                "Useful for reading articles, documentation, or any web page after finding it via web_search."
+                "Fetch a specific URL and extract plain text (strips script/style, decodes HTML entities).\n"
+                "Use when: reading a documentation page, article, or API reference after finding it via web_search or when the user gives an explicit URL.\n"
+                "Not for: discovering new URLs (use web_search). Not for JSON API calls (use http_request — it preserves status codes and headers). Not for PDF/binary URLs.\n"
+                "Output: `[Content from URL]` header + extracted plain text, truncated to max_length (default 5000 chars).\n"
+                "GOTCHA: default 5000-char cap is deliberate — research sessions that ran 10000+ chars/fetch burned 25k+ tokens of context. Raise max_length only when one URL genuinely needs full capture."
             ),
             "parameters": {
                 "type": "object",
@@ -407,11 +439,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "mcp_call",
             "description": (
-                "Invoke a tool on an external MCP server bound to this agent. "
-                "Use this to call email (send_email), slack (send_message), github "
-                "(create_pr), browser, postgres, or any other bound MCP. "
-                "First call with list_mcps=true to see what MCPs are available and "
-                "what tools each one provides."
+                "Invoke a tool on an external MCP server (email, slack, github, postgres, browser, custom) bound to this agent.\n"
+                "Use when: sending emails/slack/IM, interacting with third-party APIs through an MCP bridge, calling any capability that was added via MCP.\n"
+                "Not for: builtin tools above (call them directly). Not for discovering MCPs — pass list_mcps=true first to enumerate what's bound, then call with mcp_id + tool.\n"
+                "Output: raw MCP tool response (JSON or text depending on the server).\n"
+                "GOTCHA: `arguments` must be a JSON object — not a string. If you don't know what MCPs are available, call with list_mcps=true BEFORE guessing mcp_id. Errors include the MCP server name — check it's bound."
             ),
             "parameters": {
                 "type": "object",
@@ -442,10 +474,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "team_create",
             "description": (
-                "Spawn a sub-agent for parallel task execution. The sub-agent runs "
-                "independently with its own context window and tools. Use this when a "
-                "task can be decomposed into independent sub-tasks that run in parallel "
-                "(e.g., 3 sub-agents running in parallel = ~1 min vs 3 min serial)."
+                "Spawn a background sub-agent to run an independent task in parallel. Inherits caller's model/provider.\n"
+                "Use when: a task splits into 2-3+ independent pieces that can run simultaneously (research → 3 aspects, refactor → multiple modules); total wall-clock is bounded by the longest sub-task.\n"
+                "Not for: tasks that need your context/conversation history (the worker starts fresh). Not for simple question-answer delegation (use handoff_request for 1:1 work with visible ack). Not for scheduled jobs (use task_update with run_at).\n"
+                "Output: worker label + transient task_id; the sub-agent posts its result back to your task list when done.\n"
+                "GOTCHA: the worker is TRANSIENT — it disappears after completing. Its result lands in your task list, not as a chat message. Do NOT use for 'fire and forget logging' — use send_message instead."
             ),
             "parameters": {
                 "type": "object",
@@ -470,13 +503,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "send_message",
             "description": (
-                "Send a one-way message to another agent (broadcast / FYI / share status). "
-                "Use this for non-blocking communication — announcements, progress pings, "
-                "sharing intermediate findings — where you do NOT expect a structured result back. "
-                "DO NOT use this for work handoffs: if you are transferring a task and expect the "
-                "receiver to produce output, call `handoff_request` instead (it gives a visible "
-                "3-state ack/complete handshake). Saying \"I'll ask X to do Y\" is not a substitute "
-                "for calling one of these tools — pick the right one and call it."
+                "Send a one-way FYI message to another agent. No acknowledgement, no response expected.\n"
+                "Use when: sharing status / broadcasting a finding / pinging a teammate without blocking.\n"
+                "Not for: task handoffs where you expect a result (use handoff_request for the 3-state handshake). Not for scheduling (use task_update). Saying 'I will tell X to do Y' in prose is not equivalent — you must actually call this tool.\n"
+                "Output: confirmation 'Message sent to NAME (ID)' + content preview.\n"
+                "GOTCHA: no delivery guarantee — it is best-effort. The receiver sees it in their inbox but may not read it for a while. For work that MUST be picked up, use handoff_request."
             ),
             "parameters": {
                 "type": "object",
@@ -500,15 +531,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "handoff_request",
             "description": (
-                "Hand off a task to another agent with a visible 3-state handshake "
-                "(pending → acknowledged → completed). Use this (not send_message) "
-                "whenever you are transferring work to a teammate and expect them "
-                "to produce a result — e.g. coder → tester for verification, "
-                "researcher → writer for drafting. The user sees a badge "
-                "that flips ⏳ → ✅ → ✔️ as the receiver picks it up and "
-                "finishes. This call blocks until the receiver returns or fails. "
-                "Do NOT use send_message + @mention for handoffs — that is a "
-                "one-way broadcast with no acknowledgement."
+                "Transfer a task to another agent with a 3-state visible handshake: pending → acknowledged → completed. BLOCKING.\n"
+                "Use when: handing off work you expect a result from — coder → tester for verification, researcher → writer for drafting, planner → executor for implementation.\n"
+                "Not for: FYI broadcasts (use send_message). Not for parallel independent work (use team_create). Not for tasks you want to run in the background while you continue (this call blocks).\n"
+                "Output: the receiver's completion result + badge state (✅) visible to the user.\n"
+                "GOTCHA: blocks the caller until the receiver finishes or times out (default 600s). Include expected_output in the call — 'return a list of failing tests' — otherwise the receiver may return something you cannot use."
             ),
             "parameters": {
                 "type": "object",
@@ -543,14 +570,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "task_update",
             "description": (
-                "Create / update / complete entries in the shared task list. Call this DIRECTLY — "
-                "do not describe the task in prose and then stop; the call IS the record.\n"
-                "• RECURRING: When the user asks for periodic work (\"每天9点\", \"每周一\", "
-                "\"daily\", \"weekly\"), call action=create with recurrence + recurrence_spec.\n"
-                "• DELAYED ONE-TIME: When the user asks \"5分钟后\", \"in 10 mins\", "
-                "\"下午3点做X\", call action=create with run_at (e.g. run_at='+5m').\n"
-                "The scheduler fires these tasks automatically at the configured time. "
-                "Do NOT reply that you cannot run scheduled tasks."
+                "Create, update, complete, or list entries in the shared task queue. Also registers recurring / delayed tasks with the scheduler for automatic execution.\n"
+                "Use when: user asks 'create a task / reminder', 'every day at 9am', 'in 5 minutes do X', 'mark task ABC done'. For ad-hoc visible planning use plan_update instead.\n"
+                "Not for: your own execution steps visible to the user (use plan_update — a UI checklist). Not for messaging between agents (use send_message / handoff_request).\n"
+                "Output: task_id + schedule confirmation (with next_run time if recurring). Scheduled tasks auto-fire at the configured time.\n"
+                "GOTCHA: recurrence_spec format matters — daily='HH:MM', weekly='DOW HH:MM' (SUN|MON|...), monthly='D HH:MM'. Agents already running inside a scheduled job get scheduler-registration BLOCKED (to prevent duplicate-job loops)."
             ),
             "parameters": {
                 "type": "object",
@@ -608,18 +632,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "plan_update",
             "description": (
-                "Write / advance your execution plan — the visible step-by-step checklist "
-                "the user sees as your progress indicator. At the START of any multi-step "
-                "task, CALL this with action=create_plan BEFORE doing the work — do not "
-                "describe the plan in prose and then stop (the checklist IS the plan). "
-                "As you execute, call start_step → complete_step for each item so the "
-                "user watches progress live. "
-                "Actions: create_plan (set task_summary + steps array), "
-                "start_step (mark a step as in_progress), "
-                "complete_step (mark done with result_summary), "
-                "add_step (add new step during execution), "
-                "fail_step (mark as failed), "
-                "replan (keep completed steps, replace pending with new steps)."
+                "Render a live, visible execution checklist for the current multi-step task. User watches progress flip pending → in_progress → done.\n"
+                "Use when: BEFORE starting any task with 3+ steps — call action=create_plan first. As each step starts/finishes, call start_step / complete_step so the user sees real-time progress.\n"
+                "Not for: background tasks (use task_update). Not for describing the plan in prose only — the checklist IS the plan; do not stop after proposing steps.\n"
+                "Output: checklist pushed to the user's UI; each action returns the updated plan state.\n"
+                "GOTCHA: if you describe steps but never call create_plan, the user sees NOTHING. The tool call IS the commitment. For single-step tasks skip this — overhead is not worth it."
             ),
             "parameters": {
                 "type": "object",
@@ -667,10 +684,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "web_screenshot",
             "description": (
-                "Take a screenshot of a web page. Returns the screenshot as a base64-encoded "
-                "PNG image saved to a file. Requires Playwright or falls back to a simple "
-                "HTML-to-image approach. Useful for capturing visual state of web pages, "
-                "generating thumbnails, or documenting UI."
+                "Capture a PNG screenshot of a web page via Playwright (preferred) or CLI fallback (wkhtmltoimage/cutycapt).\n"
+                "Use when: capturing visual state of a web page, generating thumbnails for a report, documenting UI.\n"
+                "Not for: desktop screenshots (use desktop_screenshot). Not for screenshots of running preview dev servers inside the repo — use browser MCP with a session instead.\n"
+                "Output: file path + size + viewport dimensions. The PNG lives at output_path (auto-generated in /tmp if unset).\n"
+                "GOTCHA: requires Playwright installed (pip install playwright && playwright install chromium) — else falls back to CLI tools which may not be available. Default viewport 1280x720; `full_page=true` captures the full scroll."
             ),
             "parameters": {
                 "type": "object",
@@ -703,9 +721,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "http_request",
             "description": (
-                "Make an HTTP request (GET, POST, PUT, DELETE, PATCH) to any URL. "
-                "Supports custom headers, JSON body, and form data. Useful for calling "
-                "REST APIs, webhooks, or testing endpoints. Returns status code, headers, and body."
+                "Make any HTTP request (GET/POST/PUT/DELETE/PATCH) with custom headers, JSON body, and timeout.\n"
+                "Use when: calling a REST API, hitting a webhook, testing an endpoint, anything that needs status code + response headers visible.\n"
+                "Not for: plain text page fetches (use web_fetch — it strips HTML to text). Not for MCP-bound APIs (use mcp_call — it adds auth from the binding).\n"
+                "Output: 'HTTP status METHOD URL' + headers (first 20) + body (capped at MAX_HTTP_RESPONSE_CHARS).\n"
+                "GOTCHA: pass request bodies as json_body (dict) — it auto-sets Content-Type. Using `body` (string) requires you to set Content-Type manually. Max timeout 120s."
             ),
             "parameters": {
                 "type": "object",
@@ -742,9 +762,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "datetime_calc",
             "description": (
-                "Perform date/time calculations. Get current time in any timezone, "
-                "calculate date differences, add/subtract durations, format dates, "
-                "convert between timezones. Use this instead of bash for date operations."
+                "Date/time operations: current time, date differences, add duration, format conversion, timezone conversion.\n"
+                "Use when: computing time intervals, converting between timezones, formatting dates for display.\n"
+                "Not for: scheduling tasks (use task_update with run_at). Not for parsing relative text like '5分钟后' — that is task_update's job; here `date` must be a concrete date string.\n"
+                "Output: human-readable summary plus ISO representation for downstream tool calls.\n"
+                "GOTCHA: accepts many date formats (ISO / YYYY-MM-DD / YYYY/MM/DD / etc) but a few like '今天' are NOT parsed — use action=now + timezone for 'current time in zone'. For 'convert', naive dates are assumed UTC."
             ),
             "parameters": {
                 "type": "object",
@@ -787,9 +809,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "json_process",
             "description": (
-                "Process JSON data: parse, format/pretty-print, extract fields using "
-                "JSONPath-like expressions, transform, validate, or convert between "
-                "JSON/CSV/YAML. Useful for data manipulation tasks."
+                "Parse / extract / transform / validate JSON data. Can read from a string or a file path.\n"
+                "Use when: validating a JSON blob, extracting nested fields with a path expression, flattening / merging / converting to CSV.\n"
+                "Not for: raw text manipulation (use text_process). Not for writing JSON to disk (use write_file after json.dumps). The file-path mode is read-only.\n"
+                "Output: formatted text. Results capped at 10000 chars (MAX_JSON_RESULT_CHARS for extract) — narrow your path if truncated.\n"
+                "GOTCHA: path syntax is JSONPath-like but simplified — users[0].name or data.items works; JSONPath filters ($.., [?...]) do NOT. to_csv expects an array of flat objects."
             ),
             "parameters": {
                 "type": "object",
@@ -826,9 +850,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "text_process",
             "description": (
-                "Process and transform text: count words/lines/chars, find & replace with regex, "
-                "extract patterns, sort lines, deduplicate, base64 encode/decode, URL encode/decode, "
-                "generate hash (md5/sha256), convert encoding. Batch text operations without bash."
+                "Batch text transforms: count / find+replace (regex) / extract / sort / dedup / base64 / url-encode / hash / head / tail / split.\n"
+                "Use when: one-off text manipulation that would otherwise need a bash pipeline (grep | sort | uniq).\n"
+                "Not for: processing JSON (use json_process). Not for operations on files — pass the file content via read_file first. Regex uses Python syntax.\n"
+                "Output: transformed text, capped at 10000 chars. 'count' returns lines/words/chars; 'hash' returns algorithm:hex.\n"
+                "GOTCHA: `replace` uses re.sub — backreferences are \\1, not $1. `dedup` keeps insertion order; if you want sort+unique call `sort` then `dedup`."
             ),
             "parameters": {
                 "type": "object",
@@ -878,11 +904,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "save_experience",
             "description": (
-                "Persist a retrospective / active-learning finding as a reusable experience entry "
-                "in the calling agent's role-based experience library. Use this for lessons learned, "
-                "do/don't rules, and scene-specific action playbooks. "
-                "After accumulating enough experiences on a topic, use propose_skill to "
-                "crystallize them into a reusable skill package for admin approval."
+                "Persist a retrospective or active-learning finding into the calling agent's role-based experience library.\n"
+                "Use when: you just completed a task and learned something reusable — a do/don't rule, a scene-anchored playbook, a mistake to avoid. Typically after a bug fix, a feature completion, or a failed attempt.\n"
+                "Not for: sharing knowledge with all agents (use share_knowledge — that is the global KB). Not for random chat-log content (be selective — experiences inject into future system prompts).\n"
+                "Output: 'Experience saved' confirmation with id/role/priority/scene summary. The entry is immediately eligible for role-based injection into future agents' system prompts.\n"
+                "GOTCHA: role defaults to caller's role — do NOT save generic 'python tips' to a specific role bucket. After accumulating >=3 similar high-success experiences on a topic, call propose_skill to crystallize them."
             ),
             "parameters": {
                 "type": "object",
@@ -938,9 +964,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "knowledge_lookup",
             "description": (
-                "Look up shared knowledge base entries. Use this when you need reference information "
-                "like design guidelines, tech stack standards, website lists, coding conventions, etc. "
-                "Pass a search query to find relevant entries, or pass an entry_id to read a specific entry."
+                "Search the shared knowledge base (all agents see the same entries). Pass a query for fuzzy match or entry_id for direct fetch.\n"
+                "Use when: looking up design guidelines / coding standards / reference lists / cross-team conventions.\n"
+                "Not for: private role-specific experiences (those live in the experience library — agents read them implicitly via system prompt injection). Not for looking up skill guides (use get_skill_guide).\n"
+                "Output: JSON {status, entry | matches}. On exact-title match returns the full entry; on partial match returns up to 20 candidates — follow up with entry_id to read one in full.\n"
+                "GOTCHA: 'private' rag_mode agents also see private RAG results; check status=partial vs success. Empty result = no entry — do NOT assume the user's term matches an entry title verbatim."
             ),
             "parameters": {
                 "type": "object",
@@ -963,10 +991,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "share_knowledge",
             "description": (
-                "Share knowledge, best practices, or experience insights with all agents "
-                "via the shared Knowledge Base. Use this when you've learned something valuable "
-                "that other agents could benefit from — e.g., 'How to create professional PPTXs', "
-                "'Best practices for API error handling', etc. All agents can read shared knowledge."
+                "Write a new entry to the shared knowledge base so ALL agents can access it via knowledge_lookup.\n"
+                "Use when: you have produced a reusable playbook / template / reference that teams would benefit from — API error handling patterns, PPTX best practices, design conventions.\n"
+                "Not for: role-local learnings (use save_experience — that stays in one role's bucket). Not for chat-log content. Not for secrets or sensitive data (the KB is shared).\n"
+                "Output: 'Knowledge shared' confirmation with entry id. Source attribution (your agent name/role) is auto-appended to the content.\n"
+                "GOTCHA: title is the primary search key — make it descriptive. Write content with retrieval in mind: include trigger keywords someone would search for."
             ),
             "parameters": {
                 "type": "object",
@@ -994,9 +1023,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "learn_from_peers",
             "description": (
-                "Learn from other agents' experiences. Browse and import high-quality experiences "
-                "from other roles to expand your own capabilities. For example, a PM agent can learn "
-                "design skills from a designer agent's experience pool."
+                "Import high-quality experiences from another role's library into your own bucket.\n"
+                "Use when: you need a capability another role has — e.g. a PM agent learning design heuristics from designer's experiences, a coder learning test patterns from QA's.\n"
+                "Not for: one-shot reference lookup (use knowledge_lookup). Not for learning from a specific agent — this is ROLE-level only.\n"
+                "Output: imported experiences list with priority / scene / rules / success-rate summary.\n"
+                "GOTCHA: imports are FILTERED — only experiences >=75% success rate come through. Returns 0 if the source role has no matching experiences. Topic is a keyword filter, not a semantic query."
             ),
             "parameters": {
                 "type": "object",
@@ -1024,10 +1055,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "request_web_login",
             "description": (
-                "Explicitly request the user to log into a website. "
-                "Shows an interactive login card (iframe, credential form, cookie/token). "
-                "Note: login walls encountered during browser navigation are handled automatically — "
-                "you only need this tool to proactively request login before navigating."
+                "Show the user an interactive login card to authenticate into a specific website before the agent proceeds.\n"
+                "Use when: you know upfront the task requires login (e.g. 'help me look at that Jira issue') and want to get credentials/cookies BEFORE navigating.\n"
+                "Not for: reactive login walls hit during browsing — those are handled automatically by the browser layer. Not for API key configuration (use the account settings UI).\n"
+                "Output: interactive card rendered in the chat; user completes login, then the agent can proceed.\n"
+                "GOTCHA: provide a clear `reason` — the card asks the user to trust you with credentials, and an opaque 'I need to log in' message is often declined."
             ),
             "parameters": {
                 "type": "object",
@@ -1058,7 +1090,13 @@ TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "pip_install",
-            "description": "Install or upgrade Python packages using pip. Supports space-separated package names.",
+            "description": (
+                "Install or upgrade Python packages via pip (uses --break-system-packages for system Python).\n"
+                "Use when: a specific package is missing for a downstream tool (e.g. pptx auto-install already calls this internally; explicit use when you know exactly which package is needed).\n"
+                "Not for: generic shell commands (use bash). Not for non-Python deps (use bash with apt/brew).\n"
+                "Output: '✓ Successfully installed: names' on success or pip's stderr on failure. Max timeout 300s.\n"
+                "GOTCHA: writes to the agent's system Python — affects ALL agents on this node, not just you. Prefer local venv / uv install for reversible installs."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1080,7 +1118,13 @@ TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "create_pptx",
-            "description": "Create a PowerPoint presentation (.pptx) file with custom slides. Auto-installs python-pptx if needed.",
+            "description": (
+                "Create a simple PowerPoint .pptx with title/content slides. Layout picked from {title, content, title_content, blank}. Auto-installs python-pptx.\n"
+                "Use when: the user wants a basic deck — bullet points, section titles, maybe one image per slide.\n"
+                "Not for: complex layouts with charts/shapes/tables (use create_pptx_advanced). Not for editing existing pptx files (this overwrites the output_path).\n"
+                "Output: file created at output_path; returns '✓ Created presentation: PATH'.\n"
+                "GOTCHA: content is rendered as bullet points split on newlines — do not expect markdown formatting. For visual design beyond bullets use create_pptx_advanced."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1140,15 +1184,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "create_pptx_advanced",
             "description": (
-                "创建高级精美PowerPoint演示文稿。支持形状、图表、表格、多栏布局、信息图表等专业元素。"
-                "每页通过 layout（智能布局）或 elements 数组（手动控制）来定义内容。"
-                "\n\n**重要 — layout.type 必须是下列已注册类型之一**：cover（封面）/ "
-                "toc（目录）/ section（章节分隔页）/ cards（通用内容卡片，**做普通内容页首选**）/ "
-                "process（流程步骤）/ kpi（关键指标）/ comparison（左右对比）/ "
-                "timeline（时间轴）/ chart / table / closing（结尾页）。"
-                "\n\n❌ 绝不要编造新类型（如 overview / analysis / content / status / summary 等）——"
-                "未注册类型会自动降级为 cards，但会丢失语义。"
-                "\n✅ 普通内容页、列表页、要点页统一用 `cards`（items 支持 1-9 个）。"
+                "Create a design-rich PowerPoint with shapes, charts, tables, multi-column layouts, and infographics. Layout types: cover / toc / section / cards / process / kpi / comparison / timeline / chart / table / closing.\n"
+                "Use when: building a presentation that needs visual design — cover + TOC + content + charts + closing.\n"
+                "Not for: simple bullet-only decks (use create_pptx). Not for editing existing pptx (this overwrites).\n"
+                "Output: .pptx saved at output_path; returns '✓ Created advanced presentation (N slides): PATH'.\n"
+                "GOTCHA: ❌ do NOT invent layout.type strings (overview/analysis/content/summary all get silently downgraded to 'cards'). ✅ for normal content pages use `cards` (1-9 items). Element x/y/w/h are in INCHES and auto-clamped to slide bounds (10.0 x 5.625)."
             ),
             "parameters": {
                 "type": "object",
@@ -1268,7 +1308,13 @@ TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "desktop_screenshot",
-            "description": "Take a screenshot of the local desktop. Can specify a region to crop. Returns PNG image path.",
+            "description": (
+                "Capture a screenshot of the local desktop primary monitor. Optional region crop.\n"
+                "Use when: the user asks to 'screenshot what is on screen', or agent needs to capture an external app's UI that is not accessible via the browser.\n"
+                "Not for: web page screenshots (use web_screenshot). Not for the agent's own Portal UI — the agent cannot see its own browser window meaningfully.\n"
+                "Output: '✓ Screenshot saved: PATH' after writing a PNG. Default path auto-generated with timestamp.\n"
+                "GOTCHA: requires mss or Pillow installed, else falls back to OS tools (scrot on Linux, screencapture on macOS). On headless machines this tool CANNOT work — no X display."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1295,7 +1341,13 @@ TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "create_video",
-            "description": "Create a video file from image frames. Auto-installs moviepy if needed. Can add audio track.",
+            "description": (
+                "Stitch image frames into an MP4 video. Optional audio track. Auto-installs moviepy.\n"
+                "Use when: producing a slideshow video from generated or captured images (e.g. time-lapse, animated explainer, tutorial).\n"
+                "Not for: recording live video (no capture capability). Not for editing existing videos.\n"
+                "Output: .mp4 at output_path. Returns '✓ Video created: PATH'.\n"
+                "GOTCHA: each frame needs a `duration` (default 3s) — total video length = sum of durations. Audio track is trimmed to match total video length. moviepy install is SLOW on first use (60s timeout)."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1339,11 +1391,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "get_skill_guide",
             "description": (
-                "Load the full operating guide for a granted skill. "
-                "Returns the complete SKILL.md instructions, install_dir path, "
-                "and ancillary file list. Use this when you need detailed "
-                "step-by-step instructions or scripts for a specific skill "
-                "(e.g. pdf, docx, xlsx, pptx). Run scripts from skill_dir."
+                "Load the full SKILL.md guide (with frontmatter stripped) + ancillary files list for a granted skill.\n"
+                "Use when: you have been told a skill is granted and need step-by-step instructions to USE it — typically right before executing a complex capability like pptx / pdf / docx generation.\n"
+                "Not for: searching or discovering skills (skills appear in your system prompt as granted). Not for registering new skills (use submit_skill). Not for generic knowledge lookup (use knowledge_lookup).\n"
+                "Output: '## Skill: NAME' header + skill_dir + runtime + ancillary file list + full SKILL.md body.\n"
+                "GOTCHA: the returned skill_dir is where scripts live — cd there first before running any bash. If the skill has ancillary .md files, read those separately via read_file as needed."
             ),
             "parameters": {
                 "type": "object",
@@ -1367,12 +1419,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "propose_skill",
             "description": (
-                "Scan the experience library for recurring patterns and propose a new skill draft. "
-                "When enough similar, high-success-rate experiences exist (≥3, ≥75% success), "
-                "SkillForge clusters them and generates a skill package (SKILL.md + manifest.yaml). "
-                "The draft enters a pending-approval queue visible to admin in the portal. "
-                "Use this after accumulating experiences on a topic (e.g. PPTX best practices, "
-                "code review checklists) to crystallize them into a reusable skill."
+                "Scan the experience library for clusterable patterns and auto-generate a skill draft (SKILL.md + manifest.yaml) pending admin approval.\n"
+                "Use when: you have accumulated 3+ similar high-success experiences on a specific topic and want to promote them into a reusable skill package.\n"
+                "Not for: submitting a hand-written skill package (use submit_skill). Not for viewing existing skills (use get_skill_guide).\n"
+                "Output: draft summary with id / description / confidence / export directory / status=pending-approval. The draft is visible to admins in the Portal review queue.\n"
+                "GOTCHA: requires >=3 similar experiences with >=75% success rate — returns a 'no patterns found' message if the bar is not met. Drafts need ADMIN APPROVAL before they become real skills — do not assume the skill exists right after calling."
             ),
             "parameters": {
                 "type": "object",
@@ -1395,30 +1446,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "submit_skill",
             "description": (
-                "Submit a skill package directory you created in your workspace for admin approval. "
-                "The directory MUST contain a valid manifest.yaml with ALL required fields, and a SKILL.md.\n\n"
-                "manifest.yaml REQUIRED fields:\n"
-                "  name: string          # skill name, kebab-case (e.g. pptx-maker)\n"
-                "  version: string       # semver (e.g. 1.0.0)\n"
-                "  description: string   # one-line description\n"
-                "  runtime: string       # MUST be one of: python, shell, markdown\n"
-                "  author: string        # your name\n"
-                "  entry: string         # entry file (e.g. main.py for python, SKILL.md for markdown)\n\n"
-                "manifest.yaml OPTIONAL fields:\n"
-                "  display_name: string  # human-friendly name\n"
-                "  tags: [string]        # classification tags\n"
-                "  triggers: [string]    # activation keywords\n"
-                "  depends_on: object    # MCP or other dependencies\n"
-                "  inputs: [{name, type, required, description}]  # input parameters\n"
-                "  outputs: [{name, type}]  # output fields\n"
-                "  hint: {sensitive: bool}  # security hint\n\n"
-                "SKILL.md should document: what the skill does, how to use it, examples, and caveats.\n\n"
-                "IMPORTANT for python runtime skills:\n"
-                "  - The entry file (e.g. main.py) MUST define: def run(ctx, **kwargs)\n"
-                "  - ctx provides: ctx.env('KEY') for environment variables, ctx.log(...), ctx.output(...)\n"
-                "  - Do NOT use open(), exec(), eval(), __import__() — these are forbidden by the sandbox\n"
-                "  - Use ctx.output(name, value) to return results instead of print()\n\n"
-                "After submission the draft appears in the SkillForge review queue for admin approval."
+                "Submit a hand-written skill package from your workspace directory for admin approval. Requires manifest.yaml + SKILL.md in the dir.\n"
+                "Use when: you have authored a skill (e.g. via writing files in your workspace) and want it reviewed for inclusion in the Skill Store.\n"
+                "Not for: auto-proposing from experiences (use propose_skill). Not for installing a granted skill — skills appear automatically after admin approval.\n"
+                "Output: draft id + name + runtime + code files list + 'awaiting admin approval' status.\n"
+                "GOTCHA: manifest.yaml MUST include name/version/description/runtime/author/entry. runtime must be one of python/shell/markdown. Same name+version combo is rejected — bump version to resubmit. Python skills' entry file must define `def run(ctx, **kwargs)` and cannot use open/exec/eval (sandbox forbids)."
             ),
             "parameters": {
                 "type": "object",
@@ -1441,15 +1473,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "submit_deliverable",
             "description": (
-                "Register a deliverable for the current project and mark it "
-                "SUBMITTED (ready for review). Use this when you have produced "
-                "a concrete artifact (document / code / analysis / design). "
-                "Provide at least one of file_path, content_text, or url. "
-                "If content_text is supplied WITHOUT file_path, the content is "
-                "automatically written as a file in the project's shared "
-                "workspace (~/.tudou_claw/workspaces/shared/<project_id>/), so "
-                "it appears in the project deliverables directory. "
-                "Auto-discovers project from chat context; pass project_id to override."
+                "Register a concrete artifact as a project deliverable and mark it SUBMITTED (enters review queue).\n"
+                "Use when: you produced a document / code file / design / analysis for the current project and it is ready for review. Works only inside a project chat context.\n"
+                "Not for: intermediate drafts (wait until ready). Not for agents' internal tool outputs that the user does not need to see. Outside a project context this returns an error.\n"
+                "Output: deliverable id + title + kind + project id + resolved file path. If content_text is given without file_path, content is auto-written to the project's shared workspace dir.\n"
+                "GOTCHA: project auto-discovered from chat context — if you are not in a project chat, pass project_id. Files outside the shared dir are copied in automatically (so the deliverables UI can find them)."
             ),
             "parameters": {
                 "type": "object",
@@ -1472,10 +1500,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "create_goal",
             "description": (
-                "Create a measurable goal for the current project. "
-                "Use metric='count' with target_value for numeric goals, "
-                "or metric='text' with target_text for qualitative goals. "
-                "Auto-discovers project from chat context."
+                "Create a measurable project goal (numeric count/percent or qualitative text).\n"
+                "Use when: the user says 'add a goal', 'we want to hit X by Y', 'track progress on Z'.\n"
+                "Not for: individual tasks (use task_update). Not for milestones (those bundle deliverables — use create_milestone). Only works inside a project context.\n"
+                "Output: goal id + name + metric + target + project id.\n"
+                "GOTCHA: metric='count' needs target_value (a number); metric='text' needs target_text. Mixing them silently ignores the unused field — double-check which one the user meant."
             ),
             "parameters": {
                 "type": "object",
@@ -1497,9 +1526,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "update_goal_progress",
             "description": (
-                "Update a goal's current value and/or mark it done. "
-                "Call this when progress is made toward a goal you or your "
-                "teammates previously created."
+                "Update a goal's current value or mark it as done. Persists progress to the project.\n"
+                "Use when: progress is made toward a goal you or teammates previously created — e.g. 'closed 3 more tickets', 'goal reached'.\n"
+                "Not for: creating goals (use create_goal). Not for milestones (use update_milestone_status).\n"
+                "Output: goal id + new current_value + done state (+ optional note).\n"
+                "GOTCHA: current_value must be numeric — for text-metric goals only `done=true/false` and `note` matter. Unknown goal_id returns an error (goals are project-scoped)."
             ),
             "parameters": {
                 "type": "object",
@@ -1519,9 +1550,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "create_milestone",
             "description": (
-                "Create a milestone for the current project. Milestones mark "
-                "major checkpoints and typically bundle multiple deliverables. "
-                "Auto-discovers project from chat context."
+                "Create a project milestone (a dated checkpoint that typically bundles multiple deliverables).\n"
+                "Use when: the user says 'set a milestone', 'we want to ship by date X', 'major checkpoint'.\n"
+                "Not for: individual tasks (use task_update). Not for goals (use create_goal — milestones are checkpoints, goals are metrics).\n"
+                "Output: milestone id + name + responsible agent + due date + project id.\n"
+                "GOTCHA: due_date accepts 'YYYY-MM-DD' or natural form — prefer ISO for unambiguous parsing. responsible_agent_id defaults to the calling agent — override when delegating."
             ),
             "parameters": {
                 "type": "object",
@@ -1540,9 +1573,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "update_milestone_status",
             "description": (
-                "Update a milestone's status or attach evidence. "
-                "Status transitions are typically: pending → in_progress → done. "
-                "Admin confirm/reject happens via a separate flow."
+                "Update a milestone's status or attach evidence of completion. Typical transitions: pending → in_progress → done.\n"
+                "Use when: you or your team completed work toward a milestone and want to record progress / evidence.\n"
+                "Not for: creating milestones (use create_milestone). Not for admin confirm/reject — that is a separate endpoint.\n"
+                "Output: milestone id + new status + optional evidence length.\n"
+                "GOTCHA: attach `evidence` when flipping to done — the admin reviewer uses it to verify. Empty status + empty evidence returns an error ('provide at least one')."
             ),
             "parameters": {
                 "type": "object",

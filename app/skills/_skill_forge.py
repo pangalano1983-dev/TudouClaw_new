@@ -683,12 +683,37 @@ Context:
 - Core knowledge: {knowledge_text}
 - Source experiences: {exp_summary}
 
-The SKILL.md should include:
-1. YAML frontmatter with name, description, category, and tags
-2. Clear instructions for an AI agent
-3. Step-by-step workflow
-4. Important considerations and edge cases
-5. Quality criteria
+MANDATORY STRUCTURE (every section below is REQUIRED — do not omit any):
+
+1. YAML frontmatter with:
+   - name: {skill_name}
+   - description: a multi-line description in the 5-element format:
+       {{one-line capability}}.
+       Use when: {{trigger scenarios / user phrasings}}.
+       Not for: {{exclusions + distinction from similar skills}}.
+       Output: {{what the skill produces + side effects}}.
+       GOTCHA: {{common pitfalls / easy-to-confuse behaviors}}.
+   - category, tags
+
+2. ## Core Knowledge — 1-2 sentences stating WHAT the skill knows
+   and why that knowledge is reusable.
+
+3. ## Workflow — numbered steps (<=7) the skill follows. Each step
+   imperative and verifiable.
+
+4. ## Quick Reference — a table or bullet list of the most common
+   commands, file paths, or arguments. Optimized for scanning.
+
+5. ## Common Mistakes — a table of "Error | Consequence | Fix"
+   distilled from the source experiences' failure modes. This is the
+   HIGHEST-VALUE section — every real mistake learned goes here.
+
+6. ## Distinguishing from Other Skills — short bullets like
+   "vs skill_x: {{when to use this instead}}". Prevents the agent
+   from loading the wrong skill.
+
+7. ## Next Steps — what skill(s) to invoke after this one completes.
+   Forms the skill chain.
 
 MANDATORY sandbox policy (must be obeyed by every skill that produces files):
 - Any file that will be reported back as a deliverable / attachment / result
@@ -731,40 +756,46 @@ Output the complete SKILL.md content (markdown with YAML frontmatter)."""
         scenes: list[str],
         knowledge: list[str],
     ) -> str:
-        """Generate a template-based SKILL.md (no LLM needed)."""
+        """Generate a template-based SKILL.md (no LLM needed).
+
+        Emits the 7 MANDATORY sections expected by the skill quality
+        standard (see docs/SKILL-TEMPLATE.md equivalent): frontmatter
+        with 5-element description, Core Knowledge, Workflow, Quick
+        Reference, Common Mistakes, Distinguishing from Other Skills,
+        Next Steps.
+        """
         tags = set()
         for exp in experiences:
             tags.update(exp.tags)
         tags_str = ", ".join(sorted(tags)[:10])
 
-        # Description
-        desc = self._generate_description(scenes, knowledge)
+        # Description — 5-element format (Use when / Not for / Output / GOTCHA).
+        desc_capability = self._generate_description(scenes, knowledge)
+        use_when = scenes[0] if scenes else "(fill in: trigger scenarios)"
+        not_for_placeholder = "(fill in: exclusions + distinction from similar skills)"
+        output_placeholder = "(fill in: what this skill produces + any side effects)"
+        gotcha_placeholder = "(fill in: common mistakes observed in source experiences)"
 
-        # Build SKILL.md
         lines = [
             "---",
             f"name: {skill_name}",
-            f"description: {desc}",
+            "description: >",
+            f"  {desc_capability}",
+            f"  Use when: {use_when}.",
+            f"  Not for: {not_for_placeholder}.",
+            f"  Output: {output_placeholder}.",
+            f"  GOTCHA: {gotcha_placeholder}.",
             "category: workflow",
             f"tags: {tags_str}",
             "---",
             "",
             f"# {skill_name}",
             "",
-            f"> {desc}",
-            "",
-            "## Applicable Scenarios",
-            "",
-        ]
-
-        for i, scene in enumerate(scenes[:5], 1):
-            lines.append(f"{i}. {scene}")
-
-        lines.extend([
+            f"> {desc_capability}",
             "",
             "## Core Knowledge",
             "",
-        ])
+        ]
 
         for i, k in enumerate(knowledge[:5], 1):
             lines.append(f"{i}. {k}")
@@ -778,11 +809,37 @@ Output the complete SKILL.md content (markdown with YAML frontmatter)."""
             "3. Verify the output meets quality criteria",
             "4. Document any deviations or new learnings",
             "",
-            "## Quality Criteria",
+            "## Quick Reference",
             "",
-            "- Solution addresses the identified scenario",
-            "- Core knowledge principles are correctly applied",
-            "- Output is validated and tested where applicable",
+            "| Scenario | Approach |",
+            "|----------|----------|",
+        ])
+        for scene in scenes[:5]:
+            # Shorten for table display; full scene is captured in the
+            # experience records referenced at the bottom.
+            short_scene = scene[:60] + ("..." if len(scene) > 60 else "")
+            lines.append(f"| {short_scene} | see Workflow above |")
+
+        lines.extend([
+            "",
+            "## Common Mistakes",
+            "",
+            "> Highest-value section. Populate from failed source experiences "
+            "or after this skill is used in real tasks.",
+            "",
+            "| Error | Consequence | Fix |",
+            "|-------|-------------|-----|",
+            "| (fill in) | (fill in) | (fill in) |",
+            "",
+            "## Distinguishing from Other Skills",
+            "",
+            "- vs (other skill): when to use this instead",
+            "- vs (other skill): when to use this instead",
+            "",
+            "## Next Steps",
+            "",
+            "After this skill completes, consider:",
+            "- (fill in: which skill to invoke next, or what to check)",
             "",
             "## Source Experiences",
             "",

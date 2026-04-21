@@ -3252,6 +3252,70 @@ function _createProgressBar(agentId) {
 // Tool activity log — tracks tool calls inline during execution
 var _toolLogCounter = {};
 
+// Priority order when extracting a primary argument from tool-call args.
+// First match wins. Intent: show "what the user is looking for / doing"
+// before "where they're looking". Examples:
+//   read_file({path}) → path
+//   search_files({pattern, path}) → pattern (not path)
+//   web_search({query}) → query
+//   bash({command}) → command
+var _TOOL_PRIMARY_ARG_KEYS = [
+  'command', 'pattern', 'query', 'url',
+  'path', 'file_path', 'output_path',
+  'prompt', 'mcp_id', 'to_agent', 'goal_id', 'milestone_id',
+  'name', 'title',
+];
+
+// Cap on the primary-arg preview. Keeps single-line rendering readable
+// even if the agent passes a 5000-char prompt.
+var _TOOL_ARG_PREVIEW_MAX = 60;
+
+function _truncateArg(val, max) {
+  if (val == null) return '';
+  var s = String(val);
+  max = max || _TOOL_ARG_PREVIEW_MAX;
+  if (s.length <= max) return s;
+  return s.slice(0, max - 3) + '...';
+}
+
+/**
+ * Extract the most informative single argument from a tool-call args blob.
+ * Handles both valid JSON and truncated JSON (very common since backend
+ * caps arguments_preview — regex fallback recovers the primary arg even
+ * when the closing brace was cut off).
+ * Returns '' if no useful value found.
+ */
+function _extractPrimaryArg(argsStr) {
+  if (!argsStr) return '';
+  // Try real JSON first.
+  try {
+    var obj = JSON.parse(argsStr);
+    if (obj && typeof obj === 'object') {
+      for (var i = 0; i < _TOOL_PRIMARY_ARG_KEYS.length; i++) {
+        var k = _TOOL_PRIMARY_ARG_KEYS[i];
+        if (typeof obj[k] === 'string' && obj[k].length > 0) {
+          return _truncateArg(obj[k]);
+        }
+      }
+      // Fall back to first short string field.
+      for (var key in obj) {
+        if (typeof obj[key] === 'string' && obj[key].length > 0 && obj[key].length <= 80) {
+          return _truncateArg(obj[key]);
+        }
+      }
+    }
+  } catch (e) {
+    // Truncated JSON — regex-match known keys.
+    for (var j = 0; j < _TOOL_PRIMARY_ARG_KEYS.length; j++) {
+      var kk = _TOOL_PRIMARY_ARG_KEYS[j];
+      var re = new RegExp('"' + kk + '"\\s*:\\s*"([^"]+)"');
+      var m = argsStr.match(re);
+      if (m && m[1]) return _truncateArg(m[1]);
+    }
+  }
+  return '';
+}
+
 function _appendToolCall(agentId, toolName, args) {
   var log = document.getElementById('tool-log-'+agentId);
   if (!log) return;
@@ -3263,18 +3327,22 @@ function _appendToolCall(agentId, toolName, args) {
   entry.id = 'tool-entry-'+agentId+'-'+idx;
   entry.style.cssText = 'display:flex;align-items:flex-start;gap:4px;padding:2px 0;border-bottom:1px solid var(--border,rgba(255,255,255,0.06));opacity:0;transition:opacity 0.3s';
 
-  // Truncate args for display
-  var argsStr = args || '';
-  if (argsStr.length > 80) argsStr = argsStr.substring(0, 80) + '...';
-  // Escape HTML
-  argsStr = argsStr.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  // Primary-arg-first rendering (Clowder-style compact CLI output).
+  // Shows the single most useful field inline; full args stashed as a
+  // title tooltip so the user can hover for the complete payload.
+  var rawArgs = args || '';
+  var primary = _extractPrimaryArg(rawArgs);
+  var preview = primary || _truncateArg(rawArgs, 80);
+  preview = preview.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   var safeName = (toolName||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  // Full args as title attribute for hover-reveal.
+  var fullAttr = rawArgs.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 
   entry.innerHTML =
     '<span style="flex-shrink:0;color:var(--primary)">▸</span>' +
-    '<span style="flex-shrink:0;color:var(--text2);font-weight:500">' + safeName + '</span>' +
+    '<span style="flex-shrink:0;color:var(--text2);font-weight:500" title="' + fullAttr + '">' + safeName + '</span>' +
     '<span class="tool-entry-status" style="flex-shrink:0;color:var(--warning,#f0ad4e)">⏳</span>' +
-    (argsStr ? '<span style="color:var(--text3);opacity:0.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + argsStr + '</span>' : '');
+    (preview ? '<span style="color:var(--text3);opacity:0.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + fullAttr + '">' + preview + '</span>' : '');
 
   log.appendChild(entry);
   // Fade in
@@ -3284,6 +3352,11 @@ function _appendToolCall(agentId, toolName, args) {
   // Also scroll chat container
   var chatEl = document.getElementById('chat-msgs-'+agentId);
   if (chatEl) chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+// Expose for tests / external diagnostic use.
+if (typeof window !== 'undefined') {
+  window._extractPrimaryArg = _extractPrimaryArg;
 }
 
 function _markToolResult(agentId, resultSnippet) {
