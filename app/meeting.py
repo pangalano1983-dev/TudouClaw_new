@@ -754,6 +754,83 @@ def current_meeting_reply_gen(meeting_id: str) -> int:
         return _meeting_reply_gen.get(meeting_id, 0)
 
 
+def _find_at_mentioned_agents(
+    content: str,
+    meeting: "Meeting",
+    agent_lookup_fn: Callable[[str], object],
+    exclude_agent_id: str = "",
+) -> list[str]:
+    """Scan ``content`` for ``@<agent-name>`` patterns and return the
+    matching participant agent IDs.
+
+    Handles the common forms seen in agent replies:
+        @小安
+        @小安 请验证...
+        @小安,
+        @小安：
+        @小安。
+
+    Rules:
+      - Match against each meeting participant's name (not ID). Names
+        may contain CJK so we can't use \\w; we accept one-or-more
+        non-whitespace, non-punctuation chars.
+      - Case-insensitive for Latin names.
+      - ``exclude_agent_id`` (usually the speaking agent) is dropped —
+        an agent @ing itself is a parsing artifact, not a real mention.
+      - De-duped, order preserved.
+    """
+    if not content or not meeting.participants:
+        return []
+
+    # Build {name: id} for current participants (skip the speaker).
+    name_to_id: dict[str, str] = {}
+    for pid in meeting.participants:
+        if pid == exclude_agent_id:
+            continue
+        try:
+            ag = agent_lookup_fn(pid)
+        except Exception:
+            ag = None
+        if ag is None:
+            continue
+        nm = (getattr(ag, "name", "") or "").strip()
+        if nm:
+            name_to_id[nm] = pid
+
+    if not name_to_id:
+        return []
+
+    # Sort names longest-first so a "@小安安" can't be matched by "@小安"
+    # when 小安安 is a real participant.
+    candidates = sorted(name_to_id.keys(), key=len, reverse=True)
+
+    found: list[str] = []
+    seen_ids: set[str] = set()
+    # Cheap scan rather than a full regex engine: for each name
+    # (longest-first), look for "@name" in the content. After each
+    # match we replace the matched span with spaces so that a shorter
+    # prefix (e.g. "@小安" contained in "@小安安") can't also match.
+    working = content
+    working_lower = content.lower()
+    for name in candidates:
+        needle = "@" + name
+        needle_lower = needle.lower()
+        idx = working.find(needle)
+        if idx < 0:
+            idx = working_lower.find(needle_lower)
+        if idx < 0:
+            continue
+        pid = name_to_id[name]
+        if pid not in seen_ids:
+            seen_ids.add(pid)
+            found.append(pid)
+        # Consume the matched span so shorter prefixes can't re-match.
+        blanks = " " * len(needle)
+        working = working[:idx] + blanks + working[idx + len(needle):]
+        working_lower = working.lower()
+    return found
+
+
 def meeting_agent_reply(meeting: "Meeting",
                           registry: "MeetingRegistry",
                           agent_chat_fn: Callable[[str, str], str],
@@ -796,7 +873,15 @@ def meeting_agent_reply(meeting: "Meeting",
         if len(chosen) >= max_participants:
             break
 
-    for aid in chosen:
+    # ``chosen`` is iterated by index rather than a traditional for-each
+    # so that agent replies containing ``@<other-participant>`` can
+    # APPEND to the queue mid-loop — the @'d participant speaks next in
+    # the same reply round. ``seen`` keeps the same agent from being
+    # scheduled twice. The cap ``max_participants`` still applies.
+    loop_i = 0
+    while loop_i < len(chosen):
+        aid = chosen[loop_i]
+        loop_i += 1
         # -- User-priority interrupt check --
         if gen is not None and current_meeting_reply_gen(meeting.id) != gen:
             logger.info(
@@ -862,6 +947,32 @@ def meeting_agent_reply(meeting: "Meeting",
             registry.save()
         except Exception:
             pass
+
+        # @-mention chaining: if the reply contains @<participant-name>
+        # of someone who hasn't been scheduled to speak yet, queue them
+        # up. This is how "小土 @s 小安 请验证..." triggers 小安 to
+        # respond in the same round — without requiring 小土 to call
+        # the send_message tool explicitly.
+        try:
+            mentioned = _find_at_mentioned_agents(
+                reply or "", meeting, agent_lookup_fn,
+                exclude_agent_id=aid,
+            )
+            for new_target in mentioned:
+                if new_target in seen:
+                    continue
+                if len(chosen) >= max_participants:
+                    break
+                seen.add(new_target)
+                chosen.append(new_target)
+                logger.info(
+                    "meeting %s: %s @-mentioned a participant, queueing for reply",
+                    meeting.id, aid[:8] if aid else "?",
+                )
+        except Exception as _mention_err:
+            # Never let mention parsing crash the reply sequence.
+            logger.warning("meeting %s: @-mention scan failed: %s",
+                           meeting.id, _mention_err)
 
 
 def spawn_meeting_reply(meeting, registry, agent_chat_fn, agent_lookup_fn,
