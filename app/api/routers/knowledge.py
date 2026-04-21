@@ -171,6 +171,11 @@ async def register_rag_provider(
         return entry.to_dict() if hasattr(entry, "to_dict") else {"ok": True, "entry": entry}
     except ImportError:
         raise HTTPException(501, "RAG provider module not available")
+    except ValueError as e:
+        # register() rejects ghost entries (empty remote name+url). That
+        # is a client error, not a server error — surface as 400 so the
+        # Portal form can show the validation message.
+        raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:

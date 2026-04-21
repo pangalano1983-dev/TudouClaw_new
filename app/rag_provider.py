@@ -258,6 +258,19 @@ class RAGProviderRegistry:
         self._providers: dict[str, RAGProviderEntry] = {}
         self._loaded = False
 
+    # A ghost entry has an id but no distinguishing fields. They are
+    # produced when the REST handler persists a ``RAGProviderEntry()``
+    # empty constructor (typically from a POST with an empty JSON body
+    # or a form-submit that cleared every field). Filter them at both
+    # load AND save time so we stop the bleeding AND never re-persist
+    # a garbage row read from an older file.
+    @staticmethod
+    def _is_ghost(p: RAGProviderEntry) -> bool:
+        return (not p.name.strip()
+                and not p.base_url.strip()
+                and p.kind == "remote"
+                and not p.config)
+
     def _ensure_loaded(self):
         if self._loaded:
             return
@@ -267,10 +280,21 @@ class RAGProviderRegistry:
             try:
                 with open(_PROVIDERS_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                ghosts_skipped = 0
                 for d in data:
                     p = RAGProviderEntry.from_dict(d)
-                    if p.id:
-                        self._providers[p.id] = p
+                    if not p.id:
+                        continue
+                    if self._is_ghost(p):
+                        ghosts_skipped += 1
+                        continue
+                    self._providers[p.id] = p
+                if ghosts_skipped:
+                    logger.warning(
+                        "Skipped %d ghost RAG provider entries on load "
+                        "(empty name+url+config). Consider running the "
+                        "cleanup script.", ghosts_skipped,
+                    )
             except Exception as e:
                 logger.error("Failed to load RAG providers: %s", e)
 
@@ -296,8 +320,20 @@ class RAGProviderRegistry:
     def register(self, name: str, kind: str = "remote",
                  base_url: str = "", api_key: str = "",
                  config: dict = None) -> RAGProviderEntry:
-        """Register a new RAG provider."""
+        """Register a new RAG provider.
+
+        Rejects ghost registrations (empty name + empty URL on a remote
+        provider) — these were the source of the ~59 junk entries that
+        accumulated previously. Callers that genuinely want a blank
+        local-kind slot must pass kind='local' explicitly.
+        """
         self._ensure_loaded()
+        # Guard: reject obvious ghosts at the front door.
+        if kind == "remote" and not name.strip() and not base_url.strip():
+            raise ValueError(
+                "RAG provider rejected: kind='remote' requires name or "
+                "base_url. Pass kind='local' for a blank local provider."
+            )
         entry = RAGProviderEntry(
             id=uuid.uuid4().hex[:10],
             name=name, kind=kind,
