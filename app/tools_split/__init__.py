@@ -44,19 +44,24 @@ Work each chat session:
     ``pytest tests/`` → commit. Resume next session.
 """
 
-# Migration status
-# ----------------
-# Batch 1 (filesystem-read tools) — DONE:
-#     read_file     → tools_split/read_file.py
-#     search_files  → tools_split/search_files.py
-#     glob_files    → tools_split/glob_files.py
+# Migration status (by category, not one-file-per-tool)
+# -----------------------------------------------------
+# DONE:
+#   fs.py   — read_file, write_file, edit_file, search_files, glob_files
+#   web.py  — web_search, web_fetch, web_screenshot, http_request
 #
-# tools.py still owns the TOOL_DEFINITIONS schema list and the
-# _TOOL_FUNCS dispatcher. Handlers are now re-exported from this
-# package so downstream imports (app.tools._tool_read_file, etc.)
-# keep working unchanged.
+# TODO:
+#   system.py       — bash, pip_install, desktop_screenshot
+#   coordination.py — team_create, send_message, task_update
+#   project.py      — submit_deliverable, create_goal, update_goal_progress,
+#                     create_milestone, update_milestone_status
+#   data.py         — datetime_calc, json_process, text_process
+#   knowledge.py    — save_experience, knowledge_lookup, share_knowledge,
+#                     learn_from_peers
+#   media.py        — create_pptx, create_pptx_advanced, create_video
+#   skills.py       — get_skill_guide, propose_skill, submit_skill
+#   mcp.py          — mcp_call
 #
-# Next batches (not yet started):
-#     write_file / edit_file / bash — filesystem-write + exec (batch 2)
-#     web_search / web_fetch / web_screenshot / http_request (batch 3)
-#     team_create / send_message / task_update + project tools (batch 4)
+# tools.py retains TOOL_DEFINITIONS (schemas) and _TOOL_FUNCS
+# (dispatcher). Handlers are re-exported from each module here so
+# ``app.tools._tool_read_file`` etc. keep working unchanged.

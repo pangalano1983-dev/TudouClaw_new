@@ -1563,49 +1563,17 @@ TOOL_DEFINITIONS: list[dict] = [
 # Tool implementations
 # ---------------------------------------------------------------------------
 
-# _tool_read_file moved to app/tools_split/read_file.py (see import above
-# near tool dispatcher). This stub is kept only as a doc anchor.
-from .tools_split.read_file import _tool_read_file  # noqa: E402,F401
-
-
-def _tool_write_file(path: str, content: str, **_: Any) -> str:
-    pol = _sandbox.get_current_policy()
-    try:
-        p = pol.safe_path(path)
-    except _sandbox.SandboxViolation as e:
-        return f"Error: {e}"
-    try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
-        # Return the resolved absolute path so the artifact system can
-        # locate the file reliably (relative paths break file card downloads).
-        return f"Successfully wrote {len(content)} bytes to {p}"
-    except Exception as e:
-        return f"Error writing file: {e}"
-
-
-def _tool_edit_file(path: str, old_string: str, new_string: str, **_: Any) -> str:
-    pol = _sandbox.get_current_policy()
-    try:
-        p = pol.safe_path(path)
-    except _sandbox.SandboxViolation as e:
-        return f"Error: {e}"
-    if not p.exists():
-        return f"Error: File not found: {path}"
-    try:
-        text = p.read_text(encoding="utf-8")
-    except Exception as e:
-        return f"Error reading file: {e}"
-
-    count = text.count(old_string)
-    if count == 0:
-        return f"Error: old_string not found in {path}"
-    if count > 1:
-        return f"Error: old_string found {count} times in {path}. Must be unique. Provide more context."
-
-    new_text = text.replace(old_string, new_string, 1)
-    p.write_text(new_text, encoding="utf-8")
-    return f"Successfully edited {path} (replaced 1 occurrence)"
+# Filesystem tools (read_file / write_file / edit_file / search_files /
+# glob_files) moved to app/tools_split/fs.py. Schemas still live in
+# TOOL_DEFINITIONS above; handlers re-exported here so the dispatcher
+# and any external importers of `tools._tool_*` keep working.
+from .tools_split.fs import (  # noqa: E402,F401
+    _tool_read_file,
+    _tool_write_file,
+    _tool_edit_file,
+    _tool_search_files,
+    _tool_glob_files,
+)
 
 
 def _tool_bash(command: str, timeout: int = 30, **_: Any) -> str:
@@ -1645,13 +1613,6 @@ def _tool_bash(command: str, timeout: int = 30, **_: Any) -> str:
         return f"Error: Command timed out after {timeout}s"
     except Exception as e:
         return f"Error executing command: {e}"
-
-
-# _tool_search_files moved to app/tools_split/search_files.py
-from .tools_split.search_files import _tool_search_files  # noqa: E402,F401
-
-# _tool_glob_files moved to app/tools_split/glob_files.py
-from .tools_split.glob_files import _tool_glob_files  # noqa: E402,F401
 
 
 # ---------------------------------------------------------------------------
@@ -2018,139 +1979,16 @@ def _tool_task_update(action: str, task_id: str = "", title: str = "",
 
 
 # ---------------------------------------------------------------------------
-# Web tools — DuckDuckGo search & page fetch
+# Web tools — DuckDuckGo search, page fetch, screenshot, generic HTTP
 # ---------------------------------------------------------------------------
-
-def _tool_web_search(query: str, max_results: int = 8, **_: Any) -> str:
-    """Search the internet using DuckDuckGo (API + HTML fallback)."""
-    import urllib.request
-    import urllib.parse
-    import html as html_mod
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        ),
-    }
-
-    # ── Strategy 1: DuckDuckGo Instant Answer API (fast, structured) ──
-    try:
-        api_url = "https://api.duckduckgo.com/?" + urllib.parse.urlencode({
-            "q": query, "format": "json", "no_html": "1",
-            "skip_disambig": "1", "no_redirect": "1",
-        })
-        req = urllib.request.Request(api_url, headers=headers)
-        import json as _json
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = _json.loads(resp.read().decode("utf-8", errors="replace"))
-        results = []
-        # Abstract (direct answer)
-        if data.get("Abstract"):
-            results.append(
-                f"0. {data.get('Heading', query)} (Direct Answer)\n"
-                f"   URL: {data.get('AbstractURL', '')}\n"
-                f"   {data['Abstract']}"
-            )
-        # Related topics
-        for i, topic in enumerate(data.get("RelatedTopics", [])[:max_results]):
-            if isinstance(topic, dict) and topic.get("Text"):
-                url_ = topic.get("FirstURL", "")
-                text = topic["Text"]
-                results.append(f"{i+1}. {text[:120]}\n   URL: {url_}")
-        if results:
-            return f"Search results for: {query}\n\n" + "\n\n".join(results)
-    except Exception:
-        pass  # Fall through to HTML scraping
-
-    # ── Strategy 2: DuckDuckGo HTML scraping (more results) ──
-    url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
-    req = urllib.request.Request(url, headers=headers, method="POST",
-                                 data=urllib.parse.urlencode({"q": query}).encode())
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-    except Exception as e:
-        return f"Error: Web search failed: {e}"
-
-    # Parse results from DuckDuckGo HTML
-    results = []
-    link_pattern = re.compile(
-        r'class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>', re.DOTALL
-    )
-    snippet_pattern = re.compile(
-        r'class="result__snippet"[^>]*>(.*?)</a>', re.DOTALL
-    )
-
-    links = link_pattern.findall(body)
-    snippets = snippet_pattern.findall(body)
-
-    for i, (raw_url, raw_title) in enumerate(links[:max_results]):
-        title = re.sub(r"<[^>]+>", "", raw_title).strip()
-        title = html_mod.unescape(title)
-        actual_url = raw_url
-        m = re.search(r'uddg=([^&]+)', raw_url)
-        if m:
-            actual_url = urllib.parse.unquote(m.group(1))
-        snippet = ""
-        if i < len(snippets):
-            snippet = re.sub(r"<[^>]+>", "", snippets[i]).strip()
-            snippet = html_mod.unescape(snippet)
-        results.append(f"{i+1}. {title}\n   URL: {actual_url}\n   {snippet}")
-
-    if not results:
-        return "No search results found."
-    return f"Search results for: {query}\n\n" + "\n\n".join(results)
-
-
-def _tool_web_fetch(url: str, max_length: int = 5000, **_: Any) -> str:
-    """Fetch the text content of a web page URL.
-
-    Default max_length is 5000 chars (~1250 tokens). A typical research
-    session does 3-6 fetches — at 10000 chars/fetch the history alone
-    burned 25k+ tokens and crowded out the actual work. Callers that
-    need more can pass max_length explicitly, but the default now
-    favors breadth (more URLs visited) over depth per URL.
-    """
-    import urllib.request
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        ),
-    }
-    req = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            content_type = resp.headers.get("Content-Type", "")
-            raw = resp.read()
-            # Detect encoding
-            encoding = "utf-8"
-            if "charset=" in content_type:
-                encoding = content_type.split("charset=")[-1].split(";")[0].strip()
-            body = raw.decode(encoding, errors="replace")
-    except Exception as e:
-        return f"Error: Failed to fetch URL: {e}"
-
-    # Strip HTML tags to get plain text
-    import html as html_mod
-    # Remove script and style blocks
-    text = re.sub(r"<script[^>]*>.*?</script>", "", body, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
-    # Replace block tags with newlines
-    text = re.sub(r"<(?:br|p|div|li|tr|h[1-6])[^>]*>", "\n", text, flags=re.IGNORECASE)
-    # Remove remaining tags
-    text = re.sub(r"<[^>]+>", "", text)
-    text = html_mod.unescape(text)
-    # Collapse whitespace
-    lines = [line.strip() for line in text.splitlines()]
-    text = "\n".join(line for line in lines if line)
-
-    if len(text) > max_length:
-        text = text[:max_length] + f"\n\n... (truncated at {max_length} characters)"
-
-    return f"[Content from {url}]\n\n{text}"
+# Handlers moved to app/tools_split/web.py. Schemas still in
+# TOOL_DEFINITIONS above; dispatcher-facing names re-exported here.
+from .tools_split.web import (  # noqa: E402,F401
+    _tool_web_search,
+    _tool_web_fetch,
+    _tool_web_screenshot,
+    _tool_http_request,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -2673,121 +2511,10 @@ except Exception:
 
 
 # ---------------------------------------------------------------------------
-# New daily-work tools — screenshot, http, datetime, json, text
+# New daily-work tools — datetime, json, text
 # ---------------------------------------------------------------------------
-
-def _tool_web_screenshot(url: str, output_path: str = "", full_page: bool = False,
-                         width: int = 1280, height: int = 720, **_: Any) -> str:
-    """Take a screenshot of a web page using Playwright or Selenium."""
-    import importlib
-    import base64
-
-    # Determine output path
-    if not output_path:
-        import hashlib
-        url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
-        ts = int(time.time())
-        output_path = f"/tmp/screenshot_{url_hash}_{ts}.png"
-
-    # Strategy 1: Try Playwright (preferred)
-    try:
-        from playwright.sync_api import sync_playwright
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page(viewport={"width": width, "height": height})
-            page.goto(url, wait_until="networkidle", timeout=30000)
-            page.screenshot(path=output_path, full_page=full_page)
-            browser.close()
-        size = os.path.getsize(output_path)
-        return f"Screenshot saved to {output_path} ({size} bytes, {width}x{height})"
-    except ImportError:
-        logger.debug("Playwright not installed, trying fallback methods")
-    except Exception as e:
-        # Playwright installed but failed; try fallback
-        logger.debug("Playwright screenshot failed: %s, trying fallback methods", e)
-
-    # Strategy 2: Try subprocess with playwright CLI
-    try:
-        cmd = f'python3 -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); pg=b.new_page(viewport={{\'width\':{width},\'height\':{height}}}); pg.goto(\'{url}\',wait_until=\'networkidle\',timeout=30000); pg.screenshot(path=\'{output_path}\',full_page={full_page}); b.close(); p.stop(); print(\'ok\')"'
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=45)
-        if result.returncode == 0 and os.path.exists(output_path):
-            size = os.path.getsize(output_path)
-            return f"Screenshot saved to {output_path} ({size} bytes, {width}x{height})"
-    except Exception as e:
-        logger.debug("Playwright subprocess failed: %s, trying other methods", e)
-
-    # Strategy 3: Use cutycapt or wkhtmltoimage if available
-    for cmd_name, cmd_tpl in [
-        ("wkhtmltoimage", f"wkhtmltoimage --width {width} --height {height} '{url}' '{output_path}'"),
-        ("cutycapt", f"cutycapt --url='{url}' --out='{output_path}' --min-width={width} --min-height={height}"),
-    ]:
-        try:
-            result = subprocess.run(f"which {cmd_name}", shell=True, capture_output=True, timeout=5)
-            if result.returncode == 0:
-                result = subprocess.run(cmd_tpl, shell=True, capture_output=True, text=True, timeout=30)
-                if os.path.exists(output_path):
-                    size = os.path.getsize(output_path)
-                    return f"Screenshot saved to {output_path} ({size} bytes, {width}x{height})"
-        except Exception:
-            continue
-
-    return (
-        "Error: Screenshot tools not available. Please install one of:\n"
-        "  pip install playwright && playwright install chromium\n"
-        "  apt install wkhtmltopdf\n"
-        "You can also use the 'browser' MCP (Puppeteer) for screenshots."
-    )
-
-
-def _tool_http_request(url: str, method: str = "GET", headers: dict = None,
-                       body: str = "", json_body: dict = None,
-                       timeout: int = 30, **_: Any) -> str:
-    """Make an HTTP request to any URL."""
-    import urllib.request
-    import urllib.parse
-    import json as _json
-
-    method = method.upper()
-    req_headers = {
-        "User-Agent": "TudouClaw-Agent/1.0",
-    }
-    if headers:
-        req_headers.update(headers)
-
-    data = None
-    if json_body is not None:
-        data = _json.dumps(json_body).encode("utf-8")
-        req_headers.setdefault("Content-Type", "application/json")
-    elif body:
-        data = body.encode("utf-8")
-
-    req = urllib.request.Request(url, data=data, headers=req_headers, method=method)
-    try:
-        timeout = max(1, min(int(timeout), 120))
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            status = resp.status
-            resp_headers = dict(resp.headers)
-            resp_body = resp.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as e:
-        status = e.code
-        resp_headers = dict(e.headers) if hasattr(e, 'headers') else {}
-        try:
-            resp_body = e.read().decode("utf-8", errors="replace")
-        except Exception:
-            resp_body = str(e)
-    except Exception as e:
-        return f"Error: HTTP request failed: {e}"
-
-    # Format response
-    result = f"HTTP {status} {method} {url}\n"
-    result += "--- Headers ---\n"
-    for k, v in list(resp_headers.items())[:20]:
-        result += f"  {k}: {v}\n"
-    result += "--- Body ---\n"
-    if len(resp_body) > MAX_HTTP_RESPONSE_CHARS:
-        resp_body = resp_body[:MAX_HTTP_RESPONSE_CHARS] + f"\n... (truncated at {MAX_HTTP_RESPONSE_CHARS} chars, total: {len(resp_body)})"
-    result += resp_body
-    return result
+# _tool_web_screenshot and _tool_http_request moved to
+# app/tools_split/web.py (imported earlier alongside web_search/web_fetch).
 
 
 def _tool_datetime_calc(action: str, date: str = "", date2: str = "",
