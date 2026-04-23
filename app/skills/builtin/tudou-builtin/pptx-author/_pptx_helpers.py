@@ -50,9 +50,10 @@ __all__ = [
     "add_styled_table", "add_bullets", "add_bar_chart",
     "add_line_chart", "add_image",
     # slide helpers
-    "header_bar",
+    "header_bar", "slide_full_chart",
     # quality gates
-    "check_bounds", "verify_slides",
+    "check_bounds", "check_safe_margins", "check_one_chart_per_slide",
+    "verify_slides",
     # markdown helpers (optional, for md-to-deck scripts)
     "strip_md", "parse_md_outline",
 ]
@@ -117,6 +118,18 @@ def add_text(slide, x, y, w, h, text, *,
              size: int = 18, bold: bool = False,
              color: RGBColor | None = None,
              align=PP_ALIGN.LEFT, anchor=MSO_ANCHOR.TOP):
+    # Sanity-warn on suspicious font sizes. Typos like Pt(4) or Pt(150)
+    # usually mean the LLM meant 14 / 15. Body text < 10pt is unreadable,
+    # > 50pt almost never fits outside cover / big-number divider slides.
+    try:
+        if int(size) < 10 or int(size) > 50:
+            print(
+                f"[pptx_helpers WARNING] add_text size={size}pt is outside "
+                f"normal range (10-50). text={str(text)[:40]!r}",
+                file=sys.stderr,
+            )
+    except Exception:
+        pass
     tb = slide.shapes.add_textbox(x, y, w, h)
     tf = tb.text_frame
     tf.word_wrap = True
@@ -208,6 +221,14 @@ def add_bullets(slide, x, y, w, h, items, *,
                 size: int = 14, color: RGBColor | None = None,
                 bullet: str = "• "):
     """Bulleted list in a textbox. Items can be strings or (title, body) tuples."""
+    # Readability guard — > 7 bullets on a single slide is a wall of text.
+    # Not a hard cap (comparison pages sometimes need 8), just a nudge.
+    if len(items) > 7:
+        print(
+            f"[pptx_helpers WARNING] add_bullets: {len(items)} items on one "
+            f"slide — consider splitting (≤7 per page keeps it readable).",
+            file=sys.stderr,
+        )
     tb = slide.shapes.add_textbox(x, y, w, h)
     tf = tb.text_frame
     tf.word_wrap = True
@@ -287,6 +308,26 @@ def header_bar(prs_or_slide, title: str = ""):
     return slide
 
 
+def slide_full_chart(prs, title: str, chart_builder):
+    """Standard layout D — title bar + one full-width chart below it.
+
+    ``chart_builder(slide, x, y, w, h)`` should invoke one of
+    ``add_bar_chart`` / ``add_line_chart`` / ``add_styled_table`` on the
+    slide with the given box coords. Keeps the "one chart per slide"
+    rule obvious and the callsite short:
+
+        slide_full_chart(prs, "2026 市场份额",
+                         lambda s, x, y, w, h: add_bar_chart(
+                             s, x, y, w, h,
+                             ["AWS", "Azure", "GCP"], "份额%", [32, 25, 11]))
+    """
+    slide = header_bar(prs, title)
+    chart_builder(slide,
+                  Inches(0.6), Inches(1.3),
+                  Inches(12.13), Inches(5.9))
+    return slide
+
+
 # ─── quality gates ────────────────────────────────────────────────
 
 
@@ -320,6 +361,84 @@ def check_bounds(pptx_path: str, tol_inch: float = 0.02) -> list[str]:
                     f"bottom={((y + h) / EMU_PER_INCH):.2f}\" > "
                     f"slide_height={(sh / EMU_PER_INCH):.2f}\""
                 )
+    return issues
+
+
+def check_safe_margins(pptx_path: str, min_margin_inch: float = 0.3) -> list[str]:
+    """Warn when shapes sit inside the safe margins (default 0.3").
+
+    Exempted (design, not content):
+      - Full-width top/bottom decorative bars (x=0, w≈SW) — e.g. header bar
+      - Full-height side strips (y=0, h≈SH) — e.g. cover accent strip
+      - Any shape whose y-band is entirely inside the top/bottom 1" shelf
+        (the header / footer decorative zone, where title text legitimately
+        sits at y≈0.15" on top of the header bar).
+    """
+    prs = Presentation(pptx_path)
+    sw, sh = prs.slide_width, prs.slide_height
+    m = int(min_margin_inch * EMU_PER_INCH)
+    shelf = EMU_PER_INCH  # 1" top-shelf / bottom-shelf decorative zone
+    issues: list[str] = []
+    for i, slide in enumerate(prs.slides, start=1):
+        for shp in slide.shapes:
+            x = shp.left or 0
+            y = shp.top or 0
+            w = shp.width or 0
+            h = shp.height or 0
+            name = getattr(shp, "name", "") or str(shp.shape_type)
+            # Decorative-edge skip: full-width top bar / full-height side strip
+            is_full_width_bar = (x == 0 and w >= sw - EMU_PER_INCH // 4)
+            is_full_height_strip = (y == 0 and h >= sh - EMU_PER_INCH // 4)
+            if is_full_width_bar or is_full_height_strip:
+                continue
+            # Header / footer shelf skip: shape fully inside y∈[0, 1"]
+            # or y∈[SH-1", SH] is an overlay on the decorative zone.
+            if (y + h) <= shelf or y >= (sh - shelf):
+                continue
+            if x < m:
+                issues.append(
+                    f"slide {i}: '{name}' 左边距过近 "
+                    f"(x={x / EMU_PER_INCH:.2f}\" < {min_margin_inch}\")"
+                )
+            if y < m:
+                issues.append(
+                    f"slide {i}: '{name}' 上边距过近 "
+                    f"(y={y / EMU_PER_INCH:.2f}\" < {min_margin_inch}\")"
+                )
+            if x + w > sw - m:
+                issues.append(
+                    f"slide {i}: '{name}' 右边距过近 "
+                    f"(right={(x + w) / EMU_PER_INCH:.2f}\", "
+                    f"limit={(sw - m) / EMU_PER_INCH:.2f}\")"
+                )
+            if y + h > sh - m:
+                issues.append(
+                    f"slide {i}: '{name}' 下边距过近 "
+                    f"(bottom={(y + h) / EMU_PER_INCH:.2f}\", "
+                    f"limit={(sh - m) / EMU_PER_INCH:.2f}\")"
+                )
+    return issues
+
+
+def check_one_chart_per_slide(pptx_path: str) -> list[str]:
+    """Report slides with more than one chart. Two charts on one slide
+    almost always means cramped / illegible — split into two slides.
+    Tables don't count (they behave differently from charts visually).
+    """
+    prs = Presentation(pptx_path)
+    issues: list[str] = []
+    for i, slide in enumerate(prs.slides, start=1):
+        n = 0
+        for shp in slide.shapes:
+            # has_chart / has_table are safe attrs across python-pptx
+            # shape types (BaseShape returns False for non-matching kinds).
+            try:
+                if getattr(shp, "has_chart", False):
+                    n += 1
+            except Exception:
+                pass
+        if n > 1:
+            issues.append(f"slide {i}: {n} 个图表 — 一页最多 1 个")
     return issues
 
 
@@ -390,13 +509,25 @@ def verify_slides(pptx_path: str, *, strict: bool = True) -> list[dict]:
             flag = "OK"
         print(f"  {i:2d}: {n:2d} shapes [{flag:10s}]  {texts[:2]}")
         report.append({"index": i, "shapes": n, "flag": flag, "texts": texts})
-    # bounds check
+    # bounds check — hard fail (shapes off the canvas)
     bounds = check_bounds(pptx_path)
     if bounds:
         print("\n⚠️ bounds issues:")
         for b in bounds:
             print("  " + b)
-    if strict and (fail or bounds):
+    # safe-margin check — hard fail (shapes inside the 0.3" bleed zone)
+    margins = check_safe_margins(pptx_path)
+    if margins:
+        print("\n⚠️ safe-margin issues:")
+        for m in margins:
+            print("  " + m)
+    # one-chart-per-slide — hard fail (two charts in one slide = cramped)
+    charts = check_one_chart_per_slide(pptx_path)
+    if charts:
+        print("\n⚠️ chart-density issues:")
+        for c in charts:
+            print("  " + c)
+    if strict and (fail or bounds or margins or charts):
         raise SystemExit(2)
     return report
 

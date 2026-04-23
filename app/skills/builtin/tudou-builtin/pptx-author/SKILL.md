@@ -18,6 +18,32 @@ metadata:
 
 # pptx-author — 用 python-pptx 脚本生成 PPT（替代 create_pptx_advanced）
 
+## 📐 单页布局硬规范（verify_slides 会检测）
+
+生成出来的每一页都会经过 `verify_slides(strict=True)`，违反下列任意一条 → `SystemExit(2)` → bash ❌，你必须改。
+
+1. **画布固定**：16:9，`SW = 13.33"`，`SH = 7.5"` —— 已由 `new_deck()` 设好，别自己改。
+2. **不得空页**：`shapes == 0` 即 BLANK，失败。
+3. **不得 title-only**：一页只有顶部横栏 + 标题文字（≤2 shapes 且首 shape 是 `(x=0, y=0, w≈SW, h<1.5")` 的横栏）即 TITLE_ONLY，失败。H3/H4 subsection 内容**必须**合进父级 H2 slide，不要单开空页。
+4. **不得越出画布**：所有 shape 的 x/y/w/h 必须保证 `x ≥ -0.02"`、`y ≥ -0.02"`、`x+w ≤ SW+0.02"`、`y+h ≤ SH+0.02"`。
+5. **0.3" 安全边距**：除了顶部/底部 1" 装饰带和全宽 decorative bar，所有内容 shape 必须在 `[0.3, SW-0.3] × [0.3, SH-0.3]` 内。
+6. **一页最多 1 个图表**：两张柱状图挤一页 = 失败。想比较两组数据就用 multi-series line/bar 或拆成两页。
+7. **字号合理范围**：`add_text(size=...)` 建议 14-32pt；size <10 或 >50 会 warn（标题 24-32，正文 14-16，divider 大数字 120-160 属于例外，不触发警告上限）。
+8. **一页要点 ≤ 7 条**：超过会 warn。信息再多就拆页或做卡片网格。
+
+### 4 种推荐布局（用现成 helper 就不会出错）
+
+| 布局 | helper | 用途 |
+|---|---|---|
+| A. 标题 + 主内容 | `header_bar(prs, title)` + `add_text` / `add_bullets` / `add_card` | 要点页、说明页 |
+| B. 标题 + 左文右图 | `header_bar` + `add_bullets`(左) + `add_bar_chart`(右) | 数据解读 |
+| C. 标题 + 卡片网格 | `header_bar` + 多次 `add_card` | 3-6 个并列小节 |
+| D. 标题 + 全屏图表/表格 | `slide_full_chart(prs, title, chart_builder)` | 数据主角页 |
+
+对比页：用 `header_bar + 2 列 rounded rect + add_bullets` 或补一个 `slide_comparison` 模式的 SKILL.md 参考脚本。
+
+---
+
 ## 为什么用这个 skill，不用 create_pptx_advanced
 
 `create_pptx_advanced(slides=[{layout: {...}}])` 是一个 declarative 工具：你传 JSON spec，它调 18 个预设 layout 函数之一渲染。问题：
