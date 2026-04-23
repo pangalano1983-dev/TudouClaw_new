@@ -323,26 +323,72 @@ def check_bounds(pptx_path: str, tol_inch: float = 0.02) -> list[str]:
     return issues
 
 
-def verify_slides(pptx_path: str, *, strict: bool = True) -> list[dict]:
-    """Print per-slide shape counts + blank/thin flags. Returns a list of dicts.
+def _is_title_only_body(slide, sw_emu: int) -> bool:
+    """True when a slide has nothing but a top header bar + its title text.
 
-    strict=True (default) → raises SystemExit(2) when any BLANK slide found,
-    which makes the bash step fail loudly so the agent retries that slide's
-    function instead of delivering a broken deck.
+    Detects the "只有一行字" failure mode where an md-to-deck builder emitted
+    a page for a H3 / H4 subsection but never populated its body. We flag
+    these as FAIL (not just THIN) because users can see them and they
+    obviously look broken. Cover slides (no full-width top bar) and the
+    closing "谢谢" slide (no top bar) don't trip this.
+    """
+    shapes = list(slide.shapes)
+    if len(shapes) == 0 or len(shapes) > 2:
+        return False
+    # Look for a rectangle at (x=0, y=0, w≈SW, h<1.5") — that's the header bar.
+    ONE_INCH_EMU = 914400
+    for sh in shapes:
+        x = sh.left or 0
+        y = sh.top or 0
+        w = sh.width or 0
+        h = sh.height or 0
+        # tolerance 0.25" on width, max height 1.5"
+        if (x == 0 and y == 0
+                and abs(w - sw_emu) < (ONE_INCH_EMU // 4)
+                and h < (ONE_INCH_EMU + ONE_INCH_EMU // 2)
+                and h > 0):
+            return True
+    return False
+
+
+def verify_slides(pptx_path: str, *, strict: bool = True) -> list[dict]:
+    """Print per-slide shape counts + flags. Returns a list of dicts.
+
+    Flag values:
+      OK          — ≥3 shapes
+      THIN        — 1-2 shapes that don't match the broken title-only pattern
+                    (e.g. cover / closing slide) — printed but not a failure
+      TITLE_ONLY  — only a top header bar + title text, no body content
+                    (an md-to-deck subsection slide that forgot its body)
+                    → FAIL
+      BLANK       — 0 shapes → FAIL
+
+    strict=True (default) → raises SystemExit(2) when any BLANK or
+    TITLE_ONLY slide is found, which makes the bash step fail loudly so
+    the agent retries that slide's function instead of delivering a
+    deck where half the pages are just titles.
     """
     prs = Presentation(pptx_path)
+    sw = prs.slide_width
     report = []
-    any_blank = False
+    fail = False
     print(f"—— {pptx_path} ——")
     for i, slide in enumerate(prs.slides, 1):
         shapes = list(slide.shapes)
         texts = [sh.text_frame.text[:40] for sh in shapes
                  if sh.has_text_frame and sh.text_frame.text.strip()]
         n = len(shapes)
-        flag = "BLANK" if n == 0 else ("THIN" if n < 3 else "OK")
-        if flag == "BLANK":
-            any_blank = True
-        print(f"  {i:2d}: {n:2d} shapes [{flag:5s}]  {texts[:2]}")
+        if n == 0:
+            flag = "BLANK"
+            fail = True
+        elif _is_title_only_body(slide, sw):
+            flag = "TITLE_ONLY"
+            fail = True
+        elif n < 3:
+            flag = "THIN"
+        else:
+            flag = "OK"
+        print(f"  {i:2d}: {n:2d} shapes [{flag:10s}]  {texts[:2]}")
         report.append({"index": i, "shapes": n, "flag": flag, "texts": texts})
     # bounds check
     bounds = check_bounds(pptx_path)
@@ -350,7 +396,7 @@ def verify_slides(pptx_path: str, *, strict: bool = True) -> list[dict]:
         print("\n⚠️ bounds issues:")
         for b in bounds:
             print("  " + b)
-    if strict and (any_blank or bounds):
+    if strict and (fail or bounds):
         raise SystemExit(2)
     return report
 
