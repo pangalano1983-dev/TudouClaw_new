@@ -18348,7 +18348,9 @@ function renderSettingsHub() {
   var tabs = [
     { id: 'config',      label: window.t('tab.settings.globalConfig', '全局配置'),    icon: 'settings' },
     { id: 'providers',   label: window.t('tab.settings.providers',    'LLM 提供商'),  icon: 'dns' },
-    { id: 'llm_tiers',   label: window.t('tab.settings.llmTiers',     'LLM 档位'),    icon: 'tune' },
+    // 'llm_tiers' tab hidden — replaced by per-agent LLM Router
+    // (extra_llms + auto_route). Tier backend still exists but no UI
+    // entry. See agent settings → "额外 LLM" for routing config.
     { id: 'nodeconfig',  label: window.t('tab.settings.nodeConfig',   '节点配置'),    icon: 'tune' },
     { id: 'nodes',       label: window.t('tab.settings.nodes',        '节点列表'),    icon: 'device_hub' },
     { id: 'tokens',      label: window.t('tab.settings.apiTokens',    'API Tokens'),   icon: 'key' },
@@ -18772,7 +18774,9 @@ function renderSettingsPage() {
   var c = document.getElementById('content');
   var tabs = [
     { id: 'providers',  label: window.t('tab.settings.providers',    'LLM Providers'), icon: 'dns' },
-    { id: 'llm_tiers',  label: window.t('tab.settings.llmTiers',     'LLM 档位'),      icon: 'tune' },
+    // 'llm_tiers' tab hidden — replaced by per-agent LLM Router
+    // (extra_llms + auto_route). Tier backend still exists but no UI
+    // entry. See agent settings → "额外 LLM" for routing config.
     { id: 'mcpconfig',  label: window.t('tab.settings.mcp',          'MCP'),           icon: 'hub' },
     { id: 'config',     label: window.t('tab.settings.globalConfig', 'Global Config'), icon: 'settings' },
     { id: 'nodeconfig', label: window.t('tab.settings.nodeConfig',   'Node Config'),   icon: 'tune' },
