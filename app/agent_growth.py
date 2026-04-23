@@ -65,41 +65,6 @@ class AgentGrowthMixin:
             "tool_chains": [tc.to_dict() for tc in self.enhancer.tool_chains.values()],
         }
 
-    # ---- Active Thinking ----
-
-    def enable_active_thinking(self, **kwargs) -> dict:
-        """Enable the active thinking engine for this agent."""
-        from .active_thinking import ActiveThinkingEngine
-        if not self.active_thinking:
-            self.active_thinking = ActiveThinkingEngine(
-                agent=self, role=self.role)
-        self.active_thinking.enable(**kwargs)
-        # Rebuild system prompt to include active thinking context
-        if self.messages and self.messages[0].get("role") == "system":
-            self.messages[0]["content"] = self._build_system_prompt()
-        logger.info("Active thinking enabled for agent %s", self.id)
-        return self.active_thinking.get_stats()
-
-    def disable_active_thinking(self):
-        """Disable active thinking."""
-        if self.active_thinking:
-            self.active_thinking.disable()
-        if self.messages and self.messages[0].get("role") == "system":
-            self.messages[0]["content"] = self._build_system_prompt()
-        logger.info("Active thinking disabled for agent %s", self.id)
-
-    def trigger_thinking(self, trigger: str = "manual",
-                         context: str = "") -> dict:
-        """Manually trigger one active thinking cycle."""
-        from .active_thinking import ActiveThinkingEngine
-        if not self.active_thinking:
-            self.active_thinking = ActiveThinkingEngine(
-                agent=self, role=self.role)
-            self.active_thinking.enable()
-        result = self.active_thinking.think_now(trigger=trigger,
-                                                 context=context)
-        return result.to_dict()
-
     # ---- Self-Improvement (Experience Library) ----
 
     def enable_self_improvement(self, auto_retro: bool = True,

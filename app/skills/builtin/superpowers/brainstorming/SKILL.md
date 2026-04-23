@@ -1,6 +1,13 @@
 ---
 name: brainstorming
 description: "You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation."
+applicable_roles:
+  - "coder"
+  - "product-designer"
+scenarios:
+  - "新功能需求梳理"
+  - "技术方案预研"
+  - "用户意图澄清"
 metadata:
   source: obra/superpowers
   license: MIT

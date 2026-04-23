@@ -13,13 +13,13 @@ function renderAgentChat(agentId) {
   var agDisplayName = agRole + '-' + agName;
   c.innerHTML = '' +
     '<!-- Chat Section: 60% height -->' +
-    '<section style="display:flex;flex-direction:column;height:60%;flex-shrink:0;background:var(--surface);border-bottom:1px solid rgba(255,255,255,0.05);overflow:hidden;position:relative">' +
-      '<div style="padding:10px 20px;border-bottom:1px solid rgba(255,255,255,0.05);display:flex;justify-content:space-between;align-items:center;background:var(--bg2);backdrop-filter:blur(16px)">' +
+    '<section style="display:flex;flex-direction:column;height:60%;flex-shrink:0;background:var(--surface);border-bottom:1px solid var(--overlay-5);overflow:hidden;position:relative">' +
+      '<div style="padding:10px 20px;border-bottom:1px solid var(--overlay-5);display:flex;justify-content:space-between;align-items:center;background:var(--bg2);backdrop-filter:blur(16px)">' +
         '<div style="display:flex;align-items:center;gap:10px">' +
           '<img src="' + (ag.robot_avatar ? '/static/robots/'+ag.robot_avatar+'.svg' : '/static/robots/robot_'+agRole+'.svg') + '" style="width:28px;height:28px" onerror="this.outerHTML=\'<span class=material-symbols-outlined style=color:var(--primary);font-size:20px>smart_toy</span>\'">' +
           '<span style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:14px;font-weight:600">' + agDisplayName + '</span>' +
           '<button class="btn btn-ghost btn-sm" onclick="showSoulEditor(\'' + agentId + '\')" title="Edit SOUL.md" style="padding:4px 8px;font-size:10px"><span class="material-symbols-outlined" style="font-size:14px">auto_awesome</span> SOUL</button>' +
-          '<button class="btn btn-ghost btn-sm" onclick="showThinkingPanel(\'' + agentId + '\')" title="Active Thinking" style="padding:4px 8px;font-size:10px"><span class="material-symbols-outlined" style="font-size:14px">psychology</span> Think</button>' +
+          '<button class="btn btn-ghost btn-sm" onclick="showThinkingPanel(\'' + agentId + '\')" title="自我总结：让 agent 复盘最近对话并把可复用的规则存入经验库" style="padding:4px 8px;font-size:10px"><span class="material-symbols-outlined" style="font-size:14px">psychology</span> Think</button>' +
           '<button id="tts-btn-' + agentId + '" class="btn btn-ghost btn-sm" onclick="_toggleTTS(\'' + agentId + '\')" title="自动朗读新消息 (Auto TTS)" style="padding:4px 8px;font-size:10px"><span class="material-symbols-outlined" style="font-size:14px;color:var(--text3)">volume_up</span></button>' +
           '<button class="btn btn-ghost btn-sm" onclick="wakeAgent(\'' + agentId + '\')" title="唤醒：扫描所有项目里分配给该 agent 的未完成任务并继续执行" style="padding:4px 8px;font-size:10px"><span class="material-symbols-outlined" style="font-size:14px">notifications_active</span> Wake</button>' +
         '</div>' +
@@ -30,9 +30,9 @@ function renderAgentChat(agentId) {
         '</div>' +
       '</div>' +
       '<div class="chat-messages" id="chat-msgs-' + agentId + '" style="flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:14px"></div>' +
-      '<div style="padding:14px 20px;background:var(--bg2);border-top:1px solid rgba(255,255,255,0.05)">' +
+      '<div style="padding:14px 20px;background:var(--bg2);border-top:1px solid var(--overlay-5)">' +
         '<div id="agent-attach-preview-' + agentId + '" style="display:none;flex-wrap:wrap;gap:6px;padding:6px 10px;margin-bottom:6px"></div>' +
-        '<div style="display:flex;align-items:center;gap:10px;background:var(--surface3);padding:4px;border-radius:10px;border:1px solid rgba(255,255,255,0.05)">' +
+        '<div style="display:flex;align-items:center;gap:10px;background:var(--surface3);padding:4px;border-radius:10px;border:1px solid var(--overlay-5)">' +
           '<input id="chat-input-' + agentId + '" type="text" placeholder="Direct Agent Tasking..." style="flex:1;background:transparent;border:none;color:var(--text);font-size:14px;padding:10px 16px;outline:none" onkeydown="if(event.key===\'Enter\'&&!event.isComposing){event.preventDefault();sendAgentMsg(\'' + agentId + '\')}">' +
           '<input type="file" id="agent-file-input-' + agentId + '" multiple accept="image/*,.pdf,.doc,.docx,.pptx,.xlsx,.xls,.txt,.csv,.json,.yaml,.yml,.md,.py,.js,.ts,.html,.css" style="display:none" onchange="handleAgentAttach(\'' + agentId + '\',this)">' +
           '<button style="background:none;border:none;padding:6px;cursor:pointer;display:flex;align-items:center;justify-content:center;border-radius:6px;transition:background .15s" onclick="document.getElementById(\'agent-file-input-' + agentId + '\').click()" title="上传图片/文件"><span class="material-symbols-outlined" style="font-size:20px;color:var(--text3)">attach_file</span></button>' +
@@ -45,9 +45,9 @@ function renderAgentChat(agentId) {
     '<!-- Bottom Section: Task Execution + Logs -->' +
     '<section style="flex:1;overflow-y:auto;display:grid;grid-template-columns:12fr;gap:0">' +
       // --- Consolidated stat strip: 4 cards instead of 9 tofu blocks ---
-      '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;padding:16px 20px;border-bottom:1px solid rgba(255,255,255,0.05)">' +
+      '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;padding:16px 20px;border-bottom:1px solid var(--overlay-5)">' +
         // Card 1: Runtime — events / tasks / tokens / memory combined
-        '<div style="background:var(--surface);border-radius:10px;padding:14px 16px;border:1px solid rgba(255,255,255,0.05)">' +
+        '<div style="background:var(--surface);border-radius:10px;padding:14px 16px;border:1px solid var(--overlay-5)">' +
           '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">' +
             '<span style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.8px">Runtime</span>' +
             '<span class="material-symbols-outlined" style="font-size:18px;color:var(--primary)">analytics</span>' +
@@ -56,17 +56,17 @@ function renderAgentChat(agentId) {
             '<div><div style="color:var(--text3);font-size:9px;text-transform:uppercase;letter-spacing:0.5px">Events</div><div style="font-weight:700;font-size:15px;color:var(--text)">' + (ag.event_count||0) + '</div></div>' +
             '<div><div style="color:var(--text3);font-size:9px;text-transform:uppercase;letter-spacing:0.5px">Tasks</div><div style="font-weight:700;font-size:15px;color:var(--text)" id="agent-task-count-' + agentId + '">0</div></div>' +
             '<div title="LLM token usage (in / out)"><div style="color:var(--text3);font-size:9px;text-transform:uppercase;letter-spacing:0.5px">Tokens</div><div style="font-weight:600;font-size:11px;color:var(--text2)" id="agent-token-stats-' + agentId + '">— / —</div><div id="agent-token-calls-' + agentId + '" style="font-size:9px;color:var(--text3)">0 calls</div></div>' +
-            '<div title="记忆占动态上下文比例"><div style="color:var(--text3);font-size:9px;text-transform:uppercase;letter-spacing:0.5px">Memory</div><div style="font-weight:600;font-size:11px;color:var(--text2)" id="agent-memory-ratio-' + agentId + '">—</div><div style="height:3px;background:rgba(255,255,255,0.06);border-radius:2px;margin-top:3px;overflow:hidden"><div id="agent-memory-bar-' + agentId + '" style="height:100%;width:0%;background:linear-gradient(90deg,#a78bfa,#7c5cfa);transition:width .3s"></div></div></div>' +
+            '<div title="记忆占动态上下文比例"><div style="color:var(--text3);font-size:9px;text-transform:uppercase;letter-spacing:0.5px">Memory</div><div style="font-weight:600;font-size:11px;color:var(--text2)" id="agent-memory-ratio-' + agentId + '">—</div><div style="height:3px;background:var(--overlay-6);border-radius:2px;margin-top:3px;overflow:hidden"><div id="agent-memory-bar-' + agentId + '" style="height:100%;width:0%;background:linear-gradient(90deg,#a78bfa,#7c5cfa);transition:width .3s"></div></div></div>' +
           '</div>' +
         '</div>' +
         // Card 2: Model + 专业领域
-        '<div style="background:' + (ag.enhancement ? 'linear-gradient(135deg,var(--surface),rgba(203,201,255,0.08))' : 'var(--surface)') + ';border-radius:10px;padding:14px 16px;border:1px solid ' + (ag.enhancement ? 'rgba(203,201,255,0.3)' : 'rgba(255,255,255,0.05)') + ';cursor:pointer" onclick="showEnhancementPanel(\'' + agentId + '\')">' +
+        '<div style="background:' + (ag.enhancement ? 'linear-gradient(135deg,var(--surface),var(--primary-tint-8))' : 'var(--surface)') + ';border-radius:10px;padding:14px 16px;border:1px solid ' + (ag.enhancement ? 'var(--primary-tint-30)' : 'var(--overlay-5)') + ';cursor:pointer" onclick="showEnhancementPanel(\'' + agentId + '\')">' +
           '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">' +
             '<span style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.8px">Model & 专业领域</span>' +
             '<span class="material-symbols-outlined" style="font-size:18px;color:var(--primary)">psychology</span>' +
           '</div>' +
           '<div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px">Model</div>' +
-          '<div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px;word-break:break-all">' + esc(ag.model||'default') + '</div>' +
+          '<div title="' + esc(ag.model||'') + '" style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px;word-break:break-all">' + esc((typeof _prettyModelLabel==='function'?_prettyModelLabel(ag.model):ag.model)||'default') + '</div>' +
           '<div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px">专业领域</div>' +
           '<div style="font-size:12px;font-weight:600;color:' + (ag.enhancement ? 'var(--primary)' : 'var(--text3)') + '">' + (ag.enhancement ? (ag.enhancement.domain.split('+').length + ' loaded') : 'Off') + '</div>' +
         '</div>' +
@@ -116,18 +116,18 @@ function renderAgentChat(agentId) {
 
       '<div style="display:grid;grid-template-columns:3fr 3fr 3fr 3fr;gap:0;flex:1;overflow:hidden">' +
         '<!-- Tasks -->' +
-        '<div style="border-right:1px solid rgba(255,255,255,0.05);padding:16px 20px;overflow-y:auto">' +
+        '<div style="border-right:1px solid var(--overlay-5);padding:16px 20px;overflow-y:auto">' +
           '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px"><span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--text)">Task Queue</span><button class="btn btn-sm btn-ghost" onclick="addTaskDialog(\'' + agentId + '\')"><span class="material-symbols-outlined" style="font-size:14px">add</span> Add</button></div>' +
           '<div id="tasks-list-' + agentId + '" style="display:flex;flex-direction:column;gap:4px"></div>' +
         '</div>' +
         '<!-- Event Log -->' +
-        '<div style="padding:16px 20px;overflow-y:auto;background:var(--bg);border-right:1px solid rgba(255,255,255,0.05)">' +
-          '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid rgba(255,255,255,0.05)"><div style="display:flex;align-items:center;gap:6px;color:var(--primary)"><span class="material-symbols-outlined" style="font-size:14px">terminal</span><span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px">Execution Log</span></div></div>' +
+        '<div style="padding:16px 20px;overflow-y:auto;background:var(--bg);border-right:1px solid var(--overlay-5)">' +
+          '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--overlay-5)"><div style="display:flex;align-items:center;gap:6px;color:var(--primary)"><span class="material-symbols-outlined" style="font-size:14px">terminal</span><span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px">Execution Log</span></div></div>' +
           '<div id="agent-event-log-' + agentId + '" style="font-family:monospace;font-size:11px;line-height:1.7;color:var(--text3)"></div>' +
         '</div>' +
         '<!-- Execution Steps Panel (like Claude Todo) -->' +
-        '<div style="padding:16px 16px;overflow-y:auto;background:var(--surface);border-right:1px solid rgba(255,255,255,0.05)">' +
-          '<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid rgba(255,255,255,0.05)">' +
+        '<div style="padding:16px 16px;overflow-y:auto;background:var(--surface);border-right:1px solid var(--overlay-5)">' +
+          '<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--overlay-5)">' +
             '<span class="material-symbols-outlined" style="font-size:16px;color:var(--primary)">checklist</span>' +
             '<span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--text)">Execution Steps</span>' +
           '</div>' +
@@ -137,7 +137,7 @@ function renderAgentChat(agentId) {
         '</div>' +
         '<!-- Inter-Agent Messages -->' +
         '<div style="padding:16px 20px;overflow-y:auto;background:var(--bg)">' +
-          '<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid rgba(255,255,255,0.05)">' +
+          '<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--overlay-5)">' +
             '<span class="material-symbols-outlined" style="font-size:14px;color:var(--primary)">mail</span>' +
             '<span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--text)">Agent Messages</span>' +
           '</div>' +
@@ -147,7 +147,7 @@ function renderAgentChat(agentId) {
     '</section>' +
 
     '<!-- Workspace Info -->' +
-    '<section style="padding:12px 20px;background:var(--surface2);border-top:1px solid rgba(255,255,255,0.05);font-size:12px;color:var(--text2)">' +
+    '<section style="padding:12px 20px;background:var(--surface2);border-top:1px solid var(--overlay-5);font-size:12px;color:var(--text2)">' +
       '<div><span style="color:var(--text3)">Private Workspace:</span> <code style="color:var(--primary)">~/.tudou_claw/workspaces/' + esc(agentId) + '</code></div>' +
       (ag.shared_workspace ? '<div style="margin-top:4px"><span style="color:var(--text3)">Shared Workspace:</span> <code style="color:var(--primary)">' + esc(ag.shared_workspace) + '</code></div>' : '') +
     '</section>';
@@ -186,7 +186,7 @@ async function loadAgentEventLog(agentId) {
       var color = e.kind==='message'?'var(--primary)':e.kind==='tool_call'?'var(--warning)':e.kind==='tool_result'?'var(--success)':e.kind==='error'?'var(--error)':'var(--text3)';
       var time = new Date(e.timestamp*1000).toLocaleTimeString();
       var content = JSON.stringify(e.data||{}).slice(0,120);
-      return '<p><span style="color:rgba(203,201,255,0.3)">[' + time + ']</span> <span style="color:' + color + '">' + esc(e.kind).toUpperCase() + ':</span> ' + esc(content) + '</p>';
+      return '<p><span style="color:var(--primary-tint-30)">[' + time + ']</span> <span style="color:' + color + '">' + esc(e.kind).toUpperCase() + ':</span> ' + esc(content) + '</p>';
     }).join('');
     // Update task count
     var countEl = document.getElementById('agent-task-count-' + agentId);
@@ -263,7 +263,7 @@ async function loadWorkspaceAccess(agentId) {
         auth.map(function(otherId) {
           var otherAgent = allAgents.agents.find(function(a) { return a.id === otherId; });
           var name = otherAgent ? otherAgent.name : otherId;
-          return '<div style="display:flex;align-items:center;justify-content:space-between;padding:6px;background:var(--bg);border-radius:4px;margin-bottom:4px;border:1px solid rgba(255,255,255,0.05)">' +
+          return '<div style="display:flex;align-items:center;justify-content:space-between;padding:6px;background:var(--bg);border-radius:4px;margin-bottom:4px;border:1px solid var(--overlay-5)">' +
             '<span style="font-size:11px;color:var(--text)">' + esc(name) + '</span>' +
             '<button style="cursor:pointer;padding:2px 8px;font-size:10px;background:rgba(255,0,0,0.1);border:1px solid rgba(255,0,0,0.3);color:#ff6b6b;border-radius:3px" onclick="revokeWorkspace(\'' + esc(agentId) + '\', \'' + esc(otherId) + '\')">' +
               'Revoke' +
@@ -479,16 +479,24 @@ function populateQuickModelSwitch(agentId) {
       });
     }
   }
+  // Display: show prettified label but keep raw ID as option value +
+  // hover tooltip — consistent with portal_bundle.js (agent chat) so
+  // meeting/project contexts see the same clean labels.
+  var _pp = (typeof _prettyModelLabel === 'function')
+    ? _prettyModelLabel : function(x){ return x; };
   modelEl.innerHTML = models.map(function(m) {
-    return '<option value="' + esc(m) + '"' + (ag.model === m ? ' selected' : '') + '>' + esc(m) + '</option>';
+    return '<option value="' + esc(m) + '" title="' + esc(m) + '"' +
+           (ag.model === m ? ' selected' : '') + '>' + esc(_pp(m)) + '</option>';
   }).join('');
+  modelEl.title = ag.model || '';
 
   // On provider change, update models
   provEl.onchange = function() {
     var pid = provEl.value;
     var ms = _availableModels[pid] || [];
     modelEl.innerHTML = ms.map(function(m) {
-      return '<option value="' + esc(m) + '">' + esc(m) + '</option>';
+      return '<option value="' + esc(m) + '" title="' + esc(m) + '">' +
+             esc(_pp(m)) + '</option>';
     }).join('');
     quickSwitchModel(agentId);
   };
@@ -1017,7 +1025,7 @@ function addApprovalBubble(agentId, evt) {
     '<div style="display:flex;gap:8px">' +
       '<button class="btn btn-sm btn-danger" onclick="chatApprovalAction(\'' + agentId + '\',\'deny\',this)" style="font-size:11px;padding:6px 12px"><span class="material-symbols-outlined" style="font-size:14px">block</span> Deny</button>' +
       '<button class="btn btn-sm btn-success" onclick="chatApprovalAction(\'' + agentId + '\',\'approve\',this)" style="font-size:11px;padding:6px 12px"><span class="material-symbols-outlined" style="font-size:14px">check</span> Approve</button>' +
-      '<button class="btn btn-sm" onclick="chatApprovalAction(\'' + agentId + '\',\'approve_session\',this)" style="font-size:11px;padding:6px 12px;background:var(--primary);color:#0e141b"><span class="material-symbols-outlined" style="font-size:14px">verified</span> Approve (Session)</button>' +
+      '<button class="btn btn-sm" onclick="chatApprovalAction(\'' + agentId + '\',\'approve_session\',this)" style="font-size:11px;padding:6px 12px;background:var(--primary);color:var(--primary-text)"><span class="material-symbols-outlined" style="font-size:14px">verified</span> Approve (Session)</button>' +
     '</div>';
   el.appendChild(div);
   el.scrollTop = el.scrollHeight;
@@ -1382,7 +1390,7 @@ function _renderAgentAttachPreview(agentId) {
       thumb = '<span class="material-symbols-outlined" style="font-size:20px;color:var(--text3)">draft</span>';
     }
     var sizeKb = Math.max(1, Math.round((a.size||0)/1024));
-    return '<div style="display:inline-flex;align-items:center;gap:6px;background:var(--surface);border:1px solid rgba(255,255,255,0.08);border-radius:6px;padding:4px 8px;font-size:11px;color:var(--text)">' +
+    return '<div style="display:inline-flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--overlay-8);border-radius:6px;padding:4px 8px;font-size:11px;color:var(--text)">' +
              thumb +
              '<div style="display:flex;flex-direction:column;max-width:140px">' +
                '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(a.name)+'</span>' +
@@ -1576,8 +1584,8 @@ function _renderHandoffBadge(agentId, handoffId, info) {
     el.className = 'chat-msg handoff-badge';
     el.style.cssText = [
       'margin:6px 0', 'padding:8px 12px',
-      'border-radius:10px', 'border:1px solid var(--border,rgba(255,255,255,0.08))',
-      'background:var(--surface2,rgba(255,255,255,0.04))',
+      'border-radius:10px', 'border:1px solid var(--border,var(--overlay-8))',
+      'background:var(--surface2,var(--overlay-4))',
       'font-size:13px', 'display:flex', 'flex-direction:column', 'gap:4px',
     ].join(';');
     host.appendChild(el);
@@ -1781,13 +1789,13 @@ async function _streamTaskEvents(agentId, taskId, thinkDiv, progressBar) {
             } else if(evt.type==='thinking') {
               if (msgDiv) { msgDiv = null; fullText = ''; }
               // Update progress bar phase text instead of separate thinkDiv
-              _updateProgress(agentId, 0, evt.content || 'Thinking...');
+              _updateProgress(agentId, 0, evt.content || '发言中…');
             } else if(evt.type==='tool_call') {
               // Show tool name in progress bar
               _updateProgress(agentId, 0, '🔧 ' + esc(evt.name||''));
             } else if(evt.type==='tool_result') {
               // Reset progress bar to thinking state
-              _updateProgress(agentId, 0, 'Thinking...');
+              _updateProgress(agentId, 0, '发言中…');
             } else if(evt.type==='approval_request') {
               if (thinkDiv.parentNode) thinkDiv.remove();
               addApprovalBubble(agentId, evt);
@@ -1828,14 +1836,14 @@ async function _streamTaskEvents(agentId, taskId, thinkDiv, progressBar) {
                 to: evt.to_agent_name || '?',
                 preview: evt.result_preview || '',
               });
-              _updateProgress(agentId, 0, 'Thinking...');
+              _updateProgress(agentId, 0, '发言中…');
             } else if(evt.type==='handoff_failed') {
               _renderHandoffBadge(agentId, evt.handoff_id, {
                 state: 'failed',
                 to: evt.to_agent_name || '?',
                 error: evt.error || '',
               });
-              _updateProgress(agentId, 0, 'Thinking...');
+              _updateProgress(agentId, 0, '发言中…');
             } else if(evt.type==='done') {
               taskDone = true;
               // Backfill: scan deliverable_dir + match against bubbles

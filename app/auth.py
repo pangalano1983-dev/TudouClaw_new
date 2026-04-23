@@ -544,6 +544,27 @@ class ToolPolicy:
         # legacy internal tool fully replaced by the pptx-author skill.
         self.global_denylist: set = {"create_pptx_advanced"}
         self._global_denylist_file: str = ""   # set by set_persist_path()
+
+        # ── Command-pattern denylist (通用门禁 Day 1) ──
+        # Per-command-CONTENT rules, complementing ``global_denylist``
+        # which only blocks by tool NAME. Each entry is a dict:
+        #
+        #   {
+        #     "pattern": r"^terraform\s+apply",   # regex (re.IGNORECASE)
+        #     "scope":   "global" | "role:<role>" | "agent:<id>",
+        #     "verdict": "deny" | "needs_approval",
+        #     "reason":  "生产环境禁止 terraform apply",
+        #     "label":   "cloud_delivery:tf_apply",   # unique id for mgmt
+        #     "tags":    ["cloud_delivery", "iac_write"],
+        #   }
+        #
+        # Applied by ``rule_command_patterns`` before risk classification,
+        # so even LOW-risk tools (plain bash) get the extra check. Admin-
+        # editable via add_command_pattern / remove_command_pattern.
+        # Reused by the cloud_delivery role preset (Day 3) plus any future
+        # "plan only" role — DBA / security / SRE etc.
+        self.command_patterns: list[dict] = []
+        self._command_patterns_file: str = ""   # set by set_persist_path()
         # Agent approval authority: agent_id → set of risk levels they can approve
         # Populated from agent priority + DEFAULT_AGENT_APPROVAL_AUTHORITY
         self.agent_approval_authority: dict[str, list[str]] = {}
@@ -850,8 +871,12 @@ class ToolPolicy:
         self._global_denylist_file = os.path.join(
             os.path.dirname(path) or ".", "tool_denylist.json"
         )
+        self._command_patterns_file = os.path.join(
+            os.path.dirname(path) or ".", "command_patterns.json"
+        )
         self._load_session_approvals()
         self._load_global_denylist()
+        self._load_command_patterns()
 
     def _load_global_denylist(self) -> None:
         p = self._global_denylist_file
@@ -911,6 +936,179 @@ class ToolPolicy:
     def list_global_denylist(self) -> list[str]:
         with self._lock:
             return sorted(self.global_denylist)
+
+    # ── command_patterns (通用门禁) ────────────────────────────────
+
+    _VALID_CP_VERDICTS = ("deny", "needs_approval")
+
+    def add_command_pattern(self, *,
+                            pattern: str,
+                            scope: str = "global",
+                            verdict: str = "deny",
+                            reason: str = "",
+                            label: str = "",
+                            tags: list = None) -> dict:
+        """Register a new command-pattern rule.
+
+        Raises ValueError on invalid input (bad regex, bad verdict, scope
+        without its ``role:``/``agent:`` suffix). Duplicate ``label``
+        overwrites the previous entry — labels are the canonical id.
+        """
+        if not pattern:
+            raise ValueError("pattern is required")
+        try:
+            re.compile(pattern, re.IGNORECASE)
+        except re.error as e:
+            raise ValueError(f"invalid regex: {e}") from None
+        if verdict not in self._VALID_CP_VERDICTS:
+            raise ValueError(
+                f"verdict must be one of {self._VALID_CP_VERDICTS}, got {verdict!r}")
+        scope = scope or "global"
+        if scope != "global" and not (
+                scope.startswith("role:") or scope.startswith("agent:")):
+            raise ValueError(
+                "scope must be 'global' | 'role:<name>' | 'agent:<id>'")
+        lbl = (label or "").strip() or f"cp_{uuid.uuid4().hex[:8]}"
+        entry = {
+            "pattern": pattern,
+            "scope": scope,
+            "verdict": verdict,
+            "reason": reason or f"blocked by pattern {lbl}",
+            "label": lbl,
+            "tags": list(tags or []),
+        }
+        with self._lock:
+            self.command_patterns = [
+                cp for cp in self.command_patterns if cp.get("label") != lbl
+            ]
+            self.command_patterns.append(entry)
+            self._save_command_patterns()
+        return dict(entry)
+
+    def remove_command_pattern(self, label: str) -> bool:
+        if not label:
+            return False
+        with self._lock:
+            before = len(self.command_patterns)
+            self.command_patterns = [
+                cp for cp in self.command_patterns if cp.get("label") != label
+            ]
+            removed = len(self.command_patterns) != before
+            if removed:
+                self._save_command_patterns()
+            return removed
+
+    def list_command_patterns(self, *,
+                              scope: str = "") -> list[dict]:
+        with self._lock:
+            if not scope:
+                return [dict(cp) for cp in self.command_patterns]
+            return [dict(cp) for cp in self.command_patterns
+                    if cp.get("scope") == scope]
+
+    def _save_command_patterns(self) -> None:
+        p = self._command_patterns_file
+        if not p:
+            return
+        try:
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            tmp = p + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"patterns": self.command_patterns},
+                          f, ensure_ascii=False, indent=2)
+            os.replace(tmp, p)
+        except Exception as e:
+            logging.getLogger("tudou.auth").warning(
+                "failed to save command_patterns.json: %s", e)
+
+    def find_matching_command_pattern(self, arguments: dict,
+                                      *,
+                                      agent_id: str = "",
+                                      agent_role: str = "") -> Optional[dict]:
+        """Return the first command_pattern entry whose regex matches a
+        command-like field in ``arguments`` AND whose scope applies to
+        the (agent_id, agent_role) tuple. Returns None if nothing matches.
+
+        Used by the tool dispatcher on deny to decide whether the denial
+        is a "command pattern hit" (save command as delivery artifact)
+        or some other kind of block (no artifact side-effect).
+        """
+        if not arguments or not isinstance(arguments, dict):
+            return None
+        # Concatenate command-like fields (mirror of command_patterns rule).
+        parts: list[str] = []
+        for f in ("command", "script", "cmd", "code"):
+            v = arguments.get(f)
+            if v is None:
+                continue
+            if isinstance(v, str):
+                parts.append(v)
+            else:
+                try:
+                    parts.append(str(v))
+                except Exception:
+                    continue
+        blob = "\n".join(parts)
+        if not blob:
+            return None
+        with self._lock:
+            patterns = list(self.command_patterns)
+        for cp in patterns:
+            scope = cp.get("scope") or "global"
+            if scope != "global":
+                if scope.startswith("agent:"):
+                    if agent_id != scope.split(":", 1)[1]:
+                        continue
+                elif scope.startswith("role:"):
+                    if agent_role != scope.split(":", 1)[1]:
+                        continue
+                else:
+                    continue
+            pat = cp.get("pattern") or ""
+            if not pat:
+                continue
+            try:
+                if re.search(pat, blob, re.IGNORECASE):
+                    return dict(cp)
+            except re.error:
+                continue
+        return None
+
+    def _load_command_patterns(self) -> None:
+        p = self._command_patterns_file
+        if not p or not os.path.isfile(p):
+            return
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            items = data.get("patterns") or []
+            cleaned: list[dict] = []
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                if "pattern" not in it or not it["pattern"]:
+                    continue
+                try:
+                    re.compile(it["pattern"], re.IGNORECASE)
+                except re.error:
+                    # Skip corrupted entries — log, don't crash.
+                    logging.getLogger("tudou.auth").warning(
+                        "skipping invalid regex in command_patterns: %r",
+                        it.get("pattern"))
+                    continue
+                cleaned.append({
+                    "pattern": it["pattern"],
+                    "scope": it.get("scope") or "global",
+                    "verdict": it.get("verdict") or "deny",
+                    "reason": it.get("reason") or "",
+                    "label": it.get("label") or "",
+                    "tags": list(it.get("tags") or []),
+                })
+            with self._lock:
+                self.command_patterns = cleaned
+        except Exception as e:
+            logging.getLogger("tudou.auth").warning(
+                "failed to load command_patterns.json: %s", e)
 
     def _load_session_approvals(self) -> None:
         p = self._session_approvals_file
@@ -1305,8 +1503,19 @@ class AdminManager:
         return admin
 
     def create_admin(self, username: str, password: str, display_name: str,
-                     agent_ids: list[str] = None, node_ids: list[str] = None) -> AdminUser:
-        """Create a new regular admin user."""
+                     role: str = "admin",
+                     agent_ids: list[str] = None,
+                     node_ids: list[str] = None) -> AdminUser:
+        """Create a new account.
+
+        ``role`` accepts "admin" (default), "user", or "superAdmin".
+        Regular users and admins live in the same store but are
+        separated by this field; app.permissions consults it at every
+        API call to decide what they're allowed to do.
+        """
+        allowed = {"superAdmin", "admin", "user"}
+        if role not in allowed:
+            raise ValueError(f"invalid role: {role!r} (expected one of {allowed})")
         with self._lock:
             # Check if username exists
             if any(a.username == username for a in self.admins.values()):
@@ -1315,7 +1524,7 @@ class AdminManager:
             admin = self._create_admin_obj(
                 username=username,
                 password=password,
-                role=AdminRole.ADMIN.value,
+                role=role,
                 display_name=display_name,
                 agent_ids=agent_ids or [],
                 node_ids=node_ids or [],
@@ -1391,6 +1600,16 @@ class AdminManager:
     def bind_agents(self, user_id: str, agent_ids: list[str]) -> AdminUser | None:
         """Set which agents this admin can manage."""
         return self.update_admin(user_id, agent_ids=agent_ids)
+
+    def bind_nodes(self, user_id: str, node_ids: list[str]) -> AdminUser | None:
+        """Set which remote nodes this admin can manage.
+
+        Mirrors ``bind_agents``: overwrites the delegation list wholesale
+        so the caller can drive UI state with a single save (easier than
+        diffing add/remove on every checkbox flip). Returns updated admin
+        or None if user_id not found.
+        """
+        return self.update_admin(user_id, node_ids=node_ids)
 
     def can_manage_agent(self, user_id: str, agent_id: str, agent_node_id: str = "") -> bool:
         """Check if admin can manage an agent.

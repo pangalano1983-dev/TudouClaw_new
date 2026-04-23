@@ -1,6 +1,12 @@
 ---
 name: using-superpowers
 description: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions
+applicable_roles:
+  - "coder"
+scenarios:
+  - "对话启动"
+  - "skill 选择决策"
+  - "skill 套件导航"
 metadata:
   source: obra/superpowers
   license: MIT

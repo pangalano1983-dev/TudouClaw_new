@@ -119,7 +119,12 @@ function renderDashboard() {
           var tu = a.cost_summary || {};
           var aIn = tu.input_tokens || 0;
           var aOut = tu.output_tokens || 0;
-          var modelShort = (a.model||'default').split('/').pop().split(':')[0];
+          // Unified model label — same helper used by chat header, info cards,
+          // agent list, so the same raw ID always shortens to the same label.
+          var _pp = window._prettyModelLabel || function(x){
+            return (x||'default').split('/').pop().split(':')[0];
+          };
+          var modelShort = _pp(a.model) || 'default';
           if (modelShort.length > 16) modelShort = modelShort.substring(0,14) + '..';
           return `
           <div style="background:var(--surface);padding:12px 14px;border-radius:10px;border:1px solid var(--border-light);cursor:pointer;transition:all 0.15s;display:flex;align-items:center;gap:10px;overflow:hidden"

@@ -101,6 +101,15 @@ class SkillCatalogEntry:
     tags: list[str] = field(default_factory=list)
     languages: list[str] = field(default_factory=list)   # ["python","javascript"]
 
+    # 适用范围 —— 驱动 skill 商店 UI 里的"给谁用 / 什么时候用"提示。
+    # applicable_roles: agent.profile.role 的短名列表 (eg ["coder", "researcher"])。
+    #   空列表 = 通用，任何角色都适用。
+    # scenarios: 自然语言描述的典型触发情境 (eg ["生产 bug 排查", "测试失败定位"])。
+    #   UI 渲染为 chips；也可作为 skill 匹配器的弱信号。
+    # 两者都是可选，不影响已注册 skill 的可用性。
+    applicable_roles: list[str] = field(default_factory=list)
+    scenarios: list[str] = field(default_factory=list)
+
     # 文件系统定位
     catalog_path: str = ""              # 目录绝对路径 (源)
     size_bytes: int = 0
@@ -125,6 +134,8 @@ class SkillCatalogEntry:
             "source": self.source,
             "tags": list(self.tags),
             "languages": list(self.languages),
+            "applicable_roles": list(self.applicable_roles),
+            "scenarios": list(self.scenarios),
             "catalog_path": self.catalog_path,
             "size_bytes": self.size_bytes,
             "last_updated": self.last_updated,
@@ -252,6 +263,18 @@ def read_entry_from_skill_md(skill_md_path: str, catalog_root: str = "") -> Skil
         src = DEFAULT_SOURCE
     version = str(metadata.get("versions") or metadata.get("version") or "1.0.0").split(",")[0].strip()
 
+    # applicable_roles + scenarios can live at the top level of frontmatter
+    # (where we've been putting them) or nested under metadata.* — accept
+    # either. Both are optional; defaults to [] = universal applicability.
+    roles_raw = meta.get("applicable_roles")
+    if roles_raw is None:
+        roles_raw = metadata.get("applicable_roles")
+    applicable_roles = _safe_split_csv(roles_raw)
+    scenarios_raw = meta.get("scenarios")
+    if scenarios_raw is None:
+        scenarios_raw = metadata.get("scenarios")
+    scenarios = _safe_split_csv(scenarios_raw)
+
     size = 0
     try:
         for fp in p.parent.rglob("*"):
@@ -272,6 +295,8 @@ def read_entry_from_skill_md(skill_md_path: str, catalog_root: str = "") -> Skil
         source=src,
         tags=tags,
         languages=langs,
+        applicable_roles=applicable_roles,
+        scenarios=scenarios,
         catalog_path=str(p.parent),
         size_bytes=size,
         last_updated=p.stat().st_mtime,
@@ -335,6 +360,17 @@ def read_entry_from_manifest_yaml(manifest_path: str, catalog_root: str = "") ->
     hint = data.get("hint") or {}
     sensitive = bool(isinstance(hint, dict) and hint.get("sensitive"))
 
+    # applicable_roles + scenarios — accept at top level of manifest.yaml
+    # OR nested under metadata.* for symmetry with SKILL.md frontmatter.
+    roles_raw = data.get("applicable_roles")
+    if roles_raw is None and isinstance(meta, dict):
+        roles_raw = meta.get("applicable_roles")
+    applicable_roles = _safe_split_csv(roles_raw)
+    scenarios_raw = data.get("scenarios")
+    if scenarios_raw is None and isinstance(meta, dict):
+        scenarios_raw = meta.get("scenarios")
+    scenarios = _safe_split_csv(scenarios_raw)
+
     size = 0
     try:
         for fp in p.parent.rglob("*"):
@@ -355,6 +391,8 @@ def read_entry_from_manifest_yaml(manifest_path: str, catalog_root: str = "") ->
         entry=str(data.get("entry") or "main.py"),
         source=src,
         tags=tags,
+        applicable_roles=applicable_roles,
+        scenarios=scenarios,
         catalog_path=str(p.parent),
         size_bytes=size,
         last_updated=p.stat().st_mtime,

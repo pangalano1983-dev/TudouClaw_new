@@ -6,6 +6,7 @@ the host system beyond the normal tool sandbox.
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 from typing import Any
@@ -41,31 +42,81 @@ def _tool_bash(command: str, timeout: int = _BASH_TIMEOUT_DEFAULT_S,
                       min(int(timeout), _BASH_TIMEOUT_MAX_S))
     except Exception:
         timeout = _BASH_TIMEOUT_DEFAULT_S
+    jailed = pol.mode in ("restricted", "strict")
+    cwd = str(pol.root) if getattr(pol, "root", None) else os.getcwd()
+    env = pol.scrub_env() if jailed else None
+
+    # Switched from subprocess.run → Popen + communicate so we can
+    # track the child pid in the abort registry. A user clicking "终止"
+    # on a meeting/project/agent flips the registry's abort flag AND
+    # sends SIGTERM to every tracked pid — giving us real kill power
+    # over the runaway `python build_report.py` script mid-execution.
+    from .. import abort_registry
+    task_key = abort_registry.current_key()
+    proc = None
     try:
-        jailed = pol.mode in ("restricted", "strict")
-        result = subprocess.run(
+        # start_new_session=True so SIGTERM on the pid also kills its
+        # grandchildren (python build.py → spawned subprocess etc.).
+        proc = subprocess.Popen(
             command,
             shell=True,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
-            # Always prefer the sandbox policy root (the agent's
-            # working_dir). Falling back to os.getcwd() would run the
-            # command in the server-process CWD (the code package
-            # directory), causing runtime artefacts to leak into the
-            # source tree.
-            cwd=str(pol.root) if getattr(pol, "root", None) else os.getcwd(),
-            env=pol.scrub_env() if jailed else None,
+            cwd=cwd,
+            env=env,
+            start_new_session=True,
         )
+        if task_key:
+            abort_registry.track_pid(task_key, proc.pid)
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+            returncode = proc.returncode
+        except subprocess.TimeoutExpired:
+            # Kill the whole process group so runaway python children
+            # also die, not just the shell wrapper.
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except Exception:
+                proc.terminate()
+            try:
+                proc.communicate(timeout=2)
+            except Exception:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except Exception:
+                    proc.kill()
+            return f"Error: Command timed out after {timeout}s"
+        finally:
+            if task_key and proc is not None:
+                abort_registry.untrack_pid(task_key, proc.pid)
+
+        # If the abort flag was flipped while we were waiting (and the
+        # subprocess was killed by the registry's SIGTERM), surface
+        # that clearly. Exit code will usually be -signal.SIGTERM (-15)
+        # or similar negative on POSIX.
+        if task_key and abort_registry.is_aborted(task_key):
+            return (f"⏸ ABORTED by user. Command terminated "
+                    f"(exit code {returncode}).\n[exit code: {returncode}]")
+
         output_parts = []
-        if result.stdout:
-            output_parts.append(result.stdout)
-        if result.stderr:
-            output_parts.append(f"[stderr]\n{result.stderr}")
-        output_parts.append(f"[exit code: {result.returncode}]")
+        if stdout:
+            output_parts.append(stdout)
+        if stderr:
+            output_parts.append(f"[stderr]\n{stderr}")
+        # Make failure UNMISSABLE. Agents were observed ignoring a
+        # bare "[exit code: 1]" line and telling the user "done" even
+        # when a python-pptx script SyntaxError'd without producing
+        # any output file. Lead with a LOUD ❌ header when returncode
+        # != 0 so the LLM's attention lands on it. Success stays quiet.
+        if returncode != 0:
+            output_parts.insert(0,
+                f"❌ COMMAND FAILED (exit code {returncode}). "
+                f"DO NOT report success. Read stderr above, fix the root "
+                f"cause, and rerun before claiming the task is done."
+            )
+        output_parts.append(f"[exit code: {returncode}]")
         return "\n".join(output_parts)
-    except subprocess.TimeoutExpired:
-        return f"Error: Command timed out after {timeout}s"
     except Exception as e:
         return f"Error executing command: {e}"
 

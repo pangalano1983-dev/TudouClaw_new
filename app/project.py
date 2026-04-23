@@ -96,8 +96,23 @@ class ProjectTask:
     created_by: str = ""           # "user" or agent_id
     result: str = ""
     priority: int = 0              # 0=normal, 1=high, 2=urgent
+    # Block 2 Review loop. When the task transitions to DONE, the
+    # framework runs this verifier. On failure, the task is pushed back
+    # to IN_PROGRESS with the verifier's reason appended to `result`
+    # so the next agent turn sees the concrete failure. Shape:
+    #   {"kind": "run_tests", "config": {...}, "required": true}
+    # Empty / None = no auto-verify.
+    verify: dict = field(default_factory=dict)
+    # Acceptance criterion (Block 2 / P1). One line describing the
+    # concrete artifact or state that proves this task is done. Used
+    # by llm_judge verifier + plan-in-context rendering.
+    acceptance: str = ""
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    # Block 1 Project-level DAG — list of task ids that must COMPLETE
+    # before this task is eligible to start. Consumed by the DAG
+    # scheduler (added in Block 1). Empty = no dependencies.
+    depends_on: list = field(default_factory=list)
     # ── Step-level checkpoints (resumable execution) ──
     steps: list = field(default_factory=list)        # list[TaskStep]
     current_step_index: int = 0
@@ -113,8 +128,11 @@ class ProjectTask:
             "assigned_to": self.assigned_to,
             "created_by": self.created_by,
             "result": self.result, "priority": self.priority,
+            "verify": dict(self.verify) if self.verify else {},
+            "acceptance": self.acceptance,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "depends_on": list(self.depends_on or []),
             "steps": [s.to_dict() for s in self.steps],
             "current_step_index": self.current_step_index,
             "last_checkpoint_at": self.last_checkpoint_at,
@@ -132,8 +150,11 @@ class ProjectTask:
             created_by=d.get("created_by", ""),
             result=d.get("result", ""),
             priority=d.get("priority", 0),
+            verify=dict(d.get("verify") or {}),
+            acceptance=d.get("acceptance", ""),
             created_at=d.get("created_at", time.time()),
             updated_at=d.get("updated_at", time.time()),
+            depends_on=list(d.get("depends_on") or []),
             steps=[TaskStep.from_dict(s) for s in (d.get("steps") or [])],
             current_step_index=int(d.get("current_step_index", 0) or 0),
             last_checkpoint_at=float(d.get("last_checkpoint_at", 0.0) or 0.0),
@@ -272,6 +293,11 @@ class ProjectMessage:
     # frontend so the user sees the SAME execution story they would get
     # on the dedicated agent chat page (UX consistency).
     blocks: list[dict] = field(default_factory=list)
+    # P0-A: structured envelope — same fields as MeetingMessage.
+    # Optional; falls back to raw `content` when empty.
+    summary: str = ""
+    key_fields: dict = field(default_factory=dict)
+    artifact_refs: list = field(default_factory=list)
     timestamp: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict:
@@ -283,6 +309,9 @@ class ProjectMessage:
             "msg_type": self.msg_type,
             "task_id": self.task_id,
             "blocks": self.blocks,
+            "summary": self.summary,
+            "key_fields": dict(self.key_fields),
+            "artifact_refs": list(self.artifact_refs),
             "timestamp": self.timestamp,
         }
 
@@ -300,10 +329,42 @@ class ProjectMessage:
             content=d.get("content", ""),
             msg_type=d.get("msg_type", "chat"),
             task_id=d.get("task_id", ""),
-            # Backward-compat: older persisted messages lack this field.
+            # Backward-compat: older persisted messages lack these fields.
             blocks=list(d.get("blocks") or []),
+            summary=d.get("summary", "") or "",
+            key_fields=dict(d.get("key_fields", {}) or {}),
+            artifact_refs=list(d.get("artifact_refs", []) or []),
             timestamp=d.get("timestamp", time.time()),
         )
+
+    def compact_text(self, detail_preview_chars: int = 400) -> str:
+        """Compact representation for transcript injection — mirrors
+        MeetingMessage.compact_text to keep agent-facing render formats
+        consistent across meeting and project contexts."""
+        parts: list[str] = []
+        if self.summary:
+            parts.append(f"📣 {self.summary}")
+        if self.key_fields:
+            try:
+                import json as _j
+                kf = _j.dumps(self.key_fields, ensure_ascii=False, default=str)
+            except Exception:
+                kf = str(self.key_fields)
+            if len(kf) > 400:
+                kf = kf[:400] + "…"
+            parts.append(f"🔑 {kf}")
+        if self.artifact_refs:
+            refs = self.artifact_refs
+            parts.append("📎 " + ", ".join(refs[:5])
+                         + (f" (+{len(refs)-5})" if len(refs) > 5 else ""))
+        if parts:
+            if self.content and self.content.strip():
+                c = self.content.strip()
+                if len(c) > detail_preview_chars:
+                    c = c[:detail_preview_chars] + "…"
+                parts.append(f"📄 {c}")
+            return "\n".join(parts)
+        return self.content or ""
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1115,6 +1176,85 @@ class Project:
                 return t
         return None
 
+    # ── Block 2 Review loop — verify a completed task ──
+
+    def verify_task(self, task_id: str,
+                    llm_call: "Callable | None" = None) -> "dict":
+        """Run the task's declared verifier.
+
+        Called by ProjectChatEngine after a task's agent marks it done,
+        and also invokable from the /task-update API endpoint when a
+        human marks done manually. Returns a dict with the VerifyResult
+        shape (ok, summary, details, error, verifier_kind, duration_s).
+
+        Behavior on failure (required=True):
+        - Task status reverts from DONE back to IN_PROGRESS
+        - Verifier reason appended to task.result
+        - Task updated_at bumped so UI re-renders
+
+        When `verify` is not declared on the task, returns
+        {"ok": True, "verifier_kind": "none", "summary": "no verifier configured"}
+        so callers can assume a dict back without None-checks.
+
+        `llm_call` is injected for llm_judge verifier — typically by the
+        ProjectChatEngine using the assignee agent's provider/model.
+        """
+        from .verifier import VerifyConfig, VerifyContext, run_verify
+        task = self.get_task(task_id)
+        if task is None:
+            return {"ok": False, "verifier_kind": "(missing)",
+                    "summary": f"task {task_id} not found", "error": "not_found"}
+        if not task.verify:
+            return {"ok": True, "verifier_kind": "none",
+                    "summary": "no verifier configured"}
+        cfg = VerifyConfig.from_dict(task.verify)
+        if cfg is None:
+            return {"ok": False, "verifier_kind": "(invalid)",
+                    "summary": "task.verify config malformed",
+                    "error": f"invalid verify dict: {task.verify!r}"}
+        ctx = VerifyContext(
+            workspace_dir=self.working_directory or "",
+            step_started_at=task.updated_at,  # task-level analog of step start
+            acceptance=task.acceptance,
+            result_summary=task.result,
+            agent_id=task.assigned_to,
+            plan_id=self.id,  # plan ≈ project for bus channel routing
+            step_id=task.id,
+            llm_call=llm_call,
+        )
+        result = run_verify(cfg, ctx)
+        rd = result.to_dict()
+
+        # On required failure, revert status + append reason
+        if not result.ok and cfg.required:
+            task.status = ProjectTaskStatus.IN_PROGRESS
+            reason = (f"\n[verifier:{result.verifier_kind}] {result.summary}")
+            task.result = (task.result + reason)[:4000]
+            task.updated_at = time.time()
+
+        # Emit progress frame — best-effort, never fails the verify
+        try:
+            from .progress_bus import get_bus, ProgressFrame
+            get_bus().publish(ProgressFrame(
+                kind="verify_result",
+                channel=f"project:{self.id}",
+                plan_id=self.id,
+                step_id=task.id,
+                agent_id=task.assigned_to,
+                data={
+                    "ok": result.ok,
+                    "summary": result.summary,
+                    "verifier_kind": result.verifier_kind,
+                    "duration_s": round(result.duration_s, 2),
+                    "required": cfg.required,
+                    "task_title": task.title,
+                },
+            ))
+        except Exception:
+            pass
+
+        return rd
+
     def list_tasks(self, status: str = "", assigned_to: str = "") -> list[ProjectTask]:
         result = self.tasks
         if status:
@@ -1125,11 +1265,14 @@ class Project:
 
     # ── 聊天 ──
 
-    def post_message(self, sender: str, sender_name: str, content: str,
+    def post_message(self, sender: str, sender_name: str, content: str = "",
                      msg_type: str = "chat",
                      task_id: str = "",
                      sender_role: str = "",
-                     blocks: list[dict] | None = None) -> ProjectMessage:
+                     blocks: list[dict] | None = None,
+                     summary: str = "",
+                     key_fields: dict | None = None,
+                     artifact_refs: list | None = None) -> ProjectMessage:
         # 默认推断角色：user→admin, system→system, 其它→agent
         if not sender_role:
             if sender == "user":
@@ -1138,12 +1281,18 @@ class Project:
                 sender_role = "system"
             else:
                 sender_role = "agent"
+        # P0-A: auto-derive summary from long content if not supplied.
+        if not summary and content and len(content) > 800:
+            summary = content.replace("\n", " ")[:800].rstrip() + "…"
         msg = ProjectMessage(
             sender=sender, sender_name=sender_name,
             sender_role=sender_role,
             content=content, msg_type=msg_type,
             task_id=task_id,
             blocks=list(blocks or []),
+            summary=summary or "",
+            key_fields=dict(key_fields or {}),
+            artifact_refs=list(artifact_refs or []),
         )
         with self._lock:
             self.chat_history.append(msg)
@@ -1569,13 +1718,195 @@ class ProjectChatEngine:
                     break
 
         if respondents:
+            # Wrap the sequential runner in an AbortScope so the user
+            # can hit /api/portal/projects/{id}/abort and kill everything
+            # including any bash subprocesses spawned mid-turn.
+            from . import abort_registry as _ar
+
+            def _scoped(respondents_list):
+                with _ar.AbortScope(
+                    _ar.project_key(project.id),
+                    thread=threading.current_thread(),
+                ):
+                    _respond_sequentially(respondents_list)
+
             threading.Thread(
-                target=_respond_sequentially,
+                target=_scoped,
                 args=(list(respondents),),
                 daemon=True,
             ).start()
 
         return respondents
+
+    # ── Block 1 DAG scheduler ──────────────────────────────────────────
+    # Consumes ProjectTask.depends_on to parallel-dispatch tasks whose
+    # dependencies are all satisfied. Coexists with the legacy linear
+    # `_auto_progress_next_step` — tasks without depends_on fall through
+    # to the old behavior.
+
+    def _find_ready_dag_tasks(self, project: Project) -> list[ProjectTask]:
+        """Return tasks whose deps are all DONE and status is TODO.
+
+        - Only considers tasks that have an explicit `depends_on` list.
+          Tasks without deps are handled by the legacy linear advancer.
+        - Excludes IN_PROGRESS / BLOCKED / DONE / CANCELLED — status is
+          the authoritative "not yet started" signal.
+        """
+        done_ids = {t.id for t in project.tasks
+                    if t.status == ProjectTaskStatus.DONE}
+        ready: list[ProjectTask] = []
+        for t in project.tasks:
+            if t.status != ProjectTaskStatus.TODO:
+                continue
+            if not t.depends_on:
+                # No deps declared → legacy linear path owns this task
+                continue
+            if all(dep_id in done_ids for dep_id in t.depends_on):
+                ready.append(t)
+        return ready
+
+    def _dispatch_ready_dag_tasks(self, project: Project) -> list[str]:
+        """Find all ready tasks and launch their agents in parallel.
+
+        Atomic claim: under project._lock, flip each ready task's status
+        to IN_PROGRESS before releasing. Avoids race where two completion
+        events both "find" the same ready task and dispatch it twice.
+
+        Returns the IDs of dispatched tasks. An empty return means no
+        tasks are ready right now.
+
+        Respects:
+        - project.paused (same as linear advancer — no dispatch when paused)
+        - project.status ∈ CANCELLED/COMPLETED (no dispatch)
+        - workflow_binding step_assignments require_approval flag
+          (tasks marked for approval stay TODO until admin approves)
+        """
+        if project.paused:
+            return []
+        if project.status in (ProjectStatus.CANCELLED,
+                                ProjectStatus.COMPLETED,
+                                ProjectStatus.ARCHIVED):
+            return []
+
+        # Atomic claim — prevents double-dispatch under concurrent completions
+        claimed: list[ProjectTask] = []
+        with project._lock:
+            ready = self._find_ready_dag_tasks(project)
+            for task in ready:
+                if not task.assigned_to:
+                    # Can't dispatch without an assignee — skip (admin
+                    # should fix it; we don't want to block the whole DAG)
+                    logger.warning(
+                        "DAG dispatch: task %s ready but has no assignee_agent_id, skipping",
+                        task.id,
+                    )
+                    continue
+                # Flip status inside the lock so parallel completers
+                # don't both grab the same task.
+                task.status = ProjectTaskStatus.IN_PROGRESS
+                task.updated_at = time.time()
+                claimed.append(task)
+
+        # Dispatch each claimed task outside the lock — handle_task_assignment
+        # spawns its own thread so the calls return quickly anyway, but we
+        # release the lock first as a courtesy.
+        dispatched_ids: list[str] = []
+        for task in claimed:
+            try:
+                from . import abort_registry as _ar
+                _ar.mark(_ar.project_task_key(project.id, task.id),
+                          thread=None)
+                # Emit progress frame so the UI sees the parallel fan-out
+                try:
+                    from .progress_bus import emit_step_started
+                    emit_step_started(
+                        plan_id=project.id, step_id=task.id,
+                        agent_id=task.assigned_to,
+                        title=task.title,
+                    )
+                except Exception:
+                    pass
+                self.handle_task_assignment(project, task)
+                dispatched_ids.append(task.id)
+            except Exception as e:
+                logger.warning(
+                    "DAG dispatch: handle_task_assignment failed for "
+                    "task %s (%s): %s",
+                    task.id, task.title, e,
+                )
+                # Revert the status claim so a later retry can dispatch
+                task.status = ProjectTaskStatus.TODO
+
+        if dispatched_ids:
+            logger.info(
+                "DAG dispatch: project '%s' parallel-started %d task(s): %s",
+                project.name, len(dispatched_ids),
+                [t.title[:40] for t in claimed if t.id in dispatched_ids],
+            )
+        return dispatched_ids
+
+    def _detect_dag_deadlock(self, project: Project) -> list[dict]:
+        """Return info about tasks that can NEVER become ready.
+
+        A task is stuck if it depends on:
+          - A task that doesn't exist (dangling reference)
+          - A task that's BLOCKED or CANCELLED (terminal non-DONE state)
+          - A task that itself is stuck (transitive)
+          - A cycle including itself
+
+        Returns a list of {task_id, title, reason, bad_deps}. Called on
+        demand (e.g. by watchdog or API) — we don't want to auto-resolve,
+        since fixing requires human judgment.
+        """
+        tasks_by_id = {t.id: t for t in project.tasks}
+        # Terminal non-DONE states. ProjectTaskStatus only has BLOCKED
+        # (no CANCELLED in this enum — project cancellation lives on
+        # Project.status, not per-task).
+        terminal_bad = {
+            t.id for t in project.tasks
+            if t.status == ProjectTaskStatus.BLOCKED
+        }
+        stuck: list[dict] = []
+        seen: set[str] = set()
+
+        def _has_cycle(start_id: str, visited: set[str]) -> bool:
+            if start_id in visited:
+                return True
+            visited = visited | {start_id}
+            node = tasks_by_id.get(start_id)
+            if node is None:
+                return False
+            for dep in (node.depends_on or []):
+                if _has_cycle(dep, visited):
+                    return True
+            return False
+
+        for t in project.tasks:
+            if t.status != ProjectTaskStatus.TODO:
+                continue
+            if not t.depends_on:
+                continue
+            bad_deps: list[str] = []
+            for dep in t.depends_on:
+                if dep not in tasks_by_id:
+                    bad_deps.append(f"{dep} (missing)")
+                elif dep in terminal_bad:
+                    bad_deps.append(f"{dep} ({tasks_by_id[dep].status.value})")
+            if bad_deps:
+                stuck.append({
+                    "task_id": t.id, "title": t.title,
+                    "reason": "one or more dependencies are in a terminal "
+                              "non-DONE state or missing",
+                    "bad_deps": bad_deps,
+                })
+                continue
+            if _has_cycle(t.id, set()):
+                stuck.append({
+                    "task_id": t.id, "title": t.title,
+                    "reason": "dependency cycle involves this task",
+                    "bad_deps": list(t.depends_on),
+                })
+        return stuck
 
     def handle_task_assignment(self, project: Project, task: ProjectTask):
         """任务分配后，通知被分配的 Agent。"""
@@ -1693,6 +2024,36 @@ class ProjectChatEngine:
                 task.status = ProjectTaskStatus.BLOCKED
                 task.result = f"Error: {e}"
                 task.updated_at = time.time()
+            finally:
+                # Block 1 DAG — when this task settles (DONE, BLOCKED,
+                # AWAITING_REVIEW), re-compute the ready set. Other
+                # tasks may have been waiting on this one.
+                try:
+                    self._dispatch_ready_dag_tasks(project)
+                except Exception as _dag_err:
+                    logger.debug("DAG re-dispatch after task settle failed: %s",
+                                 _dag_err)
+                # Emit settle frame to ProgressBus for UI
+                try:
+                    from .progress_bus import (
+                        emit_step_completed, emit_step_failed,
+                    )
+                    if task.status == ProjectTaskStatus.DONE:
+                        emit_step_completed(
+                            plan_id=project.id, step_id=task.id,
+                            agent_id=task.assigned_to,
+                            duration_s=max(0.0, time.time() - task.updated_at),
+                            summary=(task.result or "")[:500],
+                        )
+                    elif task.status == ProjectTaskStatus.BLOCKED:
+                        emit_step_failed(
+                            plan_id=project.id, step_id=task.id,
+                            agent_id=task.assigned_to,
+                            error=(task.result or "task blocked")[:500],
+                            will_retry=False,
+                        )
+                except Exception:
+                    pass
 
         threading.Thread(target=_run, daemon=True).start()
 

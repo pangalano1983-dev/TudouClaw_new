@@ -35,6 +35,13 @@ class EnvState:
     locale: str = "zh-CN"
     connected_mcps: List[str] = field(default_factory=list)
     extras: Dict[str, Any] = field(default_factory=dict)
+    # Additional public roots — meeting / project shared workspaces the
+    # agent is currently participating in. is_public_path accepts paths
+    # under ANY of these (in addition to deliverable_dir). Populated by
+    # shadow._init_env / _refresh_public_roots each turn so artifact
+    # downloads for files produced in a meeting workspace don't trip
+    # the "path outside deliverable_dir" I5 check.
+    extra_public_roots: List[str] = field(default_factory=list)
 
     # ------------------------------------------------------------------
     def __post_init__(self) -> None:
@@ -45,17 +52,34 @@ class EnvState:
     # path helpers — used to enforce I5
     # ------------------------------------------------------------------
     def is_public_path(self, path: str) -> bool:
-        """True iff `path` is under deliverable_dir.
+        """True iff `path` is under deliverable_dir OR any extra public root.
 
-        Returns False for empty deliverable_dir (fail-closed: we
-        cannot prove a path is public, so assume it is not).
+        Extra public roots are meeting / project shared workspaces that
+        the agent is currently working in — artifacts produced there
+        are user-visible through the regular meeting / project UI, so
+        download flows should let them through.
+
+        Returns False for empty path (fail-closed: we cannot prove a
+        path is public, so assume it is not).
         """
-        if not path or not self.deliverable_dir:
+        if not path:
             return False
         try:
             p = os.path.abspath(path)
-            d = os.path.abspath(self.deliverable_dir)
-            return p == d or p.startswith(d + os.sep)
+            if self.deliverable_dir:
+                d = os.path.abspath(self.deliverable_dir)
+                if p == d or p.startswith(d + os.sep):
+                    return True
+            for root in (self.extra_public_roots or []):
+                if not root:
+                    continue
+                try:
+                    r = os.path.abspath(root)
+                except Exception:
+                    continue
+                if p == r or p.startswith(r + os.sep):
+                    return True
+            return False
         except Exception:
             return False
 
@@ -85,6 +109,7 @@ class EnvState:
             locale=d.get("locale", "zh-CN"),
             connected_mcps=list(d.get("connected_mcps") or []),
             extras=dict(d.get("extras") or {}),
+            extra_public_roots=list(d.get("extra_public_roots") or []),
         )
 
     # ------------------------------------------------------------------
@@ -102,3 +127,4 @@ class EnvState:
         self.locale = other.locale
         self.connected_mcps = other.connected_mcps
         self.extras = other.extras
+        self.extra_public_roots = other.extra_public_roots

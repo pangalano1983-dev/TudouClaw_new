@@ -1,6 +1,13 @@
 ---
 name: dispatching-parallel-agents
 description: Use when facing 2+ independent tasks that can be worked on without shared state or sequential dependencies
+applicable_roles:
+  - "coder"
+  - "engineering-manager"
+scenarios:
+  - "多模块并行实现"
+  - "大型重构任务拆分"
+  - "批量独立任务处理"
 metadata:
   source: obra/superpowers
   license: MIT

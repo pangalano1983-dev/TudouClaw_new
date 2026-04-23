@@ -33,6 +33,8 @@ KNOWN_TIERS: list[str] = [
     "reasoning_strong",
     "coding_strong",
     "writing_strong",
+    "translation",
+    "creative",
     "fast_cheap",
     "multimodal",
     "vision",
@@ -52,17 +54,36 @@ def resolve_tier(tier: str) -> Tuple[str, str]:
 
     Never raises.
     """
+    prov, mdl, _ = resolve_tier_with_params(tier)
+    return (prov, mdl)
+
+
+def resolve_tier_with_params(tier: str) -> Tuple[str, str, float]:
+    """Like ``resolve_tier`` but also returns the tier's temperature.
+
+    Temperature is -1.0 when the tier has no configured value AND no
+    recommended default — signals "use provider default". V2 call sites
+    that make LLM requests should prefer this over ``resolve_tier`` so
+    the sampling temperature matches the task type (code-gen low, creative
+    high, etc.).
+    """
     key = (tier or "").strip()
     if not key:
-        return ("", "")
+        return ("", "", -1.0)
 
     # 1. Main router (LLMTierRouter from app.llm_tier_routing).
     try:
         from app import llm_tier_routing as _router_mod
         router = _router_mod.get_router()
-        provider, model = router.resolve(key)
+        provider, model, temp = router.resolve_with_params(key)
         if provider and model:
-            return (provider, model)
+            return (provider, model, temp)
+        # Even if provider didn't resolve, preserve the temperature
+        # signal so callers using V1 default can still pick up the
+        # task-type sampling recommendation.
+        if temp >= 0:
+            # Return ("","") for provider/model (fall-through) but keep temp.
+            pass
     except Exception as e:  # noqa: BLE001
         logger.debug("LLMTierRouter resolve failed for %r: %s", key, e)
 
@@ -74,7 +95,14 @@ def resolve_tier(tier: str) -> Tuple[str, str]:
             picked = picker(key)
             if picked is not None:
                 entry, model = picked
-                return (entry.id, model)
+                # Legacy picker has no temperature; fall back to the
+                # recommended default for this tier.
+                try:
+                    from app.llm_tier_routing import default_temperature_for
+                    fallback_temp = default_temperature_for(key)
+                except Exception:
+                    fallback_temp = -1.0
+                return (entry.id, model, fallback_temp)
     except Exception:
         pass
 
@@ -85,9 +113,14 @@ def resolve_tier(tier: str) -> Tuple[str, str]:
     ).strip()
     if env_val and ":" in env_val:
         p, _, m = env_val.partition(":")
-        return (p.strip(), m.strip())
+        try:
+            from app.llm_tier_routing import default_temperature_for
+            fallback_temp = default_temperature_for(key)
+        except Exception:
+            fallback_temp = -1.0
+        return (p.strip(), m.strip(), fallback_temp)
 
-    return ("", "")
+    return ("", "", -1.0)
 
 
 def known_tiers() -> list[str]:
@@ -114,4 +147,4 @@ def known_tiers() -> list[str]:
     return sorted(out)
 
 
-__all__ = ["resolve_tier", "known_tiers", "KNOWN_TIERS"]
+__all__ = ["resolve_tier", "resolve_tier_with_params", "known_tiers", "KNOWN_TIERS"]

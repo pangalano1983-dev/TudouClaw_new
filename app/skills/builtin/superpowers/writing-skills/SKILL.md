@@ -1,6 +1,13 @@
 ---
 name: writing-skills
 description: Use when creating new skills, editing existing skills, or verifying skills work before deployment
+applicable_roles:
+  - "skill-author"
+  - "coder"
+scenarios:
+  - "新 skill 创建"
+  - "现有 skill 优化"
+  - "skill 质量验证"
 metadata:
   source: obra/superpowers
   license: MIT

@@ -140,6 +140,16 @@ class ArtifactStore:
             raise ValueError("artifact.value must be non-empty")
         self._items[artifact.id] = artifact
         self._order.append(artifact.id)
+
+        # Block 2 Day 6a — broadcast new artifacts to the ProgressBus so
+        # UI timeline shows "📄 report.pptx produced (42KB)" in real time.
+        # Best-effort: any failure in the bus layer must NOT corrupt
+        # artifact storage (put is called on hot paths).
+        try:
+            _emit_artifact_produced(artifact)
+        except Exception:
+            pass
+
         return artifact.id
 
     def create(
@@ -282,3 +292,55 @@ def _stable_id(kind: ArtifactKind, value: str) -> str:
         h = hashlib.sha1(value.encode("utf-8", errors="replace")).hexdigest()
         return f"art_{h[:12]}"
     return _new_id("art")
+
+
+def _emit_artifact_produced(artifact: "Artifact") -> None:
+    """Broadcast a new artifact to the ProgressBus.
+
+    Called once on every ArtifactStore.put. Publishes to three channels
+    so different consumers get exactly what they need:
+      - `agent:<id>` — that agent's timeline
+      - `global` — admin firehose (automatic via bus)
+
+    We intentionally DROP artifact.value from the frame data — values
+    can be huge (whole markdown reports). The UI only needs id + kind
+    + label + size + mime + downloadable URL to render a tile.
+    """
+    from ..progress_bus import get_bus, ProgressFrame
+    pb = artifact.produced_by
+    agent_id = ""
+    if pb is not None:
+        agent_id = getattr(pb, "agent_id", "") or ""
+    # Try to parse an absolute file path for size / link rendering
+    is_file = artifact.kind in _FILE_LIKE_KINDS
+    label = artifact.label or ""
+    # For file artifacts, prefer the label (usually filename) but fall
+    # back to a basename of the value (which is the path) if label empty.
+    if is_file and not label and artifact.value:
+        import os as _os
+        label = _os.path.basename(artifact.value) or artifact.value[-60:]
+
+    channel = f"agent:{agent_id}" if agent_id else "global"
+    get_bus().publish(ProgressFrame(
+        kind="artifact_produced",
+        channel=channel,
+        agent_id=agent_id,
+        data={
+            "artifact_id": artifact.id,
+            "kind": artifact.kind.value if hasattr(artifact.kind, "value") else str(artifact.kind),
+            "label": label[:200],
+            "size": artifact.size or 0,
+            "mime": artifact.mime or "",
+            "produced_at": artifact.produced_at,
+            "produced_by": {
+                "agent_id": getattr(pb, "agent_id", "") or "" if pb else "",
+                "task_id": getattr(pb, "task_id", "") or "" if pb else "",
+                "tool_id": getattr(pb, "tool_id", "") or "" if pb else "",
+            },
+            # For file-like artifacts the portal has a download route
+            "download_url": (
+                f"/api/agent_state/artifact/{agent_id}/{artifact.id}"
+                if is_file and agent_id else ""
+            ),
+        },
+    ))

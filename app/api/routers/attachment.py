@@ -186,7 +186,10 @@ async def get_artifact(
     # 5. resolve file path
     val = artifact.value or ""
 
-    # Relative path resolution (same logic as html_tag_router)
+    # Relative path resolution. Search order walks from most-specific
+    # (agent's sandbox) to most-general (meeting / project shared
+    # workspaces), because artifacts produced in a meeting are more
+    # often there than in the agent's private dir.
     if val and not val.startswith(("/", "http://", "https://")):
         _search_dirs = []
         try:
@@ -209,6 +212,12 @@ async def get_artifact(
             _search_dirs.append(str(agent._get_agent_workspace()))
         except Exception:
             pass
+        # Shared workspace (meeting / project) — required for files
+        # produced during a meeting, which land outside the agent's
+        # own workspace.
+        _sws = getattr(agent, "shared_workspace", "") or ""
+        if _sws:
+            _search_dirs.append(_sws)
         for _base in _search_dirs:
             if not _base:
                 continue
@@ -226,11 +235,22 @@ async def get_artifact(
     if artifact.is_expired():
         raise HTTPException(410, "artifact expired")
 
-    # I5 security check
+    # Refresh extra_public_roots right before the I5 check so a file
+    # produced in the currently-attached meeting/project workspace is
+    # considered public even if the shadow state hasn't been refreshed
+    # since the agent last changed contexts. Without this the download
+    # hits "path outside deliverable_dir" 403 for every meeting artifact
+    # (exact symptom users hit on cloud_delivery_insights.pptx links).
     env = shadow.state.env
+    _sws = getattr(agent, "shared_workspace", "") or ""
+    if _sws and _sws not in env.extra_public_roots:
+        env.extra_public_roots = list(env.extra_public_roots or []) + [_sws]
+
+    # I5 security check
     if env.deliverable_dir and not env.is_public_path(val):
-        logger.warning("I5 violation: artifact=%s path=%s deliverable=%s",
-                        artifact.id, val, env.deliverable_dir)
+        logger.warning("I5 violation: artifact=%s path=%s deliverable=%s extras=%s",
+                        artifact.id, val, env.deliverable_dir,
+                        env.extra_public_roots)
         raise HTTPException(403, "path outside deliverable_dir")
 
     # File existence

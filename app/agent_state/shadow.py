@@ -189,6 +189,11 @@ class ShadowRecorder:
         # produce artifact download cards in the chat UI.
         "list_files", "read_file", "search_files",
         "list_directory", "get_file_info", "file_search",
+        # RAG retrieval: result JSON contains source_file / heading_path
+        # strings that point at KNOWLEDGE BASE documents, not artifacts
+        # the agent produced. Without this, every RAG hit becomes a
+        # spurious download card on the assistant bubble.
+        "knowledge_lookup",
     })
 
     def record_tool_result(self, tool_name: str, result_str: str) -> None:
@@ -203,6 +208,37 @@ class ShadowRecorder:
                     # references, not agent-produced files.
                     if tool_name in self._REFERENCE_TOOLS:
                         candidates = []
+                    # Spill-path filter: _maybe_spill_tool_result rewrites
+                    # large bash / read_file results as
+                    #   [spilled: /workspace/tool_outputs/xxx.md, N chars]
+                    # The extractor faithfully pulls that path out, which
+                    # then surfaces as a download card for the spill file
+                    # itself — infrastructure masquerading as output.
+                    # Drop any candidate pointing inside tool_outputs/.
+                    if candidates:
+                        candidates = [
+                            c for c in candidates
+                            if "/tool_outputs/" not in str(c.get("value", ""))
+                            and not str(c.get("value", "")).endswith("tool_outputs")
+                        ]
+                    # URL filter — URLs found inside ANY tool result are
+                    # references (web pages the LLM mentioned), never
+                    # deliverable files. Keeping them would render as
+                    # download cards in the chat ("regions-list", random
+                    # blog URLs, etc.) polluting the agent's visible
+                    # output. Only file-kind artifacts are real deliverables.
+                    if candidates:
+                        _NON_DELIVERABLE_KINDS = {
+                            ArtifactKind.URL,
+                            ArtifactKind.RECORD,
+                            ArtifactKind.TEXT_BLOB,
+                            ArtifactKind.EXTERNAL_ID,
+                            ArtifactKind.OTHER,
+                        }
+                        candidates = [
+                            c for c in candidates
+                            if c.get("kind") not in _NON_DELIVERABLE_KINDS
+                        ]
                     if not candidates:
                         # still record a tool turn so we can audit
                         self.state.conversation.append(
@@ -325,7 +361,8 @@ class ShadowRecorder:
     # ------------------------------------------------------------------
     def _artifact_to_ref(self, aid: str) -> Optional[dict]:
         """Render a single artifact id into a frontend-ready FileCard
-        dict, or return None if the artifact is missing/empty.
+        dict, or return None if the artifact is missing / empty /
+        no-longer-on-disk.
 
         Pure function on `self.state.artifacts` — does not take the lock,
         so callers MUST hold `self._lock` for the duration of any
@@ -336,7 +373,21 @@ class ShadowRecorder:
             return None
         md = art.metadata or {}
         v = art.value or ""
-        if v.startswith(("http://", "https://")):
+        is_http = v.startswith(("http://", "https://"))
+        # ── Existence check ──
+        # Artifacts can become "ghosts" when the underlying file gets
+        # deleted (spill-cleanup, user `rm`, workspace wipe, etc.) but
+        # the in-memory artifact entry survives. Showing a FileCard
+        # that 404s on click is worse than hiding it. Skip any local
+        # artifact whose value points at a path that no longer exists.
+        if v and not is_http:
+            try:
+                import os as _os
+                if not _os.path.exists(v):
+                    return None
+            except Exception:
+                pass
+        if is_http:
             url = v
         else:
             try:
@@ -462,6 +513,8 @@ class ShadowRecorder:
                     "list_files", "read_file", "search_files",
                     "list_directory", "get_file_info", "file_search",
                     "web_search", "web_fetch", "web_browse",
+                    # RAG retrieval: citations ≠ produced files.
+                    "knowledge_lookup",
                 })
 
                 for ev in events:
@@ -482,6 +535,20 @@ class ShadowRecorder:
                                 result = str(result)
                         try:
                             cands = extract_from_tool_result(result)
+                            if cands:
+                                # Drop non-deliverable kinds (URL /
+                                # RECORD / TEXT_BLOB / EXTERNAL_ID / OTHER)
+                                # — only files the agent actually produced
+                                # should surface as download cards.
+                                _NON_DELIV = {
+                                    ArtifactKind.URL,
+                                    ArtifactKind.RECORD,
+                                    ArtifactKind.TEXT_BLOB,
+                                    ArtifactKind.EXTERNAL_ID,
+                                    ArtifactKind.OTHER,
+                                }
+                                cands = [c for c in cands
+                                         if c.get("kind") not in _NON_DELIV]
                             if cands:
                                 normalize_path_candidates(cands, base_dir)
                                 pb = ProducedBy(
@@ -613,8 +680,24 @@ class ShadowRecorder:
                         break
                 if last_assistant is None or not last_assistant.artifact_refs:
                     return []
+                # Only emit DELIVERABLE file-kind refs. URL / RECORD /
+                # TEXT_BLOB / EXTERNAL_ID are references the agent
+                # touched, not files it produced, and rendering them as
+                # download cards pollutes the chat bubble. Legacy
+                # artifacts from before this filter also get suppressed.
+                file_kinds = {
+                    ArtifactKind.FILE,
+                    ArtifactKind.IMAGE,
+                    ArtifactKind.VIDEO,
+                    ArtifactKind.AUDIO,
+                    ArtifactKind.DOCUMENT,
+                    ArtifactKind.ARCHIVE,
+                }
                 out: List[dict] = []
                 for aid in last_assistant.artifact_refs:
+                    art = self.state.artifacts.get(aid)
+                    if art is None or art.kind not in file_kinds:
+                        continue
                     ref = self._artifact_to_ref(aid)
                     if ref is not None:
                         out.append(ref)

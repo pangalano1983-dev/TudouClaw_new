@@ -1,6 +1,12 @@
 ---
 name: receiving-code-review
 description: Use when receiving code review feedback, before implementing suggestions, especially if feedback seems unclear or technically questionable - requires technical rigor and verification, not performative agreement or blind implementation
+applicable_roles:
+  - "coder"
+scenarios:
+  - "接收 review 意见"
+  - "review 反馈技术辩论"
+  - "反驳或采纳决策"
 metadata:
   source: obra/superpowers
   license: MIT

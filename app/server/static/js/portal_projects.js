@@ -9,8 +9,8 @@ async function renderProjects() {
   var _projHeader = ''
     + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">'
     + '  <div><h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:22px;font-weight:800;margin:0">Projects</h2>'
-    + '    <p style="font-size:12px;color:var(--text3);margin-top:4px">组织多 agent 协作项目与任务</p></div>'
-    + '  <button class="btn btn-primary btn-sm" onclick="showCreateProjectModal()"><span class="material-symbols-outlined" style="font-size:14px">add</span> New Project</button>'
+    + '    <p style="font-size:12px;color:var(--text3);margin-top:4px">' + t('project.subtitle', '组织多 agent 协作项目与任务') + '</p></div>'
+    + '  <button class="btn btn-primary btn-sm" onclick="showCreateProjectModal()"><span class="material-symbols-outlined" style="font-size:14px">add</span> ' + t('project.new', 'New Project') + '</button>'
     + '</div>';
   try {
     var data = await api('GET', '/api/portal/projects');
@@ -18,7 +18,7 @@ async function renderProjects() {
     var pcEl = document.getElementById('project-count');
     if (pcEl) pcEl.textContent = projects.length;
     if (!projects.length) {
-      c.innerHTML = _projHeader + '<div style="text-align:center;padding:60px 20px;color:var(--text3)"><span class="material-symbols-outlined" style="font-size:48px;display:block;margin-bottom:12px">folder_special</span><div style="font-size:18px;font-weight:700;margin-bottom:8px">No Projects Yet</div><div style="font-size:13px;margin-bottom:16px">Create a project to organize agents into collaborative teams</div><button class="btn btn-primary" onclick="showCreateProjectModal()"><span class="material-symbols-outlined" style="font-size:16px">add</span> Create Project</button></div>';
+      c.innerHTML = _projHeader + '<div style="text-align:center;padding:60px 20px;color:var(--text3)"><span class="material-symbols-outlined" style="font-size:48px;display:block;margin-bottom:12px">folder_special</span><div style="font-size:18px;font-weight:700;margin-bottom:8px">' + t('project.none', 'No Projects Yet') + '</div><div style="font-size:13px;margin-bottom:16px">' + t('project.noneHint', 'Create a project to organize agents into collaborative teams') + '</div><button class="btn btn-primary" onclick="showCreateProjectModal()"><span class="material-symbols-outlined" style="font-size:16px">add</span> ' + t('project.create', 'Create Project') + '</button></div>';
       return;
     }
     // Sort by created_at descending (newest first)

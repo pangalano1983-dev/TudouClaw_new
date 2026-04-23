@@ -68,17 +68,51 @@ def decode_token(token: str) -> dict:
 # ---------------------------------------------------------------------------
 
 class CurrentUser:
-    """Represents an authenticated user."""
-    __slots__ = ("user_id", "role", "claims")
+    """Represents an authenticated user.
 
-    def __init__(self, user_id: str, role: str = "admin", claims: dict | None = None):
+    Extended with the user's delegation lists so permission checks in
+    ``app.permissions`` don't need to re-hit the admin manager on every
+    API call. Populated by ``get_current_user`` at request time.
+    """
+    __slots__ = ("user_id", "role", "claims",
+                 "delegated_agent_ids", "delegated_node_ids",
+                 "_perm_cache")
+
+    def __init__(self, user_id: str, role: str = "admin",
+                 claims: dict | None = None,
+                 delegated_agent_ids: list | None = None,
+                 delegated_node_ids: list | None = None):
         self.user_id = user_id
         self.role = role
         self.claims = claims or {}
+        self.delegated_agent_ids = list(delegated_agent_ids or [])
+        self.delegated_node_ids = list(delegated_node_ids or [])
+        # Scratch cache for app.permissions._lookup_admin_lists fallback.
+        self._perm_cache = None
 
     @property
     def is_super_admin(self) -> bool:
         return self.role == "superAdmin"
+
+
+def _fetch_delegation(user_id: str) -> tuple[list[str], list[str]]:
+    """Resolve (delegated_agent_ids, delegated_node_ids) from the
+    admin manager. Returns ([], []) if user has no admin record, isn't
+    persisted yet, or the admin manager can't be loaded. Callers must
+    never depend on non-empty lists — absence means "no delegation"
+    which is correct for regular users and brand-new admins."""
+    if not user_id:
+        return [], []
+    try:
+        from ...auth import get_auth
+        admin = get_auth().admin_mgr.get_admin(user_id)
+        if admin is None:
+            return [], []
+        return (list(admin.agent_ids or []),
+                list(admin.node_ids or []))
+    except Exception as e:
+        logger.debug("delegation lookup failed for %s: %s", user_id[:12], e)
+        return [], []
 
 
 async def get_current_user(
@@ -95,10 +129,18 @@ async def get_current_user(
     if credentials and credentials.credentials:
         try:
             payload = decode_token(credentials.credentials)
+            uid = payload.get("sub", "")
+            role = payload.get("role", "admin")
+            # Look up the admin record to populate delegation lists.
+            # Non-admin users (role="user") won't be in admin_mgr — that's
+            # fine, empty delegation lists are correct for them.
+            deleg_agents, deleg_nodes = _fetch_delegation(uid)
             return CurrentUser(
-                user_id=payload.get("sub", ""),
-                role=payload.get("role", "admin"),
+                user_id=uid,
+                role=role,
                 claims=payload,
+                delegated_agent_ids=deleg_agents,
+                delegated_node_ids=deleg_nodes,
             )
         except jwt.ExpiredSignatureError:
             raise HTTPException(
@@ -134,10 +176,14 @@ async def get_current_user(
                     except Exception:
                         pass
                 # Bridge: create a CurrentUser from the WebSession
+                bridged_uid = admin_uid or getattr(session, "name", "legacy")
+                deleg_agents, deleg_nodes = _fetch_delegation(bridged_uid)
                 return CurrentUser(
-                    user_id=admin_uid or getattr(session, "name", "legacy"),
+                    user_id=bridged_uid,
                     role=effective_role,
                     claims={"session": True, "session_id": session_id},
+                    delegated_agent_ids=deleg_agents,
+                    delegated_node_ids=deleg_nodes,
                 )
         except Exception as e:
             logger.debug("Legacy session validation failed: %s", e)

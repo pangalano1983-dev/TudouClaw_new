@@ -1,6 +1,14 @@
 ---
 name: action-first
 description: Use for every agent that has tools available. Enforces "act, don't announce" — the single biggest source of wasted turns is an LLM saying "Let me fix it:" and then stopping without calling a tool. This skill gives the agent explicit, unambiguous rules for when to narrate vs when to execute.
+applicable_roles:
+  - "coder"
+  - "general-agent"
+  - "researcher"
+scenarios:
+  - "工具型 agent 通用行为约束"
+  - "降低空响应率"
+  - "多轮对话执行纪律"
 metadata:
   source: tudou-builtin
   license: Apache-2.0

@@ -736,49 +736,6 @@ class TaskScheduler:
 
         logger.info(f"Job {job.id} executed: status={record.status}")
 
-    def _check_active_thinking(self):
-        """Check all agents for active thinking triggers.
-
-        Called every 30 seconds from the scheduler loop. For each agent
-        with active thinking enabled, checks if it's time to think and
-        spawns a thinking thread if so.
-        """
-        if not self._hub:
-            return
-        try:
-            for agent in self._hub.agents.values():
-                if not agent.active_thinking:
-                    continue
-                should, trigger = agent.active_thinking.should_think()
-                if should:
-                    logger.info(
-                        "Active thinking triggered for %s (trigger=%s)",
-                        agent.name, trigger)
-                    # Run thinking in a separate thread (non-blocking)
-                    threading.Thread(
-                        target=self._run_agent_thinking,
-                        args=(agent, trigger),
-                        daemon=True,
-                        name=f"think-{agent.id}"
-                    ).start()
-        except Exception as e:
-            logger.debug("Active thinking check error: %s", e)
-
-    def _run_agent_thinking(self, agent: Any, trigger: str):
-        """Execute active thinking for one agent (runs in thread)."""
-        try:
-            result = agent.active_thinking.think_now(
-                trigger=trigger,
-                context=f"Scheduler-triggered ({trigger})"
-            )
-            logger.info(
-                "Active thinking done: agent=%s quality=%d actions=%d",
-                agent.name, result.quality_score,
-                len(result.proposed_actions))
-        except Exception as e:
-            logger.error("Active thinking error for %s: %s",
-                         agent.name, e, exc_info=True)
-
     def _expand_prompt(self, template: str) -> str:
         """Expand template variables: {date}, {time}, {weekday}."""
         now = datetime.now()

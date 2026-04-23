@@ -261,11 +261,19 @@ def tool_lint_check(ctx: MiddlewareContext) -> MiddlewareResult:
     errors = _validate_json_schema(arguments, params_schema, prefix="")
 
     if errors:
+        # Pull an example from the tool's description (schema's GOTCHA /
+        # Example block) so the LLM sees a correct call alongside the
+        # diagnostic, not just "validation failed". Claude Code error
+        # handling does the same — error + correct example is ~10x more
+        # recoverable than error alone.
+        example_hint = _extract_schema_example(schema)
         error_text = (
             f"Tool '{tool_name}' 参数校验失败:\n"
             + "\n".join(f"  - {e}" for e in errors[:5])
             + "\n请修正参数后重试。"
         )
+        if example_hint:
+            error_text += f"\n\n✅ 正确调用示例:\n{example_hint}"
         return MiddlewareResult(
             action=Action.SHORT_CIRCUIT,
             value=error_text,
@@ -273,6 +281,39 @@ def tool_lint_check(ctx: MiddlewareContext) -> MiddlewareResult:
         )
 
     return MiddlewareResult()
+
+
+def _extract_schema_example(schema: dict) -> str:
+    """Return a one-shot example snippet for this tool, if available.
+
+    Looks in the following order:
+      1. ``schema["example"]``                  — explicit field (preferred)
+      2. ``schema["examples"][0]``              — array form
+      3. A parse of ``schema["description"]``   — matches "Example:" line
+    Returns "" if none found. Never raises.
+    """
+    if not isinstance(schema, dict):
+        return ""
+    ex = schema.get("example")
+    if isinstance(ex, str) and ex.strip():
+        return ex.strip()
+    exs = schema.get("examples")
+    if isinstance(exs, list) and exs:
+        first = exs[0]
+        if isinstance(first, str) and first.strip():
+            return first.strip()
+    # Fall back: scan description for "Example:" or similar marker.
+    desc = schema.get("description") or ""
+    if isinstance(desc, str):
+        # Accept several common prefixes, first-match wins
+        import re as _re
+        m = _re.search(r"(?:^|\n)(?:Example|示例|正确示例)\s*[:：]\s*(.+?)(?=\n\n|\Z)",
+                       desc, flags=_re.DOTALL)
+        if m:
+            snippet = m.group(1).strip()
+            # Cap at ~600 chars — don't flood the LLM with an entire reference
+            return snippet[:600]
+    return ""
 
 
 def _find_tool_schema(tool_name: str) -> dict | None:

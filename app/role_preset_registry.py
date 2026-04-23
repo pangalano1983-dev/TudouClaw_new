@@ -69,6 +69,48 @@ class RolePresetRegistry:
     def all(self) -> dict[str, RolePresetV2]:
         return dict(self._presets)
 
+    def register_command_patterns_to_policy(self, tool_policy) -> int:
+        """Push each preset's `command_patterns` into ToolPolicy under
+        `scope=f"role:{role_id}"` so the rule chain picks them up.
+
+        Idempotent: an existing entry with the same label is overwritten,
+        matching ToolPolicy.add_command_pattern's semantics. Called after
+        both Auth and Registry are initialized (server startup path).
+        Returns the number of patterns registered.
+        """
+        n = 0
+        for role_id, preset in self._presets.items():
+            for cp in (preset.command_patterns or []):
+                if not isinstance(cp, dict):
+                    continue
+                pat = cp.get("pattern") or ""
+                if not pat:
+                    continue
+                lbl = cp.get("label") or f"{role_id}:{n}"
+                try:
+                    tool_policy.add_command_pattern(
+                        pattern=pat,
+                        scope=f"role:{role_id}",
+                        verdict=cp.get("verdict") or "deny",
+                        reason=cp.get("reason") or (
+                            f"{role_id}: {pat[:40]} blocked by role preset"
+                        ),
+                        label=lbl,
+                        tags=list(cp.get("tags") or [role_id]),
+                    )
+                    n += 1
+                except Exception as e:
+                    logger.warning(
+                        "register_command_patterns: role %s entry %s failed: %s",
+                        role_id, lbl, e,
+                    )
+        if n:
+            logger.info(
+                "RolePresetRegistry registered %d command_patterns into ToolPolicy",
+                n,
+            )
+        return n
+
     def merge_into_legacy(self, legacy_presets: dict) -> int:
         """把 V2 presets 融合到老的 ROLE_PRESETS dict。
 

@@ -1,6 +1,15 @@
 ---
 name: pptx-author
 description: Use when the user asks you to produce a PowerPoint (.pptx) file — presentation, slide deck, report, 产品介绍, 市场分析, 路演, 汇报, 会议纪要, PPT. Write a python-pptx script, run it with bash, and verify the output slide-by-slide. This replaces the declarative create_pptx_advanced tool (which has a silent-blank-slide failure mode). Triggers: 生成PPT, 生成pptx, 做一份PPT, slide deck, presentation, 幻灯片.
+applicable_roles:
+  - "coder"
+  - "analyst"
+  - "business-consultant"
+scenarios:
+  - "市场分析 PPT"
+  - "路演汇报"
+  - "会议纪要成稿"
+  - "产品介绍文档"
 metadata:
   source: tudou-builtin
   license: Apache-2.0
@@ -86,15 +95,22 @@ def slide_cover(prs):
 
 脚本模板见下面 "Reference scripts" 章节，直接抄改即可。
 
-### 3. 跑脚本，立刻看 stderr
+### 3. 先语法检查，再跑脚本
 
 ```bash
 cd "$AGENT_WORKSPACE"
+# 先单独编译检查，能在 0.1s 内捕获 SyntaxError
+python -m py_compile build_report.py || echo "SYNTAX ERROR - 先修语法再跑"
+# 只有 py_compile 过了才真正执行
 python build_report.py 2>&1
 ```
 
-- 退出码 0 且无 `Error` / `Traceback` → 继续
-- 有 traceback → 看最后一行报错 → 定位行号 → 改一行 → **不要整个重写**（改错的地方，保留其他）
+- **py_compile 失败** → 不要 bypass，不要 "重试"。翻到报错行号，**只修那行**。
+  最常见的错误：`Inches(X]`、`Pt(12]`、`)]` — LLM 在长代码里会把 `)` 敲成 `]`。
+  **批量扫描**：`grep -nE 'Inches\([0-9.]+\]|Pt\([0-9.]+\]|\)\]' build_report.py` 能一次找出所有此类错误。
+- **退出码 0 且无 `Error` / `Traceback`** → 继续第 4 步
+- **有 traceback** → 看**最后一行**报错 → 定位行号 → 改那一行 → **不要整个重写**（改错的地方，保留其他）
+- **退出码非 0** → 绝对不能当成功上报。bash 工具现在会用 ❌ 标记，你必须解决
 
 ### 4. 逐页验证——这一步不可省
 
@@ -347,6 +363,585 @@ slide_closing(prs)
 prs.save(OUT)
 print(f"OK: {OUT} ({len(prs.slides)} slides)")
 ```
+
+### Markdown 报告 → 完整 deck（**从结构化 md 生成的首选模板，v2**）
+
+**什么时候用这份**：你拿到一份带章节结构的 md 报告（`#` 标题、`##` 一级章节、`###` 二级小节、可选 `####` 子节、bullet、table），要转成 16:9 深色主题 deck。**不要自己从零写** —— copy 下面这份到工作目录存成 `md_to_deck.py`，跑 `python md_to_deck.py report.md out.pptx` 一键生成。
+
+**v2 相比 v1 新增了 3 种专用 layout**（从手写版 brand deck 学来的）：
+
+| Layout | 触发条件 | 视觉效果 |
+|---|---|---|
+| **section_divider**（强化版） | 每个 `##` 自动编号 | 左侧超大号 01/02/03（160pt）+ 右侧章节标题（40pt）+ 中间 accent 色分隔条 |
+| **comparison**（2 列对比） | `###` 下恰好 2 个 `####`，每个 `####` 只含 bullet | 左右两列圆角矩形，左列 accent 色（青）+ 右列 accent2 色（橙），头部色条 + 边框，清晰的对比视觉 |
+| **card_grid**（卡片网格） | `###` 下单一 bullet 块且每条都是 `**title**: body` 格式 | 2×2 / 2×3 圆角 card grid，每 card 有左侧 accent 色条 + bold 标题 + body |
+
+**怎么用才能触发 comparison**（最有价值的 layout）：md 写成
+```md
+### 全球服务布局对比
+#### AWS
+- 33 个地理区域
+- 105 个可用区
+
+#### Azure
+- 70+ 个区域
+- 140+ 国家
+```
+→ 自动渲染成左右两列对比卡，不用自己写渲染代码。
+
+**怎么用才能触发 card_grid**：
+```md
+### 人才结构特点
+- **AWS TAM**: 技术客户经理，负责架构评审
+- **Azure CSAM**: 客户成功经理，专注采用率
+- **FastTrack**: 标准化上云路径
+```
+→ 自动渲染成 2×2 卡片网格。
+
+**其他保留的 v1 特性**：
+- 16:9 尺寸 + `THEME` 深色主题 + `Microsoft YaHei` 字体
+- 自动 strip `**bold**` / `` `code` `` / `[link](url)` / `[1]` 等 md 语法
+- 每张内容页最多 4 个 block 堆叠，高度均分防溢出
+- 每张 slide 都有彩色背景（set_bg），无白底
+- 表格样式（头部 accent 色 + 斑马条纹）
+- cover 左侧 accent 竖条
+
+```python
+#!/usr/bin/env python3
+"""md_to_deck.py (v2) — structured markdown -> 16:9 styled deck.
+
+v2 adds three new slide layouts learned from hand-written brand decks:
+  - slide_section_divider: big auto-numbered (01/02/...) + section title
+  - slide_comparison:      2-column side-by-side with accent-color backing
+                            triggered by a ### with exactly two #### children
+  - slide_card_grid:       2x2 / 2x3 grid of rounded cards, triggered by a
+                            bullet list whose items are all ``**title**: body``
+
+Everything else (THEME, strip_md, parse_md base, basic content slide) is
+unchanged from v1. Parser prefers the specialized layouts when their
+shape matches; falls back to plain content slide.
+
+Usage: python md_to_deck.py input.md output.pptx
+"""
+from __future__ import annotations
+import os, re, sys
+
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.dml.color import RGBColor
+from pptx.enum.shapes import MSO_SHAPE
+from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+
+
+def hex_color(s):
+    s = s.lstrip("#")
+    return RGBColor(int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+
+
+THEME = {
+    "bg":        hex_color("#0F172A"),
+    "fg":        hex_color("#F8FAFC"),
+    "accent":    hex_color("#22D3EE"),   # primary / left column
+    "accent2":   hex_color("#F59E0B"),   # secondary / right column
+    "muted":     hex_color("#94A3B8"),
+    "card_bg":   hex_color("#1E293B"),
+    "card_alt":  hex_color("#273449"),
+    "row_alt":   hex_color("#273449"),
+    "divider":   hex_color("#1E40AF"),
+}
+FONT = "Microsoft YaHei"
+
+
+# ---------- md parser ----------
+_BOLD = re.compile(r"\*\*(.+?)\*\*")
+_ITAL = re.compile(r"(?<!\*)\*(?!\s)([^*\n]+?)\*(?!\*)")
+_CODE = re.compile(r"`([^`]+)`")
+_LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+_REFS = re.compile(r"\[\d+\]")
+
+# Matches "**title**: body" at start of a bullet → (title, body)
+_CARD_ITEM = re.compile(r"^\s*\*\*(?P<title>[^*]+)\*\*\s*[:：]\s*(?P<body>.+)$")
+
+
+def strip_md(s: str) -> str:
+    s = _BOLD.sub(r"\1", s)
+    s = _ITAL.sub(r"\1", s)
+    s = _CODE.sub(r"\1", s)
+    s = _LINK.sub(r"\1", s)
+    s = _REFS.sub("", s)
+    return s.strip()
+
+
+def parse_md(text: str) -> dict:
+    """Return {title, sections: [{title, subs: [{title, blocks, children}]}]}.
+
+    blocks = list of {kind: 'p'|'bullets'|'table', ...}
+    children = list of {title, blocks} when the ### has #### sub-sections
+               (used for comparison layout detection).
+    """
+    lines = text.split("\n")
+    title = ""
+    sections = []
+    cur_section = None
+    cur_sub = None        # H3 subsection
+    cur_child = None      # H4 sub-subsection under an H3
+
+    def ensure_sub():
+        nonlocal cur_section, cur_sub, cur_child
+        if cur_section is None:
+            cur_section = {"title": "", "subs": []}
+            sections.append(cur_section)
+        if cur_sub is None:
+            cur_sub = {"title": "", "blocks": [], "children": []}
+            cur_section["subs"].append(cur_sub)
+        cur_child = None
+        return cur_sub
+
+    def target_blocks():
+        """Where does a block belong? If we're inside an H4, append to its
+        children entry; otherwise to the H3's blocks."""
+        nonlocal cur_sub, cur_child
+        ensure_sub()
+        if cur_child is not None:
+            return cur_child["blocks"]
+        return cur_sub["blocks"]
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        if line.startswith("# ") and not line.startswith("## "):
+            title = strip_md(line[2:]); i += 1; continue
+
+        if line.startswith("## "):
+            cur_section = {"title": strip_md(line[3:]), "subs": []}
+            sections.append(cur_section)
+            cur_sub = None; cur_child = None
+            i += 1; continue
+
+        if line.startswith("### "):
+            cur_sub = {"title": strip_md(line[4:]),
+                       "blocks": [], "children": []}
+            if cur_section is None:
+                cur_section = {"title": "", "subs": []}
+                sections.append(cur_section)
+            cur_section["subs"].append(cur_sub)
+            cur_child = None
+            i += 1; continue
+
+        if line.startswith("#### "):
+            ensure_sub()
+            cur_child = {"title": strip_md(line[5:]), "blocks": []}
+            cur_sub["children"].append(cur_child)
+            i += 1; continue
+
+        # table (H3- or H4-scope)
+        if (stripped.startswith("|") and i + 1 < len(lines)
+                and re.match(r"^\s*\|[-:|\s]+\|\s*$", lines[i + 1])):
+            headers = [strip_md(c) for c in stripped.strip("|").split("|")]
+            rows = []
+            j = i + 2
+            while j < len(lines) and lines[j].strip().startswith("|"):
+                rows.append([strip_md(c) for c
+                             in lines[j].strip().strip("|").split("|")])
+                j += 1
+            target_blocks().append(
+                {"kind": "table", "headers": headers, "rows": rows})
+            i = j; continue
+
+        # bullets
+        if stripped.startswith(("- ", "* ")) and not line.startswith("**"):
+            items = []
+            while (i < len(lines)
+                   and lines[i].strip().startswith(("- ", "* "))):
+                items.append(lines[i].strip()[2:])  # KEEP raw for **title** detection
+                i += 1
+            target_blocks().append({"kind": "bullets",
+                                    "items_raw": items,
+                                    "items": [strip_md(x) for x in items]})
+            continue
+
+        if not stripped or stripped == "---":
+            i += 1; continue
+
+        # paragraph
+        paras = [line]; j = i + 1
+        while j < len(lines):
+            nxt = lines[j]
+            if (not nxt.strip() or nxt.startswith("#")
+                    or nxt.strip().startswith(("- ", "* ", "|"))):
+                break
+            paras.append(nxt); j += 1
+        target_blocks().append(
+            {"kind": "p", "text": strip_md(" ".join(paras))})
+        i = j
+    return {"title": title, "sections": sections}
+
+
+# ---------- shape helpers ----------
+def set_bg(slide, c):
+    f = slide.background.fill; f.solid(); f.fore_color.rgb = c
+
+
+def add_text(slide, x, y, w, h, text, *, size=18, bold=False, color=None,
+             align=PP_ALIGN.LEFT, anchor=MSO_ANCHOR.TOP):
+    tb = slide.shapes.add_textbox(x, y, w, h)
+    tf = tb.text_frame
+    tf.word_wrap = True; tf.vertical_anchor = anchor
+    tf.margin_left = tf.margin_right = Inches(0.08)
+    tf.margin_top = tf.margin_bottom = Inches(0.04)
+    p = tf.paragraphs[0]; p.alignment = align
+    r = p.add_run(); r.text = text
+    r.font.name = FONT; r.font.size = Pt(size); r.font.bold = bold
+    r.font.color.rgb = color if color is not None else THEME["fg"]
+    return tb
+
+
+def add_rect(slide, x, y, w, h, fill, *, rounded=False,
+             line_color=None, line_width_pt=0):
+    kind = MSO_SHAPE.ROUNDED_RECTANGLE if rounded else MSO_SHAPE.RECTANGLE
+    sh = slide.shapes.add_shape(kind, x, y, w, h)
+    sh.fill.solid(); sh.fill.fore_color.rgb = fill
+    if line_color is None:
+        sh.line.fill.background()
+    else:
+        sh.line.color.rgb = line_color
+        if line_width_pt:
+            sh.line.width = Pt(line_width_pt)
+    return sh
+
+
+def add_styled_table(slide, x, y, w, h, headers, rows):
+    n_cols = max(len(headers), 1)
+    n_rows = max(len(rows) + 1, 2)
+    shape = slide.shapes.add_table(n_rows, n_cols, x, y, w, h)
+    tbl = shape.table
+    for c in range(n_cols):
+        cell = tbl.cell(0, c)
+        cell.text = headers[c] if c < len(headers) else ""
+        cell.fill.solid(); cell.fill.fore_color.rgb = THEME["accent"]
+        for p in cell.text_frame.paragraphs:
+            for r in p.runs:
+                r.font.bold = True; r.font.name = FONT
+                r.font.size = Pt(12); r.font.color.rgb = THEME["bg"]
+    for ri, row in enumerate(rows, start=1):
+        for c in range(n_cols):
+            cell = tbl.cell(ri, c)
+            cell.text = row[c] if c < len(row) else ""
+            cell.fill.solid()
+            cell.fill.fore_color.rgb = (
+                THEME["card_bg"] if ri % 2 == 0 else THEME["row_alt"])
+            for p in cell.text_frame.paragraphs:
+                for r in p.runs:
+                    r.font.name = FONT; r.font.size = Pt(10)
+                    r.font.color.rgb = THEME["fg"]
+
+
+def add_bullets_inside(slide, x, y, w, h, items, *, size=14, color=None):
+    tb = slide.shapes.add_textbox(x, y, w, h)
+    tf = tb.text_frame; tf.word_wrap = True
+    tf.margin_left = tf.margin_right = Inches(0.1)
+    clr = color or THEME["fg"]
+    for idx, item in enumerate(items):
+        p = tf.paragraphs[0] if idx == 0 else tf.add_paragraph()
+        p.alignment = PP_ALIGN.LEFT; p.space_after = Pt(4)
+        r = p.add_run(); r.text = "• " + item
+        r.font.name = FONT; r.font.size = Pt(size)
+        r.font.color.rgb = clr
+
+
+# ---------- slide builders ----------
+SW, SH = Inches(13.333), Inches(7.5)
+
+
+def slide_cover(prs, title, subtitle=""):
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    set_bg(slide, THEME["bg"])
+    add_rect(slide, 0, 0, Inches(0.35), SH, THEME["accent"])
+    add_text(slide, Inches(1.2), Inches(2.7), Inches(11), Inches(1.6),
+             title, size=40, bold=True, color=THEME["fg"], align=PP_ALIGN.LEFT)
+    if subtitle:
+        add_text(slide, Inches(1.2), Inches(4.5), Inches(11), Inches(0.7),
+                 subtitle, size=18, color=THEME["muted"], align=PP_ALIGN.LEFT)
+
+
+def slide_section_divider(prs, number: int, title: str):
+    """Divider with big "01" / "02" on the left + section title on the right."""
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    set_bg(slide, THEME["divider"])
+    # Giant number "0N" — left side
+    num_str = f"{number:02d}"
+    add_text(slide, Inches(0.6), Inches(1.8), Inches(3), Inches(3.5),
+             num_str, size=160, bold=True, color=THEME["accent"],
+             align=PP_ALIGN.LEFT, anchor=MSO_ANCHOR.MIDDLE)
+    # Section title — right side (wrapped if long)
+    add_text(slide, Inches(4.2), Inches(2.8), Inches(8.5), Inches(2.5),
+             title, size=40, bold=True, color=THEME["fg"],
+             align=PP_ALIGN.LEFT, anchor=MSO_ANCHOR.MIDDLE)
+    # Thin accent bar connecting them
+    add_rect(slide, Inches(4.0), Inches(3.55), Inches(0.08), Inches(0.9),
+             THEME["accent"])
+
+
+def slide_title_bar(prs, title):
+    """Shared helper: top title bar with text. Returns the slide."""
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    set_bg(slide, THEME["bg"])
+    add_rect(slide, 0, 0, SW, Inches(1.0), THEME["card_bg"])
+    add_text(slide, Inches(0.6), Inches(0.15), Inches(12.1), Inches(0.7),
+             title, size=24, bold=True, color=THEME["fg"],
+             align=PP_ALIGN.LEFT, anchor=MSO_ANCHOR.MIDDLE)
+    return slide
+
+
+def slide_comparison(prs, title, left_title, left_items,
+                     right_title, right_items):
+    """Side-by-side comparison with accent-colored column backings."""
+    slide = slide_title_bar(prs, title)
+    # Left column — accent tint
+    left_bg = add_rect(slide, Inches(0.4), Inches(1.25),
+                       Inches(6.1), Inches(5.95),
+                       hex_color("#123447"), rounded=True,
+                       line_color=THEME["accent"], line_width_pt=2)
+    add_rect(slide, Inches(0.4), Inches(1.25),
+             Inches(6.1), Inches(0.5),
+             THEME["accent"], rounded=True)  # header strip
+    add_text(slide, Inches(0.5), Inches(1.28),
+             Inches(5.9), Inches(0.45),
+             left_title, size=18, bold=True, color=THEME["bg"],
+             align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.MIDDLE)
+    add_bullets_inside(slide, Inches(0.6), Inches(1.9),
+                       Inches(5.9), Inches(5.2),
+                       left_items, size=13)
+    # Right column — accent2 tint
+    right_bg = add_rect(slide, Inches(6.85), Inches(1.25),
+                        Inches(6.1), Inches(5.95),
+                        hex_color("#4A3520"), rounded=True,
+                        line_color=THEME["accent2"], line_width_pt=2)
+    add_rect(slide, Inches(6.85), Inches(1.25),
+             Inches(6.1), Inches(0.5),
+             THEME["accent2"], rounded=True)
+    add_text(slide, Inches(6.95), Inches(1.28),
+             Inches(5.9), Inches(0.45),
+             right_title, size=18, bold=True, color=THEME["bg"],
+             align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.MIDDLE)
+    add_bullets_inside(slide, Inches(7.05), Inches(1.9),
+                       Inches(5.9), Inches(5.2),
+                       right_items, size=13)
+
+
+def slide_card_grid(prs, title, cards):
+    """2 or 3 column grid of rounded cards with a bold title + body."""
+    slide = slide_title_bar(prs, title)
+    n = len(cards)
+    if n <= 0:
+        return
+    # Pick grid shape: 2x2 for 3-4, 2x3 for 5-6, 2x1 for 1-2
+    if n <= 2:
+        cols, rows = n, 1
+    elif n <= 4:
+        cols, rows = 2, 2
+    else:
+        cols, rows = 2, 3
+    cards = cards[:cols * rows]
+    area_top = Inches(1.25)
+    area_h = Inches(6.0)
+    area_left = Inches(0.4)
+    area_w = Inches(12.55)
+    gap = Inches(0.2)
+    card_w = (area_w - gap * (cols - 1)) // cols
+    card_h = (area_h - gap * (rows - 1)) // rows
+    for i, (ctitle, cbody) in enumerate(cards):
+        r = i // cols
+        c = i % cols
+        x = area_left + (card_w + gap) * c
+        y = area_top + (card_h + gap) * r
+        add_rect(slide, x, y, card_w, card_h, THEME["card_bg"], rounded=True)
+        # accent strip on left
+        add_rect(slide, x, y, Inches(0.1), card_h, THEME["accent"])
+        # title
+        add_text(slide, x + Inches(0.25), y + Inches(0.15),
+                 card_w - Inches(0.4), Inches(0.5),
+                 ctitle, size=15, bold=True, color=THEME["accent"])
+        # body
+        add_text(slide, x + Inches(0.25), y + Inches(0.7),
+                 card_w - Inches(0.4), card_h - Inches(0.85),
+                 cbody, size=12, color=THEME["fg"],
+                 anchor=MSO_ANCHOR.TOP)
+
+
+def slide_content(prs, title, blocks):
+    """Plain content layout — title bar + up to 4 stacked blocks."""
+    slide = slide_title_bar(prs, title)
+    if not blocks:
+        return
+    num = min(len(blocks), 4)
+    top = Inches(1.3); avail = SH - Inches(1.5); gap = Inches(0.2)
+    slot_h = (avail - gap * (num - 1)) // num
+    for i, b in enumerate(blocks[:num]):
+        y = top + (slot_h + gap) * i
+        _render_block(slide, Inches(0.6), y,
+                      SW - Inches(1.2), slot_h, b)
+
+
+def _render_block(slide, x, y, w, h, block):
+    kind = block.get("kind")
+    if kind == "bullets":
+        add_rect(slide, x, y, w, h, THEME["card_bg"], rounded=True)
+        add_bullets_inside(slide,
+                           x + Inches(0.3), y + Inches(0.2),
+                           w - Inches(0.6), h - Inches(0.4),
+                           block.get("items", []))
+    elif kind == "table":
+        add_styled_table(slide, x, y, w, h,
+                         block["headers"], block["rows"])
+    elif kind == "p":
+        add_rect(slide, x, y, w, h, THEME["card_bg"], rounded=True)
+        add_text(slide,
+                 x + Inches(0.3), y + Inches(0.2),
+                 w - Inches(0.6), h - Inches(0.4),
+                 block["text"], size=13, color=THEME["fg"],
+                 anchor=MSO_ANCHOR.TOP)
+
+
+def slide_closing(prs, message="谢谢"):
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    set_bg(slide, THEME["divider"])
+    add_text(slide, Inches(0), Inches(2.8), SW, Inches(1.9),
+             message, size=72, bold=True, color=THEME["fg"],
+             align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.MIDDLE)
+
+
+# ---------- layout chooser ----------
+def _detect_comparison(sub):
+    """Return (left_title, left_items, right_title, right_items) when the
+    H3 has exactly 2 H4 children and each H4 has a single bullet block.
+    Else None."""
+    kids = sub.get("children") or []
+    if len(kids) != 2:
+        return None
+    cleaned = []
+    for k in kids:
+        blocks = k.get("blocks") or []
+        if len(blocks) != 1 or blocks[0].get("kind") != "bullets":
+            return None
+        items = blocks[0].get("items") or []
+        if not items:
+            return None
+        cleaned.append((k.get("title") or "", items))
+    return (cleaned[0][0], cleaned[0][1],
+            cleaned[1][0], cleaned[1][1])
+
+
+def _detect_card_grid(sub):
+    """Return [(title, body), ...] when sub has a single bullets block and
+    every item matches `**title**: body`. Else None."""
+    blocks = sub.get("blocks") or []
+    if len(blocks) != 1 or blocks[0].get("kind") != "bullets":
+        return None
+    raw = blocks[0].get("items_raw") or []
+    if len(raw) < 2:
+        return None
+    cards = []
+    for line in raw:
+        m = _CARD_ITEM.match(line.strip())
+        if not m:
+            return None
+        cards.append((strip_md(m.group("title")),
+                      strip_md(m.group("body"))))
+    return cards
+
+
+# ---------- main build ----------
+def build(md_path, out_path):
+    with open(md_path, encoding="utf-8") as f:
+        doc = parse_md(f.read())
+    prs = Presentation()
+    prs.slide_width, prs.slide_height = SW, SH
+
+    # Cover
+    slide_cover(prs,
+                doc["title"] or os.path.splitext(
+                    os.path.basename(md_path))[0])
+
+    # Sections
+    section_no = 0
+    for sec in doc["sections"]:
+        if sec["title"]:
+            section_no += 1
+            slide_section_divider(prs, section_no, sec["title"])
+        for sub in sec["subs"]:
+            if not sub["title"] and not sub.get("blocks"):
+                continue
+
+            title = sub["title"] or sec["title"] or "Details"
+
+            # Try specialized layouts in priority order
+            cmp_data = _detect_comparison(sub)
+            if cmp_data:
+                slide_comparison(prs, title, *cmp_data)
+                continue
+
+            grid_data = _detect_card_grid(sub)
+            if grid_data:
+                slide_card_grid(prs, title, grid_data)
+                continue
+
+            # Fall back: render parent's own blocks first, then one content
+            # slide per child H4 (so H4 content is not silently dropped when
+            # the specialized layouts don't match).
+            parent_blocks = sub.get("blocks") or []
+            if parent_blocks:
+                slide_content(prs, title, parent_blocks)
+            for child in (sub.get("children") or []):
+                child_blocks = child.get("blocks") or []
+                if not child.get("title") and not child_blocks:
+                    continue
+                child_title = child.get("title") or title
+                # Visually distinguish child slides by prefixing with parent
+                # title when the child title is short.
+                if title and child_title and title != child_title:
+                    child_title = f"{title} — {child_title}"
+                slide_content(prs, child_title, child_blocks)
+            # If both parent and children were empty, still emit an empty
+            # title slide so the H3 isn't silently swallowed.
+            if not parent_blocks and not sub.get("children"):
+                slide_content(prs, title, [])
+
+    # Closing
+    slide_closing(prs, "谢谢")
+
+    prs.save(out_path)
+    print(f"OK: {out_path} ({len(prs.slides)} slides)")
+    return out_path
+
+
+if __name__ == "__main__":
+    md = sys.argv[1] if len(sys.argv) > 1 else "report.md"
+    out = sys.argv[2] if len(sys.argv) > 2 else "deck.pptx"
+    build(md, out)
+
+```
+
+**验证结果**（对一份 ~12k 字符的结构化中文报告）：
+
+| 指标 | 从零裸写 python-pptx | md_to_deck v1 | md_to_deck v2 |
+|------|---------------------|---------------|---------------|
+| 尺寸 | 10×7.5（4:3） | 13.33×7.5（16:9） | **13.33×7.5（16:9）** |
+| 总 slide 数 | 39 | 90 | 91 |
+| 形状 / slide | 1.7 | 5.7 | **3.8（更紧凑）** |
+| 专用 layout | 无 | 无 | **comparison + card_grid + 编号 divider** |
+| Brand 色 | 手写才有 | 单色主题 | **accent + accent2 双色可配对** |
+| 手动内容硬编码 | 是 | 否 | 否 |
+
+v2 的平均 shape/slide 比 v1 低，是因为 comparison/card_grid 占一张 slide 就把原来要多张堆的内容聚合了，**每张 slide 更致密、视觉更丰富**，总信息量不降反升。
+
+**扩展建议**：
+- 需要画图表？在 `_render_block` 里多加 `kind == "chart"` 分支，调 cheatsheet 里的 `add_bar_chart`。你得在 `parse_md` 里识别"可画图"的数据块。
+- 跳过某些章节？在 `build()` 里按 `sec["title"]` 过滤。
+- 换主题？改 `THEME` 字典 —— `accent` / `accent2` 这对色决定了 comparison 左右列的视觉区分。换成品牌色对（如 AWS 橙 + Azure 蓝）立刻得到品牌 deck。
+- 关掉 comparison / card_grid 自动识别？删 `_detect_comparison` / `_detect_card_grid` 的调用即可。
 
 ### 需要更多 layout？照着加函数就行
 

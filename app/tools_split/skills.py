@@ -20,11 +20,16 @@ from ._common import _get_hub
 # ── get_skill_guide ──────────────────────────────────────────────────
 
 def _tool_get_skill_guide(**arguments) -> str:
-    """Load the full SKILL.md guide + ancillary file list for a granted skill.
+    """Load a granted skill's SKILL.md + ancillary file list.
 
-    Returns the complete instructions (with frontmatter stripped) so the
-    agent can follow the step-by-step guide and run scripts from
-    skill_dir.
+    Two modes (controls the token cost of the returned blob):
+      * ``brief=True`` (default)  — returns the skill's top-line summary:
+        name / skill_dir / runtime / one-line description / section headings
+        + ancillary file names. Costs ~150-400 tokens; enough for the LLM
+        to decide whether it needs to drill in.
+      * ``brief=False``           — returns the full SKILL.md body (legacy
+        behavior). Costs 2k–5k tokens. Use when the agent is actually
+        about to execute the skill.
 
     NOTE: accepts ``**kwargs`` because the registry dispatches via
     ``entry.handler(**arguments)``. Previously this was typed as
@@ -34,6 +39,16 @@ def _tool_get_skill_guide(**arguments) -> str:
     name = (arguments.get("name") or "").strip()
     if not name:
         return "Error: name is required"
+    # Default to brief; flip to full via brief=false or verbose=true.
+    _brief_raw = arguments.get("brief", True)
+    if isinstance(_brief_raw, str):
+        brief = _brief_raw.strip().lower() not in (
+            "false", "0", "no", "full", "verbose")
+    else:
+        brief = bool(_brief_raw)
+    # Explicit verbose=true overrides brief default.
+    if arguments.get("verbose") in (True, "true", "1", "yes"):
+        brief = False
 
     try:
         reg = None
@@ -130,6 +145,11 @@ def _tool_get_skill_guide(**arguments) -> str:
             "```",
             "",
         ]
+        # Description from manifest (always shown — it's small).
+        _desc = (getattr(found.manifest, "description", "") or "").strip()
+        if _desc:
+            result_parts.append(f"**描述**: {_desc}")
+            result_parts.append("")
         if files:
             result_parts.append("**附属文件**: " + ", ".join(files))
             result_parts.append("")
@@ -137,9 +157,50 @@ def _tool_get_skill_guide(**arguments) -> str:
             result_parts.append("**参考文档** (需要时用 read_file 读取): "
                                 + ", ".join(f"`{effective_dir}/{m}`" for m in ref_mds))
             result_parts.append("")
-        result_parts.append("---")
-        result_parts.append("")
-        result_parts.append(body)
+
+        if brief:
+            # Brief mode: just list the headings so the LLM knows what
+            # sections the full guide has; it can re-call with verbose=true
+            # if it actually needs a specific section.
+            headings = []
+            for line in (body or "").splitlines():
+                s = line.rstrip()
+                if s.startswith("#") and not s.startswith("#!/"):
+                    headings.append(s)
+                    if len(headings) >= 30:
+                        break
+            if headings:
+                result_parts.append("---")
+                result_parts.append("")
+                result_parts.append("**章节目录** (全文请调用 get_skill_guide(name, brief=false)):")
+                for h in headings:
+                    result_parts.append(f"  {h}")
+                result_parts.append("")
+                result_parts.append(
+                    f"_brief mode: full guide is {len(body)} chars; "
+                    "pass brief=false to load._"
+                )
+            else:
+                # No headings → fallback to a 400-char head preview.
+                preview = (body or "").strip()
+                head = preview[:400]
+                if len(preview) > 400:
+                    head += "…"
+                result_parts.append("---")
+                result_parts.append("")
+                result_parts.append("**预览** (完整文档较短或无章节结构):")
+                result_parts.append(head)
+                if len(preview) > 400:
+                    result_parts.append("")
+                    result_parts.append(
+                        f"_brief mode: full body {len(preview)} chars; "
+                        "pass brief=false to load._"
+                    )
+        else:
+            # Verbose mode: full body, legacy behavior.
+            result_parts.append("---")
+            result_parts.append("")
+            result_parts.append(body)
         return "\n".join(result_parts)
 
     except Exception as e:

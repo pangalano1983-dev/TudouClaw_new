@@ -209,6 +209,55 @@ async def channel_webhook(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/channels/{channel_id}/enable")
+async def enable_channel(
+    channel_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Enable a channel — resumes polling and allows availability tests."""
+    try:
+        from ...channel import get_router as get_ch_router
+        ch_router = get_ch_router()
+        ch = ch_router.update_channel(channel_id, enabled=True)
+        if not ch:
+            raise HTTPException(404, "Channel not found")
+        return {"ok": True, "channel": ch.to_dict(mask_secrets=True)}
+    except HTTPException:
+        raise
+    except ImportError:
+        raise HTTPException(501, "Channel module not available")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/channels/{channel_id}/disable")
+async def disable_channel(
+    channel_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Disable a channel — stops polling and makes /test short-circuit.
+
+    Disabled channels are NOT monitored for availability. The platform
+    connection (bot token, webhook secret, etc.) is preserved; re-enabling
+    restores polling without re-config.
+    """
+    try:
+        from ...channel import get_router as get_ch_router
+        ch_router = get_ch_router()
+        ch = ch_router.update_channel(channel_id, enabled=False)
+        if not ch:
+            raise HTTPException(404, "Channel not found")
+        return {"ok": True, "channel": ch.to_dict(mask_secrets=True)}
+    except HTTPException:
+        raise
+    except ImportError:
+        raise HTTPException(501, "Channel module not available")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/channels/{channel_id}/test")
 async def test_channel(
     channel_id: str,
@@ -228,6 +277,19 @@ async def test_channel(
         ch = ch_router.get_channel(channel_id)
         if not adapter or not ch:
             raise HTTPException(404, "Channel not found")
+
+        # Disabled channels are NOT availability-probed — user-requested
+        # behavior. Return a explicit "skipped" status instead of
+        # running the platform API call.
+        if not ch.enabled:
+            return {
+                "ok": True,
+                "success": False,
+                "skipped": True,
+                "reason": "channel_disabled",
+                "message": "Channel is disabled — enable it first to run availability test.",
+                "mode": ch.mode,
+            }
 
         # Platform-specific connection test (e.g. Telegram getMe)
         result = adapter.test_connection()

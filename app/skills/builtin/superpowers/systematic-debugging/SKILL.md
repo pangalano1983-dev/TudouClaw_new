@@ -1,6 +1,14 @@
 ---
 name: systematic-debugging
 description: Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes
+applicable_roles:
+  - "coder"
+  - "debug-specialist"
+scenarios:
+  - "生产 bug 排查"
+  - "测试失败定位"
+  - "性能劣化分析"
+  - "不可复现问题"
 metadata:
   source: obra/superpowers
   license: MIT

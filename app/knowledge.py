@@ -26,7 +26,31 @@ from typing import Optional
 
 logger = logging.getLogger("tudou.knowledge")
 
-_DATA_DIR = Path.home() / ".tudou_claw"
+# Data dir is resolved lazily so pytest fixtures can set
+# TUDOU_CLAW_DATA_DIR (or TUDOU_CLAW_HOME) BEFORE the first read/write
+# and have it take effect. The old hard-coded Path.home() ignored env
+# and caused every test run to pollute the user's real shared_knowledge.json
+# with fixture titles like "Python style guide", "X", "Updated", "A/B/C".
+def _resolve_data_dir() -> Path:
+    env = (os.environ.get("TUDOU_CLAW_DATA_DIR", "").strip()
+           or os.environ.get("TUDOU_CLAW_HOME", "").strip())
+    if env:
+        return Path(env).expanduser().resolve()
+    return Path.home() / ".tudou_claw"
+
+
+def _data_dir() -> Path:
+    return _resolve_data_dir()
+
+
+def _knowledge_file() -> Path:
+    return _data_dir() / "shared_knowledge.json"
+
+
+# Legacy module-level aliases — keep for any imports reading them directly.
+# IMPORTANT: these are snapshots at import time. New code paths should call
+# _data_dir() / _knowledge_file() to honor env overrides set later.
+_DATA_DIR = _resolve_data_dir()
 _KNOWLEDGE_FILE = _DATA_DIR / "shared_knowledge.json"
 
 # In-memory cache
@@ -34,7 +58,9 @@ _entries: list[dict] | None = None
 
 
 def _ensure_dir():
-    _DATA_DIR.mkdir(parents=True, exist_ok=True)
+    # Resolve at call time so pytest env overrides take effect even if
+    # the module was imported before the fixture ran.
+    _data_dir().mkdir(parents=True, exist_ok=True)
 
 
 def _load() -> list[dict]:
@@ -42,9 +68,10 @@ def _load() -> list[dict]:
     if _entries is not None:
         return _entries
     _ensure_dir()
-    if _KNOWLEDGE_FILE.exists():
+    path = _knowledge_file()
+    if path.exists():
         try:
-            with open(_KNOWLEDGE_FILE, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 _entries = json.load(f)
         except (json.JSONDecodeError, OSError) as e:
             logger.error("Failed to load knowledge base: %s", e)
@@ -57,7 +84,7 @@ def _load() -> list[dict]:
 def _save():
     _ensure_dir()
     try:
-        with open(_KNOWLEDGE_FILE, "w", encoding="utf-8") as f:
+        with open(_knowledge_file(), "w", encoding="utf-8") as f:
             json.dump(_entries or [], f, ensure_ascii=False, indent=2)
     except OSError as e:
         logger.error("Failed to save knowledge base: %s", e)

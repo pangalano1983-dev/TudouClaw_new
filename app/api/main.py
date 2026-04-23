@@ -181,6 +181,18 @@ async def lifespan(app: FastAPI):
         _rp_reg = _init_rp_registry()
         _merged = _rp_reg.merge_into_legacy(_RP)
         logger.info("RolePresetV2 loaded: %d V2 presets merged into ROLE_PRESETS", _merged)
+        # ── Push role-level command_patterns into ToolPolicy ──
+        # Each preset's `command_patterns` becomes a scope="role:<id>"
+        # entry so the rule chain applies them to agents of that role.
+        # Runs after both auth and registry are initialized.
+        try:
+            from ..auth import get_auth as _get_auth
+            _tp = _get_auth().tool_policy
+            _cp_n = _rp_reg.register_command_patterns_to_policy(_tp)
+            logger.info("Role command_patterns registered: %d entries", _cp_n)
+        except Exception as _cp_err:
+            logger.warning("Role command_patterns registration failed: %s",
+                           _cp_err)
     except Exception as _rp_err:
         logger.warning("RolePresetV2 registry init failed: %s", _rp_err)
 
@@ -351,6 +363,10 @@ def create_app() -> FastAPI:
         pages,
         llm_tiers,
         role_presets_v2,
+        progress,
+        inbox as inbox_router,
+        checkpoints as checkpoints_router,
+        memory_refs as memory_refs_router,
         v2 as v2_router,
     )
 
@@ -379,6 +395,10 @@ def create_app() -> FastAPI:
     app.include_router(i18n.router)
     app.include_router(attachment.router)
     app.include_router(audio.router)
+    app.include_router(progress.router)
+    app.include_router(inbox_router.router)
+    app.include_router(checkpoints_router.router)
+    app.include_router(memory_refs_router.router)
     app.include_router(v2_router.router)
 
     # ── Static files (JS/CSS used by portal templates) ───────────────

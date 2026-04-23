@@ -583,8 +583,7 @@ class AgentLLMMixin:
                            ("Skills.md", "skills"),
                            ("MCP.md", "mcp_servers"),
                            ("Tasks.md", "tasks"),
-                           ("Scheduled.md", "scheduled_tasks"),
-                           ("ActiveThinking.md", "active_thinking")):
+                           ("Scheduled.md", "scheduled_tasks")):
             fp = ws / fname
             if not fp.exists():
                 continue
@@ -617,13 +616,57 @@ class AgentLLMMixin:
             "  除非用户明确说\"从明天开始\"或\"不用现在执行\"，否则必须先执行再建定时。\n"
             "- 一次性任务写进 workspace/Tasks.md 的 ## Open。完成后移到 ## Done。\n"
             "- 不要回答\"我做不到定时任务\"——调度器会在 next_run_at 自动触发。\n"
-            "- 需要发邮件/发消息/调外部服务时，先 mcp_call(list_mcps=true) 查看绑定的 MCP，"
-            "再 mcp_call(mcp_id, tool, arguments) 调用。\n"
+            "- 外部服务（邮件/即时通讯/第三方 API）**只能**通过 mcp_call 调用：\n"
+            "    · 查询绑定的 MCP：mcp_call(list_mcps=true)\n"
+            "    · 执行：mcp_call(mcp_id=..., tool=..., arguments={...})\n"
+            "    · **禁止** 用 bash echo JSON-RPC、禁止假设存在 Unix socket / 本地 daemon。\n"
+            "    · **禁止** 用 get_skill_guide 查 MCP —— get_skill_guide 只查本地 skill，"
+            "MCP 不在其范围内。查 MCP 用 mcp_call(list_mcps=true)。\n"
+            "- **外部交付前硬性确认**：以下操作**禁止**先斩后奏，执行前必须输出一行"
+            "「准备 <操作> <对象摘要>，请确认」然后**停下**等用户回复 OK / 确认 / yes：\n"
+            "    · 发邮件 / 发 IM 到外部收件人（包括 mcp_call tool=send_email/send_message 等）\n"
+            "    · 删除任何文件\n"
+            "    · git push / 提交 PR / 发布到任何外部系统\n"
+            "    · 修改 agent workspace 之外的任何文件\n"
+            "  不接受「我已经 <操作> 了」这种事后告知。只要用户原始消息没含"
+            "「直接做 / 别确认 / 已授权」之类明确授权词，就必须先确认。\n"
+            "- **卡壳自省**：同一 tool 或同一操作连续失败 3 次后，**停下** —— 不要再试第 4 次，"
+            "而是向用户说明：(1) 你试图做什么 (2) 最近的错误 (3) 你需要什么支持。不要无限 retry / cp 绕路。\n"
+            "- **多步任务开始前先列计划**：用户请求明显需要 3+ 步时，**第一步**必须调 "
+            "plan_update(action='create_plan', task_summary='...', steps=[{title, acceptance, llm_purpose}, ...])。"
+            "每步必须带 `acceptance` —— 具体的交付物/状态，不是 '完成xxx' 这种空话。"
+            "**好示例**：acceptance='report.pptx 生成且 ≥5 页，用 python-pptx 打开 OK'；"
+            "**坏示例**：acceptance='完成报告'。每完成一步调 "
+            "plan_update(action='complete_step', step_id=..., result_summary='<具体验证 acceptance 是否满足>')。"
+            "这个 checklist 会在前端 TODOs 面板实时显示给用户，也是你自己的进度记忆。\n"
+            "  · 若已启用 auto_route（系统下方会注入 LLM 评分表），每个 step 还要带 "
+            "`llm_purpose`（tool-heavy / multimodal / reasoning / analysis / default 五选一），"
+            "系统会据此把该步派给最合适的 LLM。\n"
+            "- **禁止重复叙述计划**：每一轮 iteration 必须做下面之一，**不许再次列出同一段计划文字**：\n"
+            "    (a) 调一个具体 tool（web_search / read_file / bash / mcp_call / plan_update 等）；\n"
+            "    (b) 基于上一轮 tool_result 输出具体结论或下一步意图（例'搜到 X，接下来查 Y'）；\n"
+            "    (c) 调 plan_update 真正登记/推进步骤。\n"
+            "  Markdown checkbox 的 '计划' 文字不是 tool_call；只写文字而不调 tool 不算执行，会被"
+            "系统判为重复输出并打断。\n"
             "\n⚠️ 配置冲突覆盖规则 / CONFIG OVERRIDE RULE:\n"
             "以下工作区文件反映的是**当前最新的实时配置**，每次对话都会重新生成。"
             "如果对话历史中有旧的信息（例如之前说过\"没有 MCP\"或\"工具不可用\"），"
             "但工作区文件显示已经有了，**以工作区文件为准**，忽略历史中的过时描述。"
             "直接使用最新配置执行任务，不要再说\"不可用\"。\n")
+        # Inject per-category LLM scores hint when auto_route is on (Phase 1-B).
+        try:
+            ar = self.auto_route or {}
+            if ar.get("enabled") and self.extra_llms:
+                from . import llm_router as _router
+                _scores_hint = _router.build_scores_hint_for_agent(
+                    primary_provider=self.provider or "",
+                    primary_model=self.model or "",
+                    extra_llms=self.extra_llms,
+                )
+                if _scores_hint:
+                    header = header + "\n" + _scores_hint
+        except Exception as _sh_err:
+            logger.debug("scores hint injection skipped: %s", _sh_err)
         return header + "\n" + "\n".join(blocks)
 
     # ------------------------------------------------------------------
@@ -806,6 +849,16 @@ class AgentLLMMixin:
             if p.custom_instructions:
                 parts.append("")
                 parts.append(p.custom_instructions)
+            # Auto-inject Retrieval Protocol for RAG-bound advisors.
+            # Kept in code (agent.py helper) so hub auto-save can't erase it.
+            try:
+                from .agent import _build_retrieval_protocol
+            except Exception:
+                _build_retrieval_protocol = lambda _p: ""  # noqa: E731
+            _rp = _build_retrieval_protocol(p)
+            if _rp:
+                parts.append("")
+                parts.append(_rp)
             if p.language and p.language != "auto":
                 lang_map = {"zh-CN": "中文", "en": "English",
                             "ja": "日本語", "ko": "한국어", "es": "Español",
@@ -1110,6 +1163,27 @@ class AgentLLMMixin:
             return True
 
         # Priority order: most important context first
+
+        # 0.0 Plan state injection (P0/L1) — the single most important
+        # piece of dynamic context. Without this the LLM has no idea
+        # which step it's on; it sees plan_update tool_results from
+        # prior turns but has to reconstruct "where am I" from those
+        # scattered traces, which is why agents were skipping steps
+        # and faking completions. With this injected every turn, the
+        # model gets an authoritative snapshot: current step, its
+        # acceptance criterion, what's done, what's pending.
+        #
+        # Kept first in the dynamic context so even aggressive budget
+        # truncation can't drop it.
+        try:
+            plan_ctx = self.format_plan_state_for_llm()
+            if plan_ctx:
+                _try_add(plan_ctx)
+        except Exception as _pe:
+            try:
+                logger.debug("plan state injection skipped: %s", _pe)
+            except Exception:
+                pass
 
         # 0. Intent-aware context hint (from IntentResolver)
         _intent = getattr(self, "_last_resolved_intent", None)
@@ -2402,9 +2476,30 @@ Write only the summary body. Do not include any preamble or prefix."""
     # ---- tool execution with policy check ----
 
     def _get_effective_tools(self) -> list[dict]:
-        """Filter tool definitions based on agent's profile permissions."""
+        """Filter tool definitions based on agent's profile permissions.
+
+        Hard override: when the chat request set ``agent._rag_only_mode``
+        True (frontend toggle "🔍 RAG" ON), force the tool set to just
+        ``knowledge_lookup``. This is the architectural hard-route — LLM
+        literally cannot call bash/read_file/web_search because they
+        aren't in the tools array. No prompt-engineering required.
+        """
         from . import tools
         all_tools = tools.get_tool_definitions()
+
+        # RAG-only hard route (chat-header switch)
+        if getattr(self, "_rag_only_mode", False):
+            denied_now = set(self.profile.denied_tools or [])
+            if "knowledge_lookup" not in denied_now:
+                kb = [t for t in all_tools
+                      if t.get("function", {}).get("name") == "knowledge_lookup"]
+                # If for some reason knowledge_lookup isn't registered, fall
+                # back to normal filtering so the chat doesn't lock up.
+                if kb:
+                    return kb
+            # knowledge_lookup denied by profile → fall through to normal
+            # filter (which will also strip it). Defense in depth.
+
         allowed = self.profile.allowed_tools
         denied = set(self.profile.denied_tools)
 
@@ -2561,40 +2656,12 @@ Write only the summary body. Do not include any preamble or prefix."""
         except Exception as _ar_err:
             logger.debug("auto_route skipped: %s", _ar_err)
 
-        # Multimodal routing: if the incoming message is multimodal and a
-        # dedicated multimodal model is configured, prefer it.
-        try:
-            if user_message is not None and self._message_is_multimodal(user_message):
-                mm_prov = self.multimodal_provider or prov
-                mm_mdl = self.multimodal_model or mdl
-                if self.multimodal_provider or self.multimodal_model:
-                    logger.info(
-                        "Agent %s: multimodal input → routing to %s/%s",
-                        self.id[:8], mm_prov, mm_mdl,
-                    )
-                    prov, mdl = mm_prov, mm_mdl
-                else:
-                    logger.warning(
-                        "Agent %s: multimodal input detected but no "
-                        "multimodal_provider/model configured — using "
-                        "default %s/%s (may not support vision)",
-                        self.id[:8], prov, mdl,
-                    )
-        except Exception as _mm_err:
-            logger.debug("multimodal routing skipped: %s", _mm_err)
-        # Coding routing: when executing tool calls / code generation and
-        # a dedicated coding model is configured, prefer it.
-        try:
-            if (self.coding_provider or self.coding_model) and self._is_coding_context():
-                cd_prov = self.coding_provider or prov
-                cd_mdl = self.coding_model or mdl
-                logger.info(
-                    "Agent %s: coding context → routing to %s/%s",
-                    self.id[:8], cd_prov, cd_mdl,
-                )
-                prov, mdl = cd_prov, cd_mdl
-        except Exception as _cd_err:
-            logger.debug("coding routing skipped: %s", _cd_err)
+        # Multimodal + coding special-case routing was removed — both are
+        # now handled by the score-based llm_router which picks the
+        # extra_llms slot with the highest score for category=multimodal
+        # or category=tool-heavy. Legacy fields (self.multimodal_provider
+        # etc.) remain on the dataclass for DB compat but are no longer
+        # read here.
         # RolePresetV2 LLM Tier routing: when no explicit provider resolved yet
         # but agent.profile.llm_tier is set, resolve via LLMTierRouter.
         # Priority: per-task override > extra_llm slot > auto_route > multimodal
@@ -2619,13 +2686,23 @@ Write only the summary body. Do not include any preamble or prefix."""
                             pass
                 except Exception:
                     pass
-                tier_prov, tier_mdl = tier_router.resolve(active_tier)
+                # resolve_with_params returns (prov, mdl, temp). Temperature
+                # is stashed on self so chat call sites can read it without
+                # plumbing it through every internal helper — the tier
+                # resolution happens once per turn and the temp needs to be
+                # visible at the actual llm.chat() call.
+                tier_prov, tier_mdl, tier_temp = tier_router.resolve_with_params(active_tier)
                 if tier_prov and tier_mdl:
                     logger.info(
-                        "Agent %s: llm_tier=%s → routing to %s/%s",
+                        "Agent %s: llm_tier=%s → routing to %s/%s (temp=%s)",
                         self.id[:8], active_tier, tier_prov, tier_mdl,
+                        "default" if tier_temp < 0 else f"{tier_temp:.2f}",
                     )
                     prov, mdl = tier_prov, tier_mdl
+                # Stash regardless of provider match — a configured temp
+                # is meaningful even if falling back to the agent's
+                # explicit provider.
+                self._last_resolved_tier_temperature = tier_temp
         except Exception as _tier_err:
             logger.debug("llm_tier routing skipped: %s", _tier_err)
         try:
@@ -2649,6 +2726,27 @@ Write only the summary body. Do not include any preamble or prefix."""
             logger.error("Agent %s: provider resolution failed: %s",
                          self.id[:8], e)
         return prov, mdl
+
+    def _effective_temperature(self) -> float | None:
+        """Return the temperature to pass to llm.chat(), or None.
+
+        Sources, in precedence order:
+          1. ``self._last_resolved_tier_temperature`` — set by
+             _resolve_effective_provider_model when tier routing fires.
+             This is the admin-configured, task-type-aware value.
+          2. ``None`` — no tier override; llm layer falls back to the
+             provider's default sampling.
+
+        We deliberately do NOT blend with ``self.profile.temperature``
+        here: that field has always defaulted to 0.7 and was previously
+        unused, so promoting it now would override tier defaults for
+        every agent on the system. If per-agent override is desired
+        later, add it at the UI layer explicitly.
+        """
+        t = getattr(self, "_last_resolved_tier_temperature", -1.0)
+        if t is None or t < 0:
+            return None
+        return float(t)
 
     def _handle_large_result(self, tool_name: str, result: str) -> str:
         """If tool result exceeds 100KB, save to file and return a summary + path."""

@@ -56,6 +56,11 @@ async def list_tiers(user: CurrentUser = Depends(get_current_user)):
     except Exception:
         provider_info = [{"id": p, "name": p, "kind": ""} for p in providers]
 
+    # default_temperature_for is the canonical source of task-type
+    # recommendations; exposing it lets the UI render a "recommended
+    # value" hint next to the temperature input.
+    from ...llm_tier_routing import default_temperature_for
+
     tiers = []
     for tier in STANDARD_TIERS:
         entry = router_.get(tier)
@@ -70,6 +75,10 @@ async def list_tiers(user: CurrentUser = Depends(get_current_user)):
             "fallback_tier": entry.fallback_tier if entry else "",
             "cost_hint": entry.cost_hint if entry else "medium",
             "note": entry.note if entry else "",
+            # -1.0 = unset (use provider default). UI should render as
+            # "follow recommendation" chip pointing at default_temperature.
+            "temperature": entry.temperature if entry else -1.0,
+            "default_temperature": default_temperature_for(tier),
         })
     # 也包含管理员自定义档位（不在 STANDARD_TIERS 但有映射）
     for tier, entry in router_.all().items():
@@ -86,6 +95,8 @@ async def list_tiers(user: CurrentUser = Depends(get_current_user)):
             "fallback_tier": entry.fallback_tier,
             "cost_hint": entry.cost_hint,
             "note": entry.note,
+            "temperature": entry.temperature,
+            "default_temperature": default_temperature_for(tier),
             "custom": True,
         })
     return {
@@ -99,11 +110,15 @@ async def list_tiers(user: CurrentUser = Depends(get_current_user)):
 @router.get("/catalog")
 async def tier_catalog(user: CurrentUser = Depends(get_current_user)):
     """获取标准档位目录（前端 UI 用）。"""
-    from ...llm_tier_routing import STANDARD_TIERS, TIER_LABELS_ZH, TIER_DESCRIPTIONS_ZH
+    from ...llm_tier_routing import (
+        STANDARD_TIERS, TIER_LABELS_ZH, TIER_DESCRIPTIONS_ZH,
+        default_temperature_for,
+    )
     return {
         "standard_tiers": [
             {"tier": t, "label_zh": TIER_LABELS_ZH.get(t, t),
-             "description_zh": TIER_DESCRIPTIONS_ZH.get(t, "")}
+             "description_zh": TIER_DESCRIPTIONS_ZH.get(t, ""),
+             "default_temperature": default_temperature_for(t)}
             for t in STANDARD_TIERS
         ],
     }
@@ -120,6 +135,14 @@ async def upsert_tier(
     from ...llm_tier_routing import LLMTierEntry, get_router
     if not tier:
         raise HTTPException(status_code=400, detail="tier required")
+    # Temperature: accept None / missing / negative as "unset" (-1.0).
+    # This keeps back-compat with older UIs that don't send the field.
+    raw_temp = body.get("temperature", -1.0)
+    try:
+        temp_val = float(raw_temp) if raw_temp is not None else -1.0
+    except (TypeError, ValueError):
+        temp_val = -1.0
+
     entry = LLMTierEntry(
         tier=tier,
         provider=str(body.get("provider", "")).strip(),
@@ -128,6 +151,7 @@ async def upsert_tier(
         enabled=bool(body.get("enabled", True)),
         cost_hint=str(body.get("cost_hint", "medium")),
         note=str(body.get("note", "")),
+        temperature=temp_val,
     )
     if not entry.provider or not entry.model:
         raise HTTPException(status_code=400, detail="provider and model required")

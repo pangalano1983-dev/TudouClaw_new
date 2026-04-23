@@ -1738,7 +1738,9 @@ def list_available_models() -> dict[str, list[str]]:
 def _proxy_chat(base_url: str, api_key: str,
                 messages: list[dict], tools: list[dict] | None = None,
                 stream: bool = False, model: str = "",
-                _provider_id: str = "") -> dict | Generator:
+                _provider_id: str = "",
+                tool_choice: dict | str | None = None,
+                temperature: float | None = None) -> dict | Generator:
     """
     Handle proxy requests through Master node via WebSocket bus.
 
@@ -1770,6 +1772,12 @@ def _proxy_chat(base_url: str, api_key: str,
         "tools": tools,
         "stream": stream,
     }
+    # Forward temperature so the master-side handler can apply it to
+    # the actual provider call. Master may ignore it if its protocol
+    # handler is older than this field; that's a silent fallback to
+    # provider default, which matches the non-distributed behavior.
+    if temperature is not None and temperature >= 0:
+        request_payload["temperature"] = float(temperature)
 
     if not stream:
         # Non-streaming: send request, wait for response
@@ -1871,7 +1879,8 @@ def _openai_chat(base_url: str, api_key: str,
                  messages: list[dict], tools: list[dict] | None = None,
                  stream: bool = False, model: str = "",
                  _provider_id: str = "openai",
-                 tool_choice: dict | str | None = None) -> dict | Generator:
+                 tool_choice: dict | str | None = None,
+                 temperature: float | None = None) -> dict | Generator:
     url = base_url.rstrip("/")
     if not url.endswith("/chat/completions"):
         # Append /v1 only if no version path already present (e.g. /v1, /v3, /api/v3)
@@ -1911,6 +1920,12 @@ def _openai_chat(base_url: str, api_key: str,
         "messages": safe_messages,
         "stream": stream,
     }
+    # Temperature: only inject when caller passed a non-negative value.
+    # -1.0 (or None) means "use provider default" — many providers and
+    # models care about this distinction (e.g. o1 rejects temperature;
+    # tier routing passes -1.0 when unconfigured so we simply omit).
+    if temperature is not None and temperature >= 0:
+        payload["temperature"] = float(temperature)
     if valid_tools:
         payload["tools"] = valid_tools
         payload["stream"] = False
@@ -2094,7 +2109,8 @@ def _openai_stream_events(base_url: str, api_key: str,
                           messages: list[dict],
                           tools: list[dict] | None = None,
                           model: str = "",
-                          _provider_id: str = "openai"
+                          _provider_id: str = "openai",
+                          temperature: float | None = None,
                           ) -> Generator[dict, None, None]:
     """OpenAI-compat streaming with tool_calls delta support.
 
@@ -2134,6 +2150,8 @@ def _openai_stream_events(base_url: str, api_key: str,
         # omit the field; we won't emit a usage event in that case.
         "stream_options": {"include_usage": True},
     }
+    if temperature is not None and temperature >= 0:
+        payload["temperature"] = float(temperature)
     if valid_tools:
         payload["tools"] = valid_tools
         # Give tool args enough room — write_file/edit_file produce large JSON.
@@ -2374,7 +2392,8 @@ def _claude_chat(base_url: str, api_key: str,
                  messages: list[dict], tools: list[dict] | None = None,
                  stream: bool = False, model: str = "",
                  _provider_id: str = "claude",
-                 tool_choice: dict | str | None = None) -> dict | Generator:
+                 tool_choice: dict | str | None = None,
+                 temperature: float | None = None) -> dict | Generator:
     url = base_url.rstrip("/") + "/v1/messages"
     pool = get_connection_pool()
 
@@ -2457,6 +2476,11 @@ def _claude_chat(base_url: str, api_key: str,
         "messages": api_messages,
     }
     _TIMEOUT = _REQUEST_TIMEOUT
+
+    # Anthropic accepts `temperature` in range [0.0, 1.0]. Clamp rather
+    # than error — admins may seed >1 values from an OpenAI-era config.
+    if temperature is not None and temperature >= 0:
+        payload["temperature"] = min(1.0, float(temperature))
 
     if system_text.strip():
         payload["system"] = system_text.strip()
@@ -2599,7 +2623,8 @@ def _claude_stream_events(base_url: str, api_key: str,
                           messages: list[dict],
                           tools: list[dict] | None = None,
                           model: str = "",
-                          _provider_id: str = "claude"
+                          _provider_id: str = "claude",
+                          temperature: float | None = None,
                           ) -> Generator[dict, None, None]:
     """Anthropic streaming with full tool_use event support.
 
@@ -2694,6 +2719,9 @@ def _claude_stream_events(base_url: str, api_key: str,
         "messages": api_messages,
         "stream": True,
     }
+    # Clamp to Anthropic's [0.0, 1.0] range (see _claude_chat).
+    if temperature is not None and temperature >= 0:
+        payload["temperature"] = min(1.0, float(temperature))
     if system_text.strip():
         payload["system"] = system_text.strip()
     if claude_tools:
@@ -2929,7 +2957,8 @@ def _resolve_provider(provider_id: str) -> ProviderEntry | None:
 def _chat_with_fallback(messages: list[dict], tools: list[dict] | None = None,
                         stream: bool = False, model: str = "",
                         provider_chain: list[ProviderEntry] | None = None,
-                        tool_choice: dict | str | None = None
+                        tool_choice: dict | str | None = None,
+                        temperature: float | None = None,
                         ) -> dict | Generator[str, None, None]:
     """
     Internal function that tries providers in a fallback chain.
@@ -2962,7 +2991,9 @@ def _chat_with_fallback(messages: list[dict], tools: list[dict] | None = None,
                     if is_distributed():
                         return _proxy_chat(entry.base_url, entry.api_key,
                                            messages, tools=tools, stream=stream, model=model,
-                                           _provider_id=entry.id)
+                                           _provider_id=entry.id,
+                                           tool_choice=tool_choice,
+                                           temperature=temperature)
                 except ImportError:
                     pass
 
@@ -2975,7 +3006,8 @@ def _chat_with_fallback(messages: list[dict], tools: list[dict] | None = None,
 
             return handler(entry.base_url, entry.api_key,
                            msgs_to_send, tools=tools, stream=stream, model=model,
-                           _provider_id=entry.id, tool_choice=tool_choice)
+                           _provider_id=entry.id, tool_choice=tool_choice,
+                           temperature=temperature)
 
         except (requests.ConnectionError, requests.Timeout) as e:
             last_error = e
@@ -3010,7 +3042,9 @@ def _chat_with_fallback(messages: list[dict], tools: list[dict] | None = None,
 def chat(messages: list[dict], tools: list[dict] | None = None,
          stream: bool = False,
          provider: str = "", model: str = "",
-         tool_choice: dict | str | None = None) -> dict | Generator[str, None, None]:
+         tool_choice: dict | str | None = None,
+         temperature: float | None = None,
+         ) -> dict | Generator[str, None, None]:
     """
     Send a chat request to an LLM backend with automatic fallback chain support.
 
@@ -3061,16 +3095,19 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
 
     return _chat_with_fallback(messages, tools=tools, stream=stream,
                                 model=mdl, provider_chain=provider_chain,
-                                tool_choice=tool_choice)
+                                tool_choice=tool_choice,
+                                temperature=temperature)
 
 
 def chat_no_stream(messages: list[dict], tools: list[dict] | None = None,
                    provider: str = "", model: str = "",
-                   tool_choice: dict | str | None = None) -> dict:
+                   tool_choice: dict | str | None = None,
+                   temperature: float | None = None) -> dict:
     """Convenience: always returns a dict (no streaming)."""
     result = chat(messages, tools=tools, stream=False,
                   provider=provider, model=model,
-                  tool_choice=tool_choice)
+                  tool_choice=tool_choice,
+                  temperature=temperature)
     assert isinstance(result, dict)
     return result
 
@@ -3100,7 +3137,8 @@ def chat_no_stream(messages: list[dict], tools: list[dict] | None = None,
 def _dispatch_stream_events(entry: "ProviderEntry",
                             messages: list[dict],
                             tools: list[dict] | None,
-                            model: str
+                            model: str,
+                            temperature: float | None = None,
                             ) -> Generator[dict, None, None]:
     """Route to the right provider-specific stream parser based on kind."""
     kind = entry.kind
@@ -3109,19 +3147,22 @@ def _dispatch_stream_events(entry: "ProviderEntry",
             entry.base_url, entry.api_key,
             messages, tools=tools, model=model,
             _provider_id=entry.id,
+            temperature=temperature,
         )
     # ollama / openai / unsloth / any other OpenAI-compat server
     return _openai_stream_events(
         entry.base_url, entry.api_key,
         messages, tools=tools, model=model,
         _provider_id=entry.id,
+        temperature=temperature,
     )
 
 
 def chat_stream_events(messages: list[dict],
                        tools: list[dict] | None = None,
                        provider: str = "",
-                       model: str = ""
+                       model: str = "",
+                       temperature: float | None = None,
                        ) -> Generator[dict, None, None]:
     """Unified streaming entry yielding provider-agnostic event dicts.
 
@@ -3174,7 +3215,7 @@ def chat_stream_events(messages: list[dict],
     for idx, pentry in enumerate(provider_chain):
         try:
             gen_iter = iter(_dispatch_stream_events(
-                pentry, messages, tools, mdl))
+                pentry, messages, tools, mdl, temperature=temperature))
             # Pull the first event here so we can fall over to the next
             # provider on a pre-stream error (connection refused, 429, DNS).
             try:

@@ -471,12 +471,15 @@ class RAGProviderRegistry:
                 for i, doc_id in enumerate(results["ids"][0]):
                     meta = results["metadatas"][0][i] if results.get("metadatas") else {}
                     doc = results["documents"][0][i] if results.get("documents") else ""
+                    # v1-C: surface heading_path / source_file in the
+                    # result's metadata (was already there via meta dict,
+                    # but be explicit so callers know these are first-class).
                     items.append(RAGResult(
                         id=doc_id,
                         title=meta.get("title", ""),
                         content=doc,
                         distance=results["distances"][0][i] if results.get("distances") else 0,
-                        metadata=meta,
+                        metadata=dict(meta or {}),
                     ))
             return items
         except Exception as e:
@@ -484,30 +487,452 @@ class RAGProviderRegistry:
             return []
 
     def _ingest_local(self, collection: str, documents: list[dict]) -> int:
+        """Ingest into the local ChromaDB.
+
+        RAG v1-C: persist the structured metadata the chunker now
+        produces (content_hash / heading_path / source_file /
+        chunk_index / imported_at) so downstream consumers (UI,
+        dedup, hybrid search) can use it. Also does cross-request
+        dedup by content_hash: if a doc's content_hash already exists
+        in the collection, we skip re-ingest to avoid KB bloat on
+        repeat imports of the same file.
+        """
         mm = self._get_memory_manager()
         if not mm:
             return 0
         count = 0
         try:
             coll = mm._get_chroma_collection(collection)
+
+            # Collect content_hashes already in the collection so we
+            # can skip duplicates. ChromaDB's `where` filter handles
+            # metadata but doesn't do "value in set" — we grab the
+            # hashes once upfront. Cheap for collections < 100k rows.
+            existing_hashes: set[str] = set()
+            try:
+                probe = coll.get(include=["metadatas"])
+                for m in (probe.get("metadatas") or []):
+                    h = (m or {}).get("content_hash", "")
+                    if h:
+                        existing_hashes.add(h)
+            except Exception:
+                # Older ChromaDB clients may not support include=["metadatas"]
+                # on .get(); on failure just proceed without cross-request
+                # dedup (upsert-by-id still protects same-id duplicates).
+                existing_hashes = set()
+
+            skipped_dupes = 0
             for doc in documents:
                 doc_id = doc.get("id") or uuid.uuid4().hex[:10]
                 title = (doc.get("title") or "").strip()
                 content = (doc.get("content") or "").strip()
                 if not content:
                     continue
+                # RAG v1-C: dedup by content_hash across requests.
+                content_hash = doc.get("content_hash", "")
+                if content_hash and content_hash in existing_hashes:
+                    skipped_dupes += 1
+                    continue
+
                 text = f"{title}. {title}. {content}" if title else content
-                metadata = {
+                # Flatten structured metadata. ChromaDB accepts scalars
+                # (str / int / float / bool); list/dict must be
+                # stringified. `tags` already goes comma-joined.
+                metadata: dict = {
                     "title": title,
-                    "tags": ",".join(doc.get("tags", [])),
+                    "tags": ",".join(doc.get("tags", []) or []),
                     "source": doc.get("source", "import"),
                     "created_at": time.time(),
                 }
-                coll.upsert(ids=[doc_id], documents=[text], metadatas=[metadata])
+                # v1-C fields — only write non-empty/non-default values
+                # to keep ChromaDB payloads small.
+                for k in ("content_hash", "heading_path", "source_file"):
+                    v = doc.get(k)
+                    if v:
+                        metadata[k] = str(v)
+                for k in ("chunk_index", "imported_at"):
+                    v = doc.get(k)
+                    if v is not None:
+                        try:
+                            metadata[k] = (float(v) if "_at" in k
+                                           else int(v))
+                        except Exception:
+                            pass
+                coll.upsert(ids=[doc_id], documents=[text],
+                            metadatas=[metadata])
+                if content_hash:
+                    existing_hashes.add(content_hash)
                 count += 1
+            if skipped_dupes:
+                logger.info(
+                    "Local RAG ingest: skipped %d duplicates by content_hash "
+                    "(collection=%s)", skipped_dupes, collection,
+                )
         except Exception as e:
-            logger.warning("Local RAG ingest failed (collection=%s): %s", collection, e)
+            logger.warning("Local RAG ingest failed (collection=%s): %s",
+                           collection, e)
         return count
+
+    # ── RAG v1-B: Hybrid retrieval (BM25 + Vector + RRF) ────────────
+    # Design:
+    #   1. Vector search → top-N candidates (n = top_k * 4)
+    #   2. BM25 over the same corpus (fetched via coll.get(include=...))
+    #      → top-N candidates
+    #   3. Reciprocal Rank Fusion: score_d = Σ 1 / (K + rank_in_each_list)
+    #      — classical RRF with K=60
+    #   4. Top-k by fused score
+    # No new dependency: BM25 is implemented in ~40 lines with stdlib.
+
+    _RRF_K = 60
+    _HYBRID_CANDIDATE_MULTIPLIER = 4
+
+    @staticmethod
+    def _tokenize(s: str) -> list[str]:
+        """Cheap tokenizer: lowercase + split on non-alphanumeric, plus
+        split CJK runs into per-character tokens so 中文 retrieval works."""
+        import re as _re
+        s = (s or "").lower()
+        # Latin tokens of length >= 2.
+        latin = _re.findall(r"[a-z0-9][a-z0-9_]+", s)
+        # CJK characters (each character becomes its own token).
+        cjk = _re.findall(r"[\u4e00-\u9fff]", s)
+        return latin + cjk
+
+    def _bm25_search(self, collection: str, query: str,
+                     top_k: int = 20) -> list[tuple[str, float]]:
+        """Pure-python BM25 over the local ChromaDB collection. Returns
+        ``[(doc_id, score), ...]`` sorted by score desc. Falls back to
+        empty list on any error."""
+        mm = self._get_memory_manager()
+        if not mm:
+            return []
+        try:
+            coll = mm._get_chroma_collection(collection)
+            count = coll.count()
+            if count == 0:
+                return []
+            # Pull all docs + ids. Cheap for collections < ~50k.
+            # Title is prefixed into the text at ingest (`title. title. body`),
+            # so BM25 naturally weights title matches higher.
+            probe = coll.get(include=["documents"])
+            ids = probe.get("ids") or []
+            docs = probe.get("documents") or []
+            if not ids or not docs:
+                return []
+            qtoks = self._tokenize(query)
+            if not qtoks:
+                return []
+            # Pre-tokenize corpus once.
+            tokenized = [self._tokenize(d) for d in docs]
+            doc_lens = [len(t) for t in tokenized]
+            avgdl = (sum(doc_lens) / len(doc_lens)) if doc_lens else 1.0
+            # Document-frequency per query token.
+            import math as _math
+            n_docs = len(docs)
+            df: dict[str, int] = {}
+            # For query tokens only — small dict.
+            qset = set(qtoks)
+            for t in tokenized:
+                seen = set()
+                for tok in t:
+                    if tok in qset and tok not in seen:
+                        df[tok] = df.get(tok, 0) + 1
+                        seen.add(tok)
+            # BM25 params.
+            K1 = 1.5
+            B = 0.75
+            scores: list[tuple[str, float]] = []
+            for idx, toks in enumerate(tokenized):
+                if not toks:
+                    continue
+                # Term frequencies in this doc.
+                tf: dict[str, int] = {}
+                for tok in toks:
+                    if tok in qset:
+                        tf[tok] = tf.get(tok, 0) + 1
+                if not tf:
+                    continue
+                s = 0.0
+                for qt, qcount in [(q, 1) for q in qset]:
+                    if qt not in tf:
+                        continue
+                    n_qt = df.get(qt, 0)
+                    # IDF with + 0.5 smoothing.
+                    idf = _math.log(
+                        (n_docs - n_qt + 0.5) / (n_qt + 0.5) + 1.0
+                    )
+                    f = tf[qt]
+                    dl = doc_lens[idx] or 1
+                    num = f * (K1 + 1)
+                    den = f + K1 * (1 - B + B * dl / avgdl)
+                    s += idf * num / den
+                if s > 0:
+                    scores.append((ids[idx], s))
+            scores.sort(key=lambda x: -x[1])
+            return scores[:top_k]
+        except Exception as e:
+            logger.debug("BM25 search failed (collection=%s): %s",
+                         collection, e)
+            return []
+
+    @staticmethod
+    def _rrf_fuse(rank_lists: list[list[tuple[str, float]]],
+                  K: int = 60) -> list[tuple[str, float]]:
+        """Reciprocal Rank Fusion. Each list is already sorted best-first.
+        Returns fused [(doc_id, rrf_score), ...] sorted desc."""
+        fused: dict[str, float] = {}
+        for lst in rank_lists:
+            for rank, (doc_id, _) in enumerate(lst):
+                fused[doc_id] = fused.get(doc_id, 0.0) + 1.0 / (K + rank + 1)
+        return sorted(fused.items(), key=lambda x: -x[1])
+
+    def hybrid_search(self, provider_id: str, collection: str,
+                      query: str, top_k: int = 5) -> list[RAGResult]:
+        """Vector + BM25 + RRF. Falls back to pure vector when BM25
+        produces no results (empty collection, CJK-only query with
+        punctuation, etc.). The extra work is bounded — ~ms for
+        collections under 10k chunks.
+        """
+        self._ensure_loaded()
+
+        # Only local / ChromaDB path supports BM25 co-location.
+        # Remote providers fall back to their own search.
+        if provider_id and provider_id != "local":
+            provider = self._providers.get(provider_id)
+            if provider and provider.kind == "remote":
+                return self._search_remote(provider, collection, query, top_k)
+
+        # Local: gather both candidate lists.
+        candidate_k = max(top_k * self._HYBRID_CANDIDATE_MULTIPLIER, 20)
+
+        vector_hits = self._search_local(collection, query, top_k=candidate_k)
+        vector_rank = [(r.id, 1.0 / (1 + r.distance)) for r in vector_hits]
+
+        bm25_rank = self._bm25_search(collection, query, top_k=candidate_k)
+
+        # If BM25 found nothing, short-circuit to vector-only.
+        if not bm25_rank:
+            return vector_hits[:top_k]
+        # If vector is empty but BM25 has hits, hydrate from the corpus.
+        if not vector_rank and bm25_rank:
+            # Can't fuse without vector hits; just return BM25 order.
+            id_to_result = {r.id: r for r in vector_hits}
+            # Re-fetch missing docs so callers still get full content/metadata.
+            mm = self._get_memory_manager()
+            try:
+                coll = mm._get_chroma_collection(collection)
+                probe = coll.get(include=["documents", "metadatas"])
+                doc_map = {
+                    probe["ids"][i]: (
+                        probe["documents"][i] if i < len(probe.get("documents", [])) else "",
+                        probe["metadatas"][i] if i < len(probe.get("metadatas", [])) else {},
+                    )
+                    for i in range(len(probe.get("ids", [])))
+                }
+            except Exception:
+                doc_map = {}
+            out: list[RAGResult] = []
+            for doc_id, _s in bm25_rank[:top_k]:
+                content, meta = doc_map.get(doc_id, ("", {}))
+                out.append(RAGResult(
+                    id=doc_id,
+                    title=(meta or {}).get("title", ""),
+                    content=content,
+                    distance=0.0,
+                    metadata=meta or {},
+                ))
+            return out
+
+        # Both lists present — RRF fuse.
+        fused = self._rrf_fuse([vector_rank, bm25_rank], K=self._RRF_K)
+        id_to_result = {r.id: r for r in vector_hits}
+        # Hydrate BM25-only ids with fresh fetches.
+        missing_ids = [d for d, _ in fused if d not in id_to_result]
+        if missing_ids:
+            mm = self._get_memory_manager()
+            try:
+                coll = mm._get_chroma_collection(collection)
+                probe = coll.get(ids=missing_ids,
+                                 include=["documents", "metadatas"])
+                for i, doc_id in enumerate(probe.get("ids", []) or []):
+                    content = (probe.get("documents") or [""])[i] if i < len(probe.get("documents", [])) else ""
+                    meta = (probe.get("metadatas") or [{}])[i] if i < len(probe.get("metadatas", [])) else {}
+                    id_to_result[doc_id] = RAGResult(
+                        id=doc_id,
+                        title=(meta or {}).get("title", ""),
+                        content=content,
+                        distance=0.0,
+                        metadata=meta or {},
+                    )
+            except Exception:
+                pass
+
+        out = []
+        for doc_id, rrf_score in fused[:top_k]:
+            r = id_to_result.get(doc_id)
+            if r is None:
+                continue
+            # Attach the fused score so callers can see it.
+            r.metadata = dict(r.metadata or {})
+            r.metadata["rrf_score"] = round(rrf_score, 6)
+            out.append(r)
+        return out
+
+    def kb_statistics(self, provider_id: str, collection: str,
+                      query: str = "") -> dict:
+        """Pack v3 — aggregate/count mode (bypasses top-k RAG).
+
+        Scans the entire collection's metadata, groups chunks by
+        source_file, and optionally filters by substring match on
+        title / heading_path / source_file.
+
+        Returns a dict shaped for knowledge_lookup(mode="count"):
+            {
+                "total_chunks": int,
+                "unique_source_files": int,
+                "by_source_file": [
+                    {"source_file": str, "chunk_count": int,
+                     "first_heading": str, "titles_sample": [str, ...]},
+                    ...
+                ],
+                "filter": str,        # the query passed in, for LLM context
+                "filter_matched": int # chunks that matched, 0 == no filter
+            }
+
+        Pure metadata — no embedding / no BM25 / no LLM. Works on any
+        collection size since it's a single coll.get(). Scales linearly
+        with chunk count; fine up to ~50k chunks.
+        """
+        self._ensure_loaded()
+        if provider_id and provider_id != "local":
+            # Remote providers: stats endpoint is provider-specific.
+            # Return empty rather than fabricating.
+            return {
+                "total_chunks": 0, "unique_source_files": 0,
+                "by_source_file": [], "filter": query or "",
+                "filter_matched": 0,
+                "note": "kb_statistics only supported for local provider",
+            }
+        mm = self._get_memory_manager()
+        if not mm:
+            return {"total_chunks": 0, "unique_source_files": 0,
+                    "by_source_file": [], "filter": query or "",
+                    "filter_matched": 0}
+        try:
+            coll = mm._get_chroma_collection(collection)
+            probe = coll.get(include=["metadatas", "documents"])
+        except Exception as e:
+            logger.debug("kb_statistics get failed: %s", e)
+            return {"total_chunks": 0, "unique_source_files": 0,
+                    "by_source_file": [], "filter": query or "",
+                    "filter_matched": 0}
+
+        ids = probe.get("ids") or []
+        metas = probe.get("metadatas") or []
+        docs = probe.get("documents") or []
+        total = len(ids)
+        q = (query or "").strip().lower()
+
+        # Group by source_file (fall back to "unknown" bucket).
+        groups: dict[str, dict] = {}
+        filter_matched = 0
+        for i, _id in enumerate(ids):
+            meta = metas[i] if i < len(metas) else {}
+            meta = meta or {}
+            src = str(meta.get("source_file") or "unknown")
+            title = str(meta.get("title") or "")
+            heading = str(meta.get("heading_path") or "")
+            doc_body = str(docs[i]) if i < len(docs) else ""
+            # Filter match: substring in title / heading_path / source_file
+            # / doc body (body search catches chunks where source metadata
+            # is thin but content has the term).
+            matched = True
+            if q:
+                hay = (title + " " + heading + " " + src + " " +
+                       doc_body).lower()
+                matched = q in hay
+                if matched:
+                    filter_matched += 1
+            if not matched:
+                continue
+            g = groups.setdefault(src, {
+                "source_file": src, "chunk_count": 0,
+                "first_heading": "", "titles_sample": [],
+            })
+            g["chunk_count"] += 1
+            if not g["first_heading"] and heading:
+                g["first_heading"] = heading[:120]
+            if title and title not in g["titles_sample"] and \
+                    len(g["titles_sample"]) < 5:
+                g["titles_sample"].append(title[:120])
+
+        by_source = sorted(groups.values(),
+                           key=lambda x: -x["chunk_count"])
+        return {
+            "total_chunks": total,
+            "unique_source_files": len(by_source),
+            "by_source_file": by_source,
+            "filter": query or "",
+            "filter_matched": filter_matched if q else 0,
+        }
+
+    def kb_list(self, provider_id: str, collection: str,
+                query: str = "", limit: int = 50) -> dict:
+        """Pack v3 — list mode (per-chunk metadata, no content bodies).
+
+        Like kb_statistics but returns a flat list of chunks ordered by
+        (source_file, chunk_index) with their metadata. Useful when the
+        user asks "列出所有文档块 / 目录 / 有哪些条目". Capped at
+        ``limit`` rows to keep the LLM payload bounded.
+        """
+        self._ensure_loaded()
+        if provider_id and provider_id != "local":
+            return {"items": [], "total": 0, "truncated": False,
+                    "note": "kb_list only supported for local provider"}
+        mm = self._get_memory_manager()
+        if not mm:
+            return {"items": [], "total": 0, "truncated": False}
+        try:
+            coll = mm._get_chroma_collection(collection)
+            probe = coll.get(include=["metadatas"])
+        except Exception as e:
+            logger.debug("kb_list get failed: %s", e)
+            return {"items": [], "total": 0, "truncated": False}
+
+        ids = probe.get("ids") or []
+        metas = probe.get("metadatas") or []
+        q = (query or "").strip().lower()
+
+        rows = []
+        for i, _id in enumerate(ids):
+            m = metas[i] if i < len(metas) else {}
+            m = m or {}
+            title = str(m.get("title") or "")
+            heading = str(m.get("heading_path") or "")
+            src = str(m.get("source_file") or "")
+            if q:
+                hay = (title + " " + heading + " " + src).lower()
+                if q not in hay:
+                    continue
+            rows.append({
+                "id": _id,
+                "title": title[:120],
+                "source_file": src,
+                "heading_path": heading[:120],
+                "chunk_index": m.get("chunk_index"),
+            })
+        # Stable order: source_file then chunk_index
+        rows.sort(key=lambda r: (r["source_file"],
+                                 r["chunk_index"] if isinstance(
+                                     r["chunk_index"], (int, float)) else 10 ** 9))
+        total_matched = len(rows)
+        truncated = total_matched > limit
+        return {
+            "items": rows[:limit],
+            "total": total_matched,
+            "truncated": truncated,
+            "filter": query or "",
+        }
 
     def _create_local_collection(self, name: str, description: str = "") -> RAGCollection:
         mm = self._get_memory_manager()
@@ -688,30 +1113,37 @@ def search_for_agent(agent_profile, query: str, agent_id: str = "",
     if rag_mode == "none":
         return []
 
+    # Helper: hybrid_search with graceful fallback to pure vector.
+    # Used for "专 (domain)" collections where BM25 adds value.
+    def _domain_search(p_id: str, coll: str) -> list[RAGResult]:
+        if hasattr(reg, "hybrid_search"):
+            try:
+                return reg.hybrid_search(p_id, coll, query, top_k=top_k)
+            except Exception:
+                pass
+        return reg.search(p_id, coll, query, top_k)
+
     if rag_mode in ("private", "both"):
-        # Search domain knowledge bases bound to this agent via rag_collection_ids
+        # 专属领域 KB → hybrid (BM25 + vector + RRF)
         dkb_store = get_domain_kb_store()
         for kb_id in extra_collections:
             kb = dkb_store.get(kb_id)
             if kb:
-                # Use the domain KB's own collection and provider
                 kb_provider = kb.provider_id or provider_id
-                results.extend(reg.search(kb_provider, kb.collection, query, top_k))
+                results.extend(_domain_search(kb_provider, kb.collection))
             else:
-                # Fallback: treat as raw collection name (backward compat)
-                results.extend(reg.search(provider_id, kb_id, query, top_k))
-        # Legacy: also check advisor_{agent_id} collection if it exists
+                # Unknown kb_id — treat as raw collection name (backward compat)
+                results.extend(_domain_search(provider_id, kb_id))
+        # Legacy advisor_{agent_id} collection — also treat as domain-class.
         if agent_id:
             try:
-                legacy_results = reg.search(provider_id, f"advisor_{agent_id}", query, top_k)
-                results.extend(legacy_results)
+                results.extend(_domain_search(provider_id, f"advisor_{agent_id}"))
             except Exception:
                 pass
 
     if rag_mode in ("shared", "both"):
-        # Search the global shared knowledge collection
-        shared_results = reg.search(provider_id, "knowledge", query, top_k)
-        results.extend(shared_results)
+        # 共享池 "knowledge" → 保持 pure vector (条目短、碎，BM25 加成有限)
+        results.extend(reg.search(provider_id, "knowledge", query, top_k))
 
     # Deduplicate by ID and sort by distance
     seen = set()

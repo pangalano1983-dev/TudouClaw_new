@@ -49,6 +49,11 @@ _RENDERABLE_EVENT_KINDS = frozenset({
     # current turn. Surfaces skill invocations so users can see
     # which capability the agent leaned on, not just which tools.
     "skill_match",
+    # handoff — structured baton-pass between agents (sprint-collab B).
+    # Emitted by emit_handoff; rendered as a distinct card AND ingested
+    # into the NEXT agent's system prompt so they see summary / deliverable
+    # / highlights / followups without scrolling the full discussion.
+    "handoff",
 })
 
 # Cap on how many renderable events one chat turn can carry forward.
@@ -153,6 +158,15 @@ def _shrink_event_data(kind: str, data: dict) -> dict:
     if kind == "ui_block":
         # ui_block is already bounded by build_ui_block's caps; pass through.
         return {"block": data.get("block", {})}
+    if kind == "handoff":
+        # handoff payload is bounded by build_handoff_payload's caps; pass
+        # through. from_agent is the emitting agent's id (short), used by
+        # the UI to attribute the card and by the next-agent prompt ingestor
+        # to filter by meeting participant.
+        return {
+            "handoff": data.get("handoff", {}),
+            "from_agent": str(data.get("from_agent", ""))[:64],
+        }
     if kind == "skill_match":
         # Agent's skill-matching hit. Keep the name + a short reason
         # string; internal scoring floats aren't meaningful in chat

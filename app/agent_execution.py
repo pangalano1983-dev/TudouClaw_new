@@ -22,6 +22,33 @@ from .agent_types import _ensure_str_content
 logger = logging.getLogger("tudou.agent")
 
 
+def _text_similarity(a: str, b: str) -> float:
+    """Cheap bag-of-words similarity (Jaccard on normalized tokens).
+
+    Used by the duplicate-output detector — we don't need precise NLP
+    similarity, just "is the LLM basically saying the same thing again?"
+    Ratio 0.0-1.0. Returns 0 for empty / tiny inputs so noise doesn't
+    trigger false positives.
+    """
+    import re as _re
+    if not a or not b:
+        return 0.0
+    # Normalize: lowercase + collapse whitespace + drop punctuation
+    def _tok(s):
+        s = _re.sub(r"[^\w\u4e00-\u9fa5]+", " ", s.lower())
+        return set(t for t in s.split() if len(t) >= 2)
+    ta = _tok(a); tb = _tok(b)
+    if not ta or not tb:
+        return 0.0
+    if len(ta) < 5 or len(tb) < 5:
+        return 0.0
+    inter = ta & tb
+    union = ta | tb
+    if not union:
+        return 0.0
+    return len(inter) / len(union)
+
+
 class AgentExecutionMixin:
     """Mixin providing chat loop, tool execution, delegation, and plan management."""
 
@@ -92,15 +119,46 @@ class AgentExecutionMixin:
         if decision == "deny":
             auth.audit("tool_denied", actor=self.name, target=tool_name,
                        detail=f"Auto-denied: {reason}", success=False)
+
+            # ── Delivery artifact capture (通用门禁 Day 2) ──
+            # If this deny came from a command_patterns rule, persist the
+            # attempted command to the agent's workspace as a delivery
+            # artifact. User can review/execute it manually outside the
+            # agent's sandbox. File naming: delivery/<timestamp>_<label>.txt
+            # Non-fatal — any failure falls back to the legacy deny path.
+            delivery_path = ""
+            try:
+                matched = auth.tool_policy.find_matching_command_pattern(
+                    arguments,
+                    agent_id=self.id,
+                    agent_role=getattr(self, "role", "") or "",
+                )
+                if matched:
+                    delivery_path = self._save_denied_command_as_delivery(
+                        tool_name, arguments, matched, reason,
+                    )
+            except Exception as _de:
+                logger.debug("delivery artifact save skipped: %s", _de)
+
             from .agent_types import AgentEvent
             evt = AgentEvent(time.time(), "approval", {
                 "tool": tool_name, "status": "denied", "reason": reason,
                 "agent_name": self.name,
+                "delivery_path": delivery_path,
             })
             self._log(evt.kind, evt.data)
             if on_event:
                 on_event(evt)
-            return f"DENIED: {reason}. This operation is not allowed for security reasons."
+            tail = ""
+            if delivery_path:
+                tail = (
+                    f"\n📎 脚本已保存到交付产物: {delivery_path}\n"
+                    f"(agent 不会执行；请人工复核后手动执行。)"
+                )
+            return (
+                f"DENIED: {reason}. This operation is not allowed "
+                f"for security reasons.{tail}"
+            )
 
         if decision == "needs_approval":
             from .agent_types import AgentStatus
@@ -199,6 +257,64 @@ class AgentExecutionMixin:
                    detail=result[:200])
         return result
 
+    # ── Delivery artifact capture (通用门禁 Day 2) ──────────────
+    def _save_denied_command_as_delivery(self, tool_name: str,
+                                         arguments: dict,
+                                         matched_pattern: dict,
+                                         reason: str) -> str:
+        """Persist a blocked command + metadata as a file under
+        `$agent_workspace/delivery/` so the user can review and run it
+        manually outside the agent sandbox.
+
+        Returns the absolute file path (empty string on any failure).
+        """
+        import os as _os
+        try:
+            ws = self._get_agent_workspace()
+        except Exception:
+            ws = ""
+        if not ws:
+            return ""
+        try:
+            delivery_dir = _os.path.join(str(ws), "delivery")
+            _os.makedirs(delivery_dir, exist_ok=True)
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            label = (matched_pattern.get("label") or "denied").replace(
+                "/", "_").replace(":", "_")
+            fname = f"{ts}_{label}.txt"
+            path = _os.path.join(delivery_dir, fname)
+
+            cmd_parts: list[str] = []
+            for f in ("command", "script", "cmd", "code"):
+                v = arguments.get(f) if isinstance(arguments, dict) else None
+                if v is None:
+                    continue
+                cmd_parts.append(f"# {f}:\n{v if isinstance(v, str) else str(v)}")
+            cmd_text = "\n\n".join(cmd_parts) or "(no command content)"
+
+            body = (
+                f"# Blocked command — saved for human review\n"
+                f"# Agent:      {self.name} ({self.id})\n"
+                f"# Tool:       {tool_name}\n"
+                f"# Blocked at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"# Rule label: {matched_pattern.get('label', '')}\n"
+                f"# Scope:      {matched_pattern.get('scope', 'global')}\n"
+                f"# Verdict:    {matched_pattern.get('verdict', 'deny')}\n"
+                f"# Reason:     {reason}\n"
+                f"# Tags:       {','.join(matched_pattern.get('tags') or [])}\n"
+                f"#\n"
+                f"# Agent DID NOT execute this command.\n"
+                f"# Review it manually and run it yourself if appropriate.\n"
+                f"# ─────────────────────────────────────────────────────\n"
+                f"\n{cmd_text}\n"
+            )
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(body)
+            return path
+        except Exception as e:
+            logger.debug("save_denied_command_as_delivery failed: %s", e)
+            return ""
+
     def _sandbox_scope(self):
         """Install a sandbox policy rooted at this agent's working_dir."""
         from . import sandbox as _sandbox
@@ -216,11 +332,18 @@ class AgentExecutionMixin:
         mode = getattr(self.profile, "sandbox_mode", "") or ""
         allow_list = list(getattr(self.profile, "sandbox_allow_commands", []) or [])
 
-        # Build allowed_dirs from authorized workspaces + shared workspace
+        # Build allowed_dirs. Policy:
+        #   1. agent's own workspace (= jail root, always allowed)
+        #   2. current project OR meeting shared workspace (via shared_workspace)
+        #      — the normal path for cross-agent collaboration
+        #   3. authorized_workspaces — admin-granted direct access to
+        #      another agent's workspace (manual override, kept for
+        #      admin-configured cross-agent sharing outside project/meeting)
+        #   4. agent's own skills subdirectory (stays inside scope #1)
         allowed_dirs = []
         if self.shared_workspace:
             allowed_dirs.append(self.shared_workspace)
-        # Add workspaces of authorized agents
+        # Admin-granted access to other agents' workspaces.
         from . import DEFAULT_DATA_DIR as _DEFAULT_DD2
         data_dir = _os.environ.get("TUDOU_CLAW_DATA_DIR") or _DEFAULT_DD2
         for other_agent_id in self.authorized_workspaces:
@@ -231,6 +354,21 @@ class AgentExecutionMixin:
         agent_skills_dir = _os.path.join(str(self._get_agent_workspace()), "skills")
         if _os.path.isdir(agent_skills_dir):
             allowed_dirs.append(agent_skills_dir)
+
+        # Granted skills: open read/cd to each install_dir so get_skill_guide's
+        # skill_dir is actually reachable via read_file / bash cd. Only skills
+        # granted to THIS agent — ungranted skill dirs remain blocked.
+        try:
+            from .skills.engine import get_registry as _get_skill_registry
+            _reg = _get_skill_registry()
+            if _reg is not None:
+                for _inst in _reg.list_for_agent(self.id):
+                    _sd = getattr(_inst, "install_dir", "") or ""
+                    if _sd and _os.path.isdir(_sd) and _sd not in allowed_dirs:
+                        allowed_dirs.append(_sd)
+        except Exception:
+            # Non-fatal — sandbox without extended skill access is still usable.
+            pass
 
         policy = _sandbox.SandboxPolicy(
             root=root, mode=mode, allow_list=allow_list,
@@ -259,6 +397,18 @@ class AgentExecutionMixin:
             llm.set_token_context(agent_id=self.id, project_id="")
         except Exception:
             pass
+
+        # AbortScope — bind this chat turn to agent:{id} so bash
+        # subprocesses started mid-turn get auto-tracked and the
+        # HTTP /abort endpoint can SIGTERM them. We register + set
+        # the thread-local key here (without a `with` block to avoid
+        # re-indenting this 1000-line method); the registry is
+        # idempotent — next chat() call's mark() refreshes the thread
+        # reference, and explicit clear() happens at method end.
+        from . import abort_registry as _ar
+        _abort_key = _ar.agent_key(self.id)
+        _ar.mark(_abort_key, threading.current_thread())
+        _ar._current_key.key = _abort_key
 
         with self._lock:
             from .agent_types import AgentStatus
@@ -321,6 +471,25 @@ class AgentExecutionMixin:
 
             self._ensure_system_message(current_query=_user_text)
             self._trim_context()
+            # If /new slash was set on this request, remember the cutoff
+            # BEFORE the current user message is appended. Anything
+            # already in self.messages before this index is "pre-turn
+            # history" and will be hidden from the LLM this turn. New
+            # messages appended during this turn (user msg + assistant +
+            # tool results) remain visible.
+            _skip_hist = bool(getattr(self, "_skip_history_once", False))
+            if _skip_hist:
+                self._turn_skip_from_idx = len(self.messages)
+                # One-shot: clear the flag so subsequent turns aren't
+                # accidentally skipped. The cutoff index itself stays
+                # set for the lifetime of this turn.
+                try:
+                    self._skip_history_once = False
+                except Exception:
+                    pass
+            else:
+                # Normal turn — no history pruning.
+                self._turn_skip_from_idx = None
             msg = {"role": "user", "content": _msg_content, "source": source}
             self.messages.append(msg)
             self._log("message", {"role": "user", "content": _user_text[:500], "source": source})
@@ -482,8 +651,24 @@ class AgentExecutionMixin:
                         pass
 
             def _is_aborted() -> bool:
+                # Two abort sources:
+                #   1. In-process callback (standalone task runner sets
+                #      this via task.aborted)
+                #   2. Central abort registry — flipped by the HTTP
+                #      /api/portal/agents/{id}/abort endpoint so the
+                #      Stop button works without a callback wiring.
                 if abort_check and callable(abort_check):
-                    return abort_check()
+                    try:
+                        if abort_check():
+                            return True
+                    except Exception:
+                        pass
+                try:
+                    from . import abort_registry as _ar
+                    if _ar.is_aborted(_ar.agent_key(self.id)):
+                        return True
+                except Exception:
+                    pass
                 return False
 
             tool_defs = self._get_effective_tools()
@@ -579,8 +764,28 @@ class AgentExecutionMixin:
                 # Build messages-to-send once per iteration: self.messages
                 # (stable prefix) + dynamic context injected at the end.
                 # This preserves LM Studio / Ollama KV cache across turns.
-                _msgs_to_send = self._inject_dynamic_context(
-                    self.messages, current_query=_user_text)
+                #
+                # /new slash escape hatch: ``_turn_skip_from_idx`` was set
+                # pre-append when the user's turn started with /new. We
+                # compose the outbound list as [system msgs] + [messages
+                # from the cutoff onwards] — effectively "this turn's
+                # conversation only" plus the stable system header. The
+                # persistent ``self.messages`` list is unchanged; only the
+                # payload is abridged.
+                _cutoff = getattr(self, "_turn_skip_from_idx", None)
+                if isinstance(_cutoff, int):
+                    _base = [m for m in self.messages
+                             if (m or {}).get("role") == "system"]
+                    _base.extend(self.messages[_cutoff:])
+                    _msgs_to_send = self._inject_dynamic_context(
+                        _base, current_query=_user_text)
+                    logger.info(
+                        "Agent %s: /new — pruned history, sending "
+                        "%d msgs (of %d total)",
+                        self.id[:8], len(_msgs_to_send), len(self.messages))
+                else:
+                    _msgs_to_send = self._inject_dynamic_context(
+                        self.messages, current_query=_user_text)
 
                 # [F2] 把 checkpoint 作为瞬态 system 消息插在最后一个
                 # user 消息之前 —— 不写回 self.messages。
@@ -639,9 +844,33 @@ class AgentExecutionMixin:
                     # Rebuild messages-to-send each iteration (self.messages
                     # may have grown with tool results from previous iteration).
                     # Dynamic context is appended at the end — keeps prefix stable.
+                    # Respect the /new slash cutoff if set (same pruning as iter 0).
                     if iteration > 0:
-                        _msgs_to_send = self._inject_dynamic_context(
-                            self.messages, current_query=_user_text)
+                        _cutoff = getattr(self, "_turn_skip_from_idx", None)
+                        if isinstance(_cutoff, int):
+                            _base = [m for m in self.messages
+                                     if (m or {}).get("role") == "system"]
+                            _base.extend(self.messages[_cutoff:])
+                            _msgs_to_send = self._inject_dynamic_context(
+                                _base, current_query=_user_text)
+                        else:
+                            _msgs_to_send = self._inject_dynamic_context(
+                                self.messages, current_query=_user_text)
+                    # Re-resolve provider/model at the top of every
+                    # iteration so a mid-turn dropdown change (UI writes
+                    # agent.provider / agent.model directly) takes effect
+                    # on the NEXT LLM call instead of being ignored for
+                    # the rest of the turn.
+                    _curr_prov, _curr_mdl = self._resolve_effective_provider_model(
+                        user_message=user_message)
+                    if _curr_prov != _eff_provider or _curr_mdl != _eff_model:
+                        logger.info(
+                            "Agent %s mid-turn LLM switch at iter %d: "
+                            "%s/%s → %s/%s",
+                            self.id[:8], iteration,
+                            _eff_provider, _eff_model,
+                            _curr_prov, _curr_mdl)
+                        _eff_provider, _eff_model = _curr_prov, _curr_mdl
                     # Strategy: always try streaming first (with tools).
                     # If the provider doesn't support streaming+tools,
                     # it falls back to non-streaming internally.
@@ -655,6 +884,7 @@ class AgentExecutionMixin:
                             gen = llm.chat(
                                 _msgs_to_send, tools=None, stream=True,
                                 provider=_eff_provider, model=_eff_model,
+                                temperature=self._effective_temperature(),
                             )
                             content = ""
                             for chunk in gen:
@@ -688,21 +918,81 @@ class AgentExecutionMixin:
                         response = llm.chat_no_stream(
                             _msgs_to_send, tools=tool_defs,
                             provider=_eff_provider, model=_eff_model,
+                            temperature=self._effective_temperature(),
                         )
-                    except (ConnectionError, OSError) as conn_err:
-                        # Provider unreachable — stop retrying immediately
-                        raise RuntimeError(
-                            f"LLM provider '{_eff_provider}' connection failed "
-                            f"(model={_eff_model}): {conn_err}"
-                        ) from conn_err
                     except Exception as llm_err:
-                        # Other LLM errors (timeout, auth, etc.)
-                        if "timeout" in str(llm_err).lower() or "timed out" in str(llm_err).lower():
-                            raise RuntimeError(
-                                f"LLM provider '{_eff_provider}' timed out "
-                                f"(model={_eff_model}): {llm_err}"
-                            ) from llm_err
-                        raise
+                        # Fallback path — if this agent has a fallback
+                        # LLM configured (extra_llms slot with
+                        # purpose/label='fallback'), retry ONCE with it
+                        # before bubbling the error up. This covers the
+                        # "primary LLM provider down / rate-limited /
+                        # auth expired mid-turn" case without requiring
+                        # the user to manually switch models.
+                        fb_prov, fb_mdl = self._resolve_fallback_llm()
+                        if fb_prov or fb_mdl:
+                            fb_prov = fb_prov or _eff_provider
+                            fb_mdl = fb_mdl or _eff_model
+                            if fb_prov == _eff_provider and fb_mdl == _eff_model:
+                                # Fallback is identical to primary — no
+                                # point retrying; classify + raise.
+                                _fallback_same = True
+                            else:
+                                _fallback_same = False
+                                logger.warning(
+                                    "Agent %s primary LLM %s/%s errored "
+                                    "(%s) → retrying once with fallback "
+                                    "%s/%s",
+                                    self.id[:8], _eff_provider, _eff_model,
+                                    str(llm_err)[:120], fb_prov, fb_mdl)
+                                if on_event:
+                                    try:
+                                        from .agent_types import AgentEvent as _AE
+                                        on_event(_AE(
+                                            time.time(), "message",
+                                            {"role": "system",
+                                             "content": (
+                                                 f"⚠️ 主 LLM 出错（{_eff_provider}/{_eff_model}），"
+                                                 f"自动切换备用 LLM（{fb_prov}/{fb_mdl}）重试一次。"
+                                             )}))
+                                    except Exception:
+                                        pass
+                                try:
+                                    response = llm.chat_no_stream(
+                                        _msgs_to_send, tools=tool_defs,
+                                        provider=fb_prov, model=fb_mdl,
+                                        temperature=self._effective_temperature(),
+                                    )
+                                    # Pin the fallback for the remaining
+                                    # iterations of this turn — once
+                                    # primary has failed, don't re-try it
+                                    # every iteration.
+                                    _eff_provider, _eff_model = fb_prov, fb_mdl
+                                    llm_err = None  # success
+                                except Exception as fb_err:
+                                    logger.error(
+                                        "Agent %s fallback LLM %s/%s also "
+                                        "failed: %s",
+                                        self.id[:8], fb_prov, fb_mdl,
+                                        str(fb_err)[:200])
+                                    llm_err = fb_err
+                        else:
+                            _fallback_same = False
+                        if llm_err is not None:
+                            # Classify + raise — preserve the original
+                            # ConnectionError / timeout detection so
+                            # upstream handlers can react correctly.
+                            if isinstance(llm_err, (ConnectionError, OSError)):
+                                raise RuntimeError(
+                                    f"LLM provider '{_eff_provider}' connection "
+                                    f"failed (model={_eff_model}): {llm_err}"
+                                ) from llm_err
+                            _msg = str(llm_err).lower()
+                            if "timeout" in _msg or "timed out" in _msg:
+                                raise RuntimeError(
+                                    f"LLM provider '{_eff_provider}' timed out "
+                                    f"(model={_eff_model}): {llm_err}"
+                                ) from llm_err
+                            raise llm_err
                     msg = response.get("message", {})
                     content = _ensure_str_content(msg.get("content"))
                     tool_calls = msg.get("tool_calls", [])
@@ -736,6 +1026,62 @@ class AgentExecutionMixin:
                                               "content": content or final_content,
                                               "_source": "llm"})
                         break
+
+                    # Duplicate-output detector: if this iteration's content
+                    # is near-identical to the previous iteration's content,
+                    # the LLM is stuck "re-narrating the plan" instead of
+                    # making progress based on prior tool_results. Inject a
+                    # corrective system message so the next iteration sees
+                    # explicit "stop repeating, commit to action" guidance.
+                    try:
+                        _prev = str(getattr(self, "_last_iter_content", "") or "")
+                        _curr = str(content or "")
+                        if _prev and _curr and len(_curr) > 40:
+                            _sim = _text_similarity(_prev, _curr)
+                            if _sim >= 0.85:
+                                _dup_count = int(getattr(
+                                    self, "_dup_iter_count", 0)) + 1
+                                self._dup_iter_count = _dup_count
+                                logger.warning(
+                                    "Agent %s: duplicate narration "
+                                    "detected (similarity=%.2f, dup#%d) — "
+                                    "injecting corrective meta",
+                                    self.id[:8], _sim, _dup_count)
+                                _corrective = (
+                                    "[SYSTEM] 你刚才这一轮的回复和上一轮几乎一模一样。"
+                                    "请不要再重复输出'我的计划 / 现在开始执行第一步'这类文字。"
+                                    "下一轮必须做下面之一：\n"
+                                    "  (a) 基于上一轮 tool_result 说出结论或下一步（例如"
+                                    "'上次搜索得到 X，我现在查 Y'）；\n"
+                                    "  (b) 调 plan_update(action='create_plan', ...) 把计划"
+                                    "固化（带 llm_purpose 字段），或 plan_update(complete_step);\n"
+                                    "  (c) 直接调下一个 tool（web_search / read_file / bash / mcp_call 等）。\n"
+                                    "禁止再用 Markdown checkbox 列计划当作输出。"
+                                )
+                                self.messages.append({
+                                    "role": "system",
+                                    "content": _corrective,
+                                    "_dynamic": True,
+                                    "_source": "dup_guard",
+                                })
+                                if _dup_count >= 3:
+                                    # Three consecutive duplicates — this
+                                    # LLM isn't going to break out. Give
+                                    # up this turn and surface the issue.
+                                    logger.error(
+                                        "Agent %s: 3 consecutive duplicates "
+                                        "— aborting turn", self.id[:8])
+                                    final_content = (
+                                        "⚠️ 检测到连续重复输出。已停止执行。"
+                                        "建议切换到更强的 LLM（配置云端 model 并勾选 auto_route），"
+                                        "或输入 /new 清空上下文重试。"
+                                    )
+                                    break
+                            else:
+                                self._dup_iter_count = 0
+                        self._last_iter_content = _curr
+                    except Exception as _dup_err:
+                        logger.debug("dup-guard skipped: %s", _dup_err)
 
                     assistant_msg: dict = {"role": "assistant",
                                            "content": content,
@@ -914,12 +1260,87 @@ class AgentExecutionMixin:
                                                      {"block": block}))
                                     result = self._execute_tool_with_policy(
                                         name, arguments, on_event=on_event)
+                            elif name == "emit_handoff":
+                                # Structured baton-pass between agents. Same
+                                # pattern as emit_ui_block — validate, emit a
+                                # typed 'handoff' event for the chat UI +
+                                # next-agent prompt injection, then run the
+                                # text-returning handler so the LLM sees the
+                                # confirmation in its own history.
+                                from .tools_split.ui import build_handoff_payload
+                                payload, err = build_handoff_payload(
+                                    summary=arguments.get("summary", ""),
+                                    deliverable_path=arguments.get("deliverable_path", ""),
+                                    highlights=arguments.get("highlights"),
+                                    followups=arguments.get("followups"),
+                                )
+                                if err:
+                                    result = err
+                                else:
+                                    from .agent_types import AgentEvent
+                                    _emit(AgentEvent(time.time(), "handoff",
+                                                     {"handoff": payload,
+                                                      "from_agent": getattr(self, "id", "")}))
+                                    result = self._execute_tool_with_policy(
+                                        name, arguments, on_event=on_event)
                             else:
                                 result = self._execute_tool_with_policy(
                                     name, arguments, on_event=on_event)
 
                             # Handle large results
                             result = self._handle_large_result(name, result)
+
+                            # ── Loop detection ──────────────────────────
+                            # If the SAME (tool_name, args_fingerprint, result_fingerprint)
+                            # triple repeats 3+ times in a row, the agent is stuck in a
+                            # retry loop that the LLM isn't breaking out of on its own
+                            # (observed: plan_update complete_step returning
+                            # {"ok": false, "step": null} ad infinitum).
+                            #
+                            # We don't KILL the turn — we REWRITE the returned string to
+                            # include a loud instruction telling the model to stop
+                            # repeating and try something different. This leverages the
+                            # LLM's own instruction-following rather than trying to second-
+                            # guess what action is right. If it STILL loops, budget
+                            # pressure + iteration cap will eventually stop it.
+                            try:
+                                _loop_sig = (
+                                    name,
+                                    hash(json.dumps(arguments, sort_keys=True,
+                                                    ensure_ascii=False, default=str)),
+                                    hash(str(result)[:500]),
+                                )
+                                _loop_hist = getattr(self, "_tool_loop_history", None)
+                                if _loop_hist is None:
+                                    _loop_hist = []
+                                    self._tool_loop_history = _loop_hist
+                                _loop_hist.append(_loop_sig)
+                                # Keep only the last 6 entries — enough to detect a run
+                                # of 3 identical calls with some slack.
+                                if len(_loop_hist) > 6:
+                                    del _loop_hist[0:len(_loop_hist) - 6]
+                                # Count how many of the last N entries match this one.
+                                _recent_same = sum(
+                                    1 for s in _loop_hist[-4:] if s == _loop_sig
+                                )
+                                if _recent_same >= 3:
+                                    _loop_nudge = (
+                                        "\n\n⚠️ LOOP DETECTED: You've called this tool "
+                                        "with the same arguments 3 times and gotten the "
+                                        "same result. STOP repeating this call. Either "
+                                        "(a) use different arguments, (b) switch to a "
+                                        "different tool, or (c) if the result says the "
+                                        "action is already done / not needed, treat the "
+                                        "step as complete and move on."
+                                    )
+                                    if isinstance(result, str):
+                                        result = result + _loop_nudge
+                                    else:
+                                        result = str(result) + _loop_nudge
+                                    # Reset history so we don't nudge every subsequent call.
+                                    self._tool_loop_history = []
+                            except Exception:
+                                pass
 
                             results.append((name, result, call_id))
 
@@ -1100,6 +1521,34 @@ class AgentExecutionMixin:
                 pass
 
             self._auto_save_check()  # Auto-save after each chat turn
+
+            # ── Emergency fix: stale step detector ─────────────────
+            # A common failure mode: LLM's last turn returned pure prose
+            # (no complete_step / fail_step tool call) so the chat loop
+            # exits with `status = IDLE` while a plan step is still
+            # IN_PROGRESS. User sees "step generating report..." for
+            # 10+ minutes even though nothing is actually running.
+            #
+            # We do NOT auto-mutate step state (per user rule (a) —
+            # mark_failed/skip/resume is a human decision). We only
+            # emit a step_stale frame to ProgressBus so the UI shows
+            # a yellow warning with the three manual buttons.
+            try:
+                self._detect_stale_plan_steps(threshold_s=120.0,
+                                               emit_frames=True)
+            except Exception as _stale_err:
+                logger.debug("stale step detection skipped: %s", _stale_err)
+
+            # Clear abort-registry state for this agent before returning
+            # so a stale "aborted=True" from a previous user-abort doesn't
+            # persist into the next chat turn. bash subprocesses
+            # launched in this turn already cleaned their own pid
+            # registrations in their finally blocks.
+            try:
+                _ar.clear(_abort_key)
+                _ar._current_key.key = ""
+            except Exception:
+                pass
             return final_content
 
     def chat_async(self, user_message, source: str = "admin") -> Any:  # ChatTask
@@ -1116,6 +1565,7 @@ class AgentExecutionMixin:
         arrived — that would destroy in-flight work.
         """
         from .chat_task import get_chat_task_manager, ChatTaskStatus
+        from .agent_types import AgentStatus
         mgr = get_chat_task_manager()
         # Detect any in-flight task for this agent
         active_states = (ChatTaskStatus.THINKING,
@@ -1123,11 +1573,37 @@ class AgentExecutionMixin:
                          ChatTaskStatus.TOOL_EXEC,
                          ChatTaskStatus.QUEUED,
                          ChatTaskStatus.WAITING_APPROVAL)
+        # Invariant: while a chat loop is running, self.status != IDLE.
+        # So if the agent is IDLE *and* some ChatTask still claims an
+        # active state, that task is a ghost — a previous turn crashed,
+        # the server restarted mid-turn, or a WebSocket dropped without
+        # the terminal-state transition landing. Sweep the ghosts so
+        # new messages don't queue behind them forever.
+        agent_is_idle = (getattr(self, "status", None) == AgentStatus.IDLE)
         has_active = False
         for existing_task in mgr.get_agent_tasks(self.id):
-            if existing_task.status in active_states:
-                has_active = True
-                break
+            if existing_task.status not in active_states:
+                continue
+            if agent_is_idle:
+                try:
+                    existing_task.error = (
+                        "ghost task: agent is IDLE but this task claimed "
+                        "an active state. Marked FAILED at new-message arrival.")
+                    existing_task.set_status(
+                        ChatTaskStatus.FAILED,
+                        phase="stale (agent IDLE)",
+                    )
+                    logger.warning(
+                        "chat_async: swept ghost task %s for agent %s "
+                        "(was %s, agent is IDLE)",
+                        existing_task.id, self.id[:8],
+                        existing_task.status.value)
+                except Exception as e:
+                    logger.debug("ghost sweep failed for %s: %s",
+                                 existing_task.id, e)
+                continue
+            has_active = True
+            break
         # Extract text for task display (create_task expects string)
         _task_display = (
             _ensure_str_content(user_message)
@@ -1164,6 +1640,10 @@ class AgentExecutionMixin:
             try:
                 from . import llm
                 # Show which provider/model is being used
+                # User-facing label stays clean ("发言中…"). Model + provider
+                # are still resolved for internal logging below, but not
+                # shown in the progress bar — the header dropdown already
+                # displays which model is active.
                 _prov_name = self.provider or "default"
                 _mdl_name = self.model or "default"
                 try:
@@ -1173,10 +1653,8 @@ class AgentExecutionMixin:
                         _prov_name = f"{entry.name} ({entry.kind})"
                 except Exception:
                     pass
-                task.set_status(ChatTaskStatus.THINKING,
-                                f"🧠 Thinking... ({_mdl_name})", 10)
-                task.push_event({"type": "thinking",
-                                 "content": f"🧠 Thinking... ({_mdl_name})"})
+                task.set_status(ChatTaskStatus.THINKING, "发言中…", 10)
+                task.push_event({"type": "thinking", "content": "发言中…"})
 
                 _tool_count = [0]  # track tool iterations for progress
 

@@ -600,6 +600,241 @@ class MemoryManager:
         ).fetchone()
         return row["cnt"] if row else 0
 
+    # ==================================================================
+    # L3 upsert / refresh — similarity-gated write (新 A)
+    # ==================================================================
+
+    @staticmethod
+    def _char_bigrams(s: str) -> set[str]:
+        """Normalized char bigrams used for the non-vector fallback
+        similarity. Lowercase, whitespace collapsed, 2-char sliding window.
+        Good enough to detect "same fact, different wording" (~0.7+ on
+        paraphrases) without an LLM or embeddings."""
+        if not s:
+            return set()
+        s = " ".join(s.lower().split())
+        if len(s) < 2:
+            return {s}
+        return {s[i:i+2] for i in range(len(s) - 1)}
+
+    @classmethod
+    def _bigram_similarity(cls, a: str, b: str) -> float:
+        """Jaccard on char-bigrams. 1.0 = identical, 0 = disjoint."""
+        A = cls._char_bigrams(a)
+        B = cls._char_bigrams(b)
+        if not A or not B:
+            return 0.0
+        inter = len(A & B)
+        union = len(A | B)
+        return inter / union if union else 0.0
+
+    def find_similar_fact(self,
+                          agent_id: str,
+                          content: str,
+                          category: str = "",
+                          threshold: float = 0.75,
+                          top_k: int = 5) -> tuple["SemanticFact | None", float]:
+        """Find the single most-similar existing fact for this (agent_id,
+        content [, category]) tuple. Returns ``(fact, score)`` if score ≥
+        threshold, else ``(None, best_score)``.
+
+        Uses vector search when available, with a deterministic
+        char-bigram-Jaccard fallback (agrees with vector sim to ~±0.1 for
+        Chinese text paraphrases — good enough for refresh-vs-insert
+        gating without a GPU).
+        """
+        if not content or not agent_id:
+            return None, 0.0
+        # ChromaDB returns 'distance' (lower = closer); we derive a
+        # [0,1] similarity from it. Fall back to FTS-based candidate
+        # gathering when the vector layer isn't available.
+        candidates: list[tuple[SemanticFact, float]] = []
+        used_vector = False
+        try:
+            if self._check_chromadb_available():
+                used_vector = True
+                coll = self._get_chroma_collection("memory_facts")
+                if coll.count() > 0:
+                    where_filter = {"agent_id": agent_id}
+                    if category:
+                        where_filter = {"$and": [
+                            {"agent_id": agent_id},
+                            {"category": category},
+                        ]}
+                    results = coll.query(
+                        query_texts=[content],
+                        n_results=min(top_k, 50),
+                        where=where_filter,
+                    )
+                    ids = (results.get("ids") or [[]])[0]
+                    docs = (results.get("documents") or [[]])[0]
+                    dists = (results.get("distances") or [[]])[0]
+                    metas = (results.get("metadatas") or [[]])[0]
+                    for i, fid in enumerate(ids):
+                        dist = float(dists[i]) if i < len(dists) else 1.0
+                        # cosine distance ∈ [0,2]; scale to sim ∈ [0,1].
+                        sim = max(0.0, 1.0 - (dist / 2.0))
+                        meta = metas[i] if i < len(metas) else {}
+                        doc = docs[i] if i < len(docs) else ""
+                        f = SemanticFact(
+                            id=fid, agent_id=agent_id,
+                            category=meta.get("category", category or "general"),
+                            content=doc,
+                            source=meta.get("source", ""),
+                            confidence=meta.get("confidence", 1.0),
+                            created_at=meta.get("created_at", 0.0),
+                        )
+                        candidates.append((f, sim))
+        except Exception as e:
+            logger.debug("vector similarity probe failed, falling back: %s", e)
+            used_vector = False
+
+        if not candidates:
+            # FTS5-based candidates; score with bigram-Jaccard
+            try:
+                pool = self.search_facts(
+                    agent_id, content,
+                    top_k=max(top_k, 5), category=category,
+                )
+            except Exception:
+                pool = []
+            if not pool:
+                pool = self.get_recent_facts(
+                    agent_id, limit=max(top_k, 5), category=category,
+                )
+            for f in pool:
+                sim = self._bigram_similarity(content, f.content)
+                candidates.append((f, sim))
+
+        if not candidates:
+            return None, 0.0
+
+        # Pick highest sim, optionally filtered by category.
+        if category:
+            candidates = [c for c in candidates if c[0].category == category] or candidates
+        best_f, best_s = max(candidates, key=lambda x: x[1])
+        if best_s >= threshold:
+            return best_f, best_s
+        return None, best_s
+
+    def upsert_fact(self,
+                    fact: SemanticFact,
+                    *,
+                    threshold: float = 0.75,
+                    prefer_category_match: bool = True) -> dict:
+        """Similarity-gated write.
+
+        If a fact with similarity ≥ ``threshold`` (and, when
+        ``prefer_category_match``, the same category) already exists,
+        the existing row is REFRESHED in place — content / source /
+        confidence / updated_at all moved to the new values, but the
+        original ``id`` and ``created_at`` are preserved. Otherwise a
+        new fact is inserted.
+
+        Returns a dict::
+
+            {"action": "updated" | "inserted" | "unchanged",
+             "id":          <fact id>,
+             "similarity":  <best match score>,
+             "matched_id":  <prior id if updated>,
+             "previous":    <prior content if updated, truncated>}
+
+        The "unchanged" branch fires when the new content is byte-equal
+        to the matched one — cheap no-op so repeated saves don't churn
+        timestamps.
+        """
+        if not fact.content or not fact.agent_id:
+            raise ValueError("fact.content and fact.agent_id are required")
+
+        category_for_search = fact.category if prefer_category_match else ""
+        matched, score = self.find_similar_fact(
+            agent_id=fact.agent_id,
+            content=fact.content,
+            category=category_for_search,
+            threshold=threshold,
+        )
+
+        if matched is not None:
+            # No-op when content is exactly the same.
+            if matched.content.strip() == fact.content.strip():
+                return {
+                    "action": "unchanged",
+                    "id": matched.id,
+                    "similarity": round(score, 3),
+                    "matched_id": matched.id,
+                    "previous": matched.content[:200],
+                }
+            # Refresh in place (historical memory may have been wrong).
+            refreshed = SemanticFact(
+                id=matched.id,
+                agent_id=matched.agent_id,
+                category=fact.category or matched.category,
+                content=fact.content,
+                source=(
+                    f"refreshed (was {matched.id[:8]}, sim={score:.2f})"
+                    + (f"; {fact.source}" if fact.source else "")
+                ),
+                confidence=fact.confidence,
+                created_at=matched.created_at,   # preserve
+                updated_at=time.time(),
+            )
+            self.save_fact(refreshed, preserve_timestamps=True)
+            return {
+                "action": "updated",
+                "id": matched.id,
+                "similarity": round(score, 3),
+                "matched_id": matched.id,
+                "previous": matched.content[:200],
+            }
+
+        # Distinct enough — insert new.
+        self.save_fact(fact)
+        return {
+            "action": "inserted",
+            "id": fact.id,
+            "similarity": round(score, 3),
+            "matched_id": "",
+            "previous": "",
+        }
+
+    def recall(self, agent_id: str, query: str, *,
+               top_k: int = 5, category: str = "",
+               prefer_vector: bool = True) -> list[dict]:
+        """High-level read API. Returns a flat list of dicts ready for
+        UI / LLM tool consumption (no SemanticFact class leak):
+
+            [{"id": ..., "category": ..., "content": ...,
+              "confidence": ..., "updated_at": ..., "age_days": ...}]
+
+        Prefers vector search when available, falls back to FTS5.
+        """
+        if not agent_id or not query:
+            return []
+        facts: list[SemanticFact] = []
+        if prefer_vector and self._check_chromadb_available():
+            try:
+                facts = self.search_facts_vector(
+                    agent_id, query, top_k=top_k, category=category)
+            except Exception as e:
+                logger.debug("recall vector failed: %s", e)
+        if not facts:
+            facts = self.search_facts(
+                agent_id, query, top_k=top_k, category=category)
+        now = time.time()
+        out: list[dict] = []
+        for f in facts:
+            age_s = now - (f.updated_at or f.created_at or now)
+            out.append({
+                "id": f.id,
+                "category": f.category,
+                "content": f.content,
+                "confidence": round(f.confidence, 2),
+                "source": f.source or "",
+                "updated_at": f.updated_at,
+                "age_days": round(age_s / 86400.0, 1),
+            })
+        return out
+
     def delete_fact(self, fact_id: str):
         with self._rlock:
             self._conn.execute(

@@ -39,6 +39,13 @@ class PromptPack:
     tags: list[str] = field(default_factory=list)
     path: str = ""                # filesystem path to SKILL.md
     content: str = ""             # full SKILL.md content (cached)
+    # Short injection-friendly summary (~300-500 chars / ~100 tokens).
+    # Optional — if empty, build_context_injection auto-derives one from
+    # description + headings + first-section preview. This is the
+    # token-diet lever for system-prompt injection: we prefer `summary`
+    # over `content` so each granted skill costs ~100 tokens, not
+    # ~3000 tokens of full body.
+    summary: str = ""
     is_active: bool = True
     # Quality metrics
     total_selections: int = 0     # times selected for injection
@@ -76,6 +83,7 @@ class PromptPack:
             "category": self.category,
             "tags": self.tags,
             "path": self.path,
+            "summary": self.summary,
             "is_active": self.is_active,
             "total_selections": self.total_selections,
             "total_applied": self.total_applied,
@@ -100,6 +108,7 @@ class PromptPack:
             category=d.get("category", "general"),
             tags=d.get("tags", []),
             path=d.get("path", ""),
+            summary=d.get("summary", ""),
             is_active=d.get("is_active", True),
             total_selections=d.get("total_selections", 0),
             total_applied=d.get("total_applied", 0),
@@ -495,23 +504,95 @@ class PromptPackRegistry:
 
         return results
 
+    # ── auto-summary derivation ────────────────────────────────────
+    @staticmethod
+    def _derive_summary(content: str, max_chars: int = 500) -> str:
+        """Cheap heuristic summary for a SKILL.md body.
+
+        Extracts: top-level headings (up to 6) + the first paragraph
+        after the first heading. No LLM call; this runs at injection
+        time and costs nothing. The result is capped to ``max_chars``
+        so the injected block stays predictable.
+        """
+        if not content:
+            return ""
+        # Strip frontmatter.
+        fm = _FRONTMATTER_RE.match(content)
+        body = content[fm.end():] if fm else content
+        lines = body.splitlines()
+
+        # Pass 1: collect up to 6 top-level headings.
+        headings: list[str] = []
+        for line in lines:
+            s = line.rstrip()
+            if s.startswith("#") and not s.startswith("#!/"):
+                headings.append(s)
+                if len(headings) >= 6:
+                    break
+
+        # Pass 2: first non-empty paragraph after the first heading.
+        first_para: list[str] = []
+        saw_first_heading = False
+        para_chars = 0
+        for line in lines:
+            s = line.rstrip()
+            if not saw_first_heading:
+                if s.startswith("#") and not s.startswith("#!/"):
+                    saw_first_heading = True
+                continue
+            if s.startswith("#"):
+                continue   # skip subsequent headings
+            if not s:
+                if first_para:      # blank line ends the paragraph
+                    break
+                continue
+            first_para.append(s)
+            para_chars += len(s)
+            if para_chars > 200:
+                break
+
+        pieces: list[str] = []
+        if headings:
+            pieces.append("Sections: " + " / ".join(
+                h.lstrip("#").strip() for h in headings))
+        if first_para:
+            pieces.append(" ".join(first_para))
+        out = "\n".join(pieces)
+        if len(out) > max_chars:
+            out = out[:max_chars].rstrip() + "…"
+        return out
+
     def build_context_injection(self, skill_ids: list[str],
-                                max_chars: int = 20000) -> str:
+                                max_chars: int = 5000,
+                                full_body: bool = False) -> str:
         """
         Build a formatted context string to inject into agent system prompt.
 
+        Default behavior (token-friendly): inject per-skill SUMMARY, not
+        full body. Agent can call get_skill_guide(name, brief=false) if it
+        needs the full guide.
+
+        Pass ``full_body=True`` to restore legacy behavior (full content
+        up to max_chars). Default ``max_chars`` was lowered from 20000 to
+        5000 since we now ship summaries — 5k is plenty for 5-6 skills.
+
         Format:
-            ## 可用技能参考 (Skills)
+            ## 可用技能参考 (Skills) [summary mode]
 
             ### [Skill Name]
-            (skill content, truncated to fit)
-
+            > description
+            Sections: ...
+            first-paragraph preview...
             ---
         """
         if not skill_ids:
             return ""
 
-        parts = ["## 可用技能参考 (Skills)\n"]
+        mode_tag = "[summary mode — agent 若需详情请调用 get_skill_guide(name, brief=false)]"
+        if full_body:
+            mode_tag = ""
+
+        parts = ["## 可用技能参考 (Skills)" + (" " + mode_tag if mode_tag else "") + "\n"]
         parts.append("以下是与当前任务相关的技能指南。请参考这些指南来完成任务，")
         parts.append("但如果指南不适用，可以忽略并使用自己的判断。\n")
 
@@ -532,12 +613,25 @@ class PromptPackRegistry:
                 header += f"\n> {record.description}"
             header += f"\n> 技能ID: `{record.skill_id}` | 分类: {record.category}\n\n"
 
-            # Truncate content to fit budget
-            content = record.content
-            # Strip frontmatter for injection
-            fm_match = _FRONTMATTER_RE.match(content)
-            if fm_match:
-                content = content[fm_match.end():]
+            if full_body:
+                # Legacy: inject full body (large).
+                content = record.content
+                fm_match = _FRONTMATTER_RE.match(content)
+                if fm_match:
+                    content = content[fm_match.end():]
+            else:
+                # Default: prefer pre-written summary; else derive one.
+                content = (record.summary or "").strip()
+                if not content:
+                    content = self._derive_summary(record.content,
+                                                   max_chars=500)
+                if not content:
+                    # Last-resort: 300-char head preview.
+                    raw = record.content
+                    fm_match = _FRONTMATTER_RE.match(raw)
+                    if fm_match:
+                        raw = raw[fm_match.end():]
+                    content = raw[:300] + ("…" if len(raw) > 300 else "")
 
             remaining = max_chars - total_chars - len(header) - 50
             if remaining <= 0:

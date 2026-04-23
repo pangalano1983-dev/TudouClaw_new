@@ -459,14 +459,34 @@ async function refresh() {
     } catch(e) {
       _adminCtx = { user_id: '', username: 'admin', role: 'superAdmin', display_name: 'Admin', agent_ids: [], is_super: true };
     }
+    // Mirror onto window so _isSuperAdmin() / _isAdmin() / _isUser()
+    // helpers work from anywhere without plumbing _adminCtx through.
+    // NB: store under _currentRole / _currentUid (NOT _currentUserRole)
+    // because a function _currentUserRole() reads this and a same-named
+    // string would shadow it — crashed Settings page with "is not a
+    // function". Same reason we keep function names and state names
+    // clearly distinct here.
+    window._currentRole = _adminCtx.role || '';
+    window._currentUid  = _adminCtx.user_id || '';
     // Update sidebar footer with admin info
     var footerUser = document.getElementById('footer-username');
     var footerRole = document.getElementById('footer-role');
     if (footerUser) footerUser.textContent = _adminCtx.display_name || _adminCtx.username || 'admin';
-    if (footerRole) { footerRole.textContent = _adminCtx.role || 'admin'; footerRole.style.background = _adminCtx.is_super ? 'rgba(203,201,255,0.15)' : 'rgba(63,185,80,0.15)'; footerRole.style.color = _adminCtx.is_super ? 'var(--primary)' : 'var(--success)'; }
-    // Show/hide admin management nav
-    var adminNav = document.getElementById('nav-admin-manage');
-    if (adminNav) adminNav.style.display = _adminCtx.is_super ? '' : 'none';
+    if (footerRole) { footerRole.textContent = _adminCtx.role || 'admin'; footerRole.style.background = _adminCtx.is_super ? 'var(--primary-tint-15)' : 'rgba(63,185,80,0.15)'; footerRole.style.color = _adminCtx.is_super ? 'var(--primary)' : 'var(--success)'; }
+    // Admin management has been merged into Settings → 用户管理.
+    // The old standalone nav item was removed; no legacy element to
+    // show/hide here anymore.
+
+    // Role-based sidebar filter. Regular users can only work with
+    // their own agents — anything else is clutter. Hide tools/approvals,
+    // integrations, system settings for role=user. Backend still rejects
+    // any direct API calls to these via permission checks.
+    if (_adminCtx.role === 'user') {
+      ['projects', 'tools-approvals', 'integrations', 'settings-hub'].forEach(function(view) {
+        var item = document.querySelector('.nav-item[data-view="' + view + '"]');
+        if (item) item.style.display = 'none';
+      });
+    }
     // Show change password button for logged-in admin users
     var changePwBtn = document.getElementById('btn-change-pw');
     if (changePwBtn) changePwBtn.style.display = _adminCtx.user_id ? '' : 'none';
@@ -594,7 +614,7 @@ function _renderResumeBannerRow(task) {
   var progress = _bannerRowProgress(task);
   return '<div style="display:flex;justify-content:space-between;' +
     'align-items:center;gap:8px;padding:6px 0;' +
-    'border-top:1px solid rgba(255,255,255,0.05)">' +
+    'border-top:1px solid var(--overlay-5)">' +
       '<div style="flex:1;min-width:0">' +
         '<div style="color:var(--text);font-weight:600;' +
           'overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
@@ -728,15 +748,22 @@ function renderCurrentView() {
   try {
   switch(currentView) {
     case 'dashboard': {
-      titleEl.textContent = 'Overview';
-      actionsEl.innerHTML = '<span style="font-size:11px;color:var(--text3);margin-right:8px">Tudou Claws v0.1</span><span style="padding:3px 8px;background:rgba(203,201,255,0.1);color:var(--primary);border-radius:4px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px">Active</span>';
+      titleEl.textContent = t('page.dashboard', 'Overview');
+      actionsEl.innerHTML = '<span style="font-size:11px;color:var(--text3);margin-right:8px">Tudou Claws v0.1</span><span style="padding:3px 8px;background:var(--primary-tint-10);color:var(--primary);border-radius:4px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px">Active</span>';
       renderDashboard();
       break;
     }
     case 'agent': {
       var agentObj = agents.find(function(a){ return a.id === currentAgent; });
       titleEl.textContent = agentObj ? (agentObj.role||'general') + '-' + agentObj.name : 'Agent';
-      actionsEl.innerHTML = '<button class="btn btn-ghost btn-sm" onclick="editAgentProfile(\''+currentAgent+'\')"><span class="material-symbols-outlined" style="font-size:16px">edit</span> Settings</button><button class="btn btn-ghost btn-sm" onclick="clearAgent(\''+currentAgent+'\')"><span class="material-symbols-outlined" style="font-size:16px">delete_sweep</span> Clear Chat</button><button class="btn btn-danger btn-sm" onclick="deleteAgent(\''+currentAgent+'\')"><span class="material-symbols-outlined" style="font-size:16px">delete</span> Delete</button>';
+      actionsEl.innerHTML =
+          '<button class="btn btn-ghost btn-sm" onclick="editAgentProfile(\''+currentAgent+'\')"><span class="material-symbols-outlined" style="font-size:16px">edit</span> Settings</button>'
+        + '<button class="btn btn-ghost btn-sm" id="agent-inbox-btn" onclick="_showAgentInboxModal(\''+currentAgent+'\')"><span class="material-symbols-outlined" style="font-size:16px">inbox</span> ' + window.t('chat.inbox', '收件箱') + '<span class="badge notification hidden" id="agent-inbox-btn-badge" style="margin-left:6px">0</span></button>'
+        + '<button class="btn btn-ghost btn-sm" id="agent-ckpt-btn" onclick="_showAgentCheckpointsModal(\''+currentAgent+'\')"><span class="material-symbols-outlined" style="font-size:16px">bookmark</span> ' + window.t('chat.checkpoints', '检查点') + '<span class="badge notification hidden" id="agent-ckpt-btn-badge" style="margin-left:6px">0</span></button>'
+        + '<button class="btn btn-ghost btn-sm" onclick="clearAgent(\''+currentAgent+'\')"><span class="material-symbols-outlined" style="font-size:16px">delete_sweep</span> Clear Chat</button>'
+        + '<button class="btn btn-danger btn-sm" onclick="deleteAgent(\''+currentAgent+'\')"><span class="material-symbols-outlined" style="font-size:16px">delete</span> Delete</button>';
+      // Refresh per-agent inbox + checkpoint counts on the buttons.
+      try { _refreshAgentHeaderCounts(currentAgent); } catch(_){}
       // PERF/UX: if the chat DOM for this agent is already mounted, skip the full
       // re-render so we don't wipe streaming bubbles / approval cards / input focus.
       // Partial refreshers (loadAgentEventLog, loadExecutionSteps, loadAgentRuntimeStats)
@@ -754,71 +781,72 @@ function renderCurrentView() {
       break;
     }
     case 'nodes': {
-      titleEl.textContent = 'Nodes';
-      actionsEl.innerHTML = '<button class="btn btn-primary btn-sm" onclick="showModal(\'add-node\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> Connect Node</button>';
+      titleEl.textContent = t('page.nodes', 'Nodes');
+      // Topbar-actions "+ Connect Node" button removed per design pass.
+      actionsEl.innerHTML = '';
       renderNodes();
       break;
     }
     case 'messages': {
-      titleEl.textContent = 'Messages';
+      titleEl.textContent = t('page.messages', 'Messages');
       renderMessages();
       break;
     }
     case 'channels': {
-      titleEl.textContent = 'Channels';
+      titleEl.textContent = t('page.channels', 'Channels');
       actionsEl.innerHTML = '<button class="btn btn-primary btn-sm" onclick="showModal(\'add-channel\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> Add Channel</button>';
       renderChannels();
       break;
     }
     case 'approvals': {
-      titleEl.textContent = 'Tool Approvals & Policies';
+      titleEl.textContent = t('nav.toolsApprovals', 'Tool Approvals & Policies');
       renderApprovals();
       break;
     }
     case 'audit': {
-      titleEl.textContent = 'Audit Log';
+      titleEl.textContent = t('page.auditLog', 'Audit Log');
       renderAudit();
       break;
     }
     case 'providers': {
-      titleEl.textContent = 'LLM Providers';
+      titleEl.textContent = t('page.llmProviders', 'LLM Providers');
       renderProviders();
       break;
     }
     case 'tokens': {
-      titleEl.textContent = 'API Tokens';
+      titleEl.textContent = t('page.apiTokens', 'API Tokens');
       renderTokens();
       break;
     }
     case 'config': {
-      titleEl.textContent = 'Configuration';
+      titleEl.textContent = t('page.config', 'Configuration');
       renderConfig();
       break;
     }
     case 'nodeconfig': {
-      titleEl.textContent = 'Node Configuration';
+      titleEl.textContent = t('page.nodeConfig', 'Node Configuration');
       renderNodeConfig();
       break;
     }
     case 'templates': {
-      titleEl.textContent = '专业领域';
+      titleEl.textContent = t('nav.rolesSkills', '专业领域');
       renderTemplateLibrary();
       break;
     }
     case 'scheduler': {
-      titleEl.textContent = 'Scheduled Tasks';
+      titleEl.textContent = t('page.scheduled', 'Scheduled Tasks');
       actionsEl.innerHTML = '<button class="btn btn-primary btn-sm" onclick="showCreateJob()"><span class="material-symbols-outlined" style="font-size:16px">add</span> New Job</button>';
       renderScheduler();
       break;
     }
     case 'mcpconfig': {
-      titleEl.textContent = 'MCP Configuration';
+      titleEl.textContent = t('page.mcpConfig', 'MCP Configuration');
       actionsEl.innerHTML = '<button class="btn btn-primary btn-sm" onclick="showAddMCP()"><span class="material-symbols-outlined" style="font-size:16px">add</span> Add MCP</button>';
       renderMCPConfig();
       break;
     }
     case 'projects': {
-      titleEl.textContent = '项目与任务';
+      titleEl.textContent = t('nav.projects', '项目与任务');
       renderProjectsHub();
       break;
     }
@@ -828,55 +856,59 @@ function renderCurrentView() {
       break;
     }
     case 'workflows': {
-      titleEl.textContent = 'Workflows';
+      titleEl.textContent = t('page.workflows', 'Workflows');
       actionsEl.innerHTML = '<button class="btn btn-primary btn-sm" onclick="showCreateWorkflowModal()"><span class="material-symbols-outlined" style="font-size:16px">add</span> New Workflow</button>';
       renderWorkflows();
       break;
     }
     case 'self-improvement': {
-      titleEl.textContent = 'Agent Self-Improvement (自我改进)';
+      titleEl.textContent = t('page.selfImprove', 'Agent Self-Improvement (自我改进)');
       try { renderSelfImprovement(); } catch(re) { console.error('renderSelfImprovement error:', re); c.innerHTML = '<div style="color:var(--error);padding:20px">Self-Improvement render error: '+re.message+'</div>'; }
       break;
     }
     case 'agents-list': {
-      titleEl.textContent = 'Agents';
+      titleEl.textContent = t('nav.agents', 'Agents');
       actionsEl.innerHTML = '';
       renderAgentsList();
       break;
     }
+    // NOTE: 'inbox' / 'checkpoints' as top-level views were removed —
+    // they now live as modal buttons on the agent detail page,
+    // scoped to the currently-viewed agent.
     case 'settings': {
-      titleEl.textContent = 'Settings';
+      titleEl.textContent = t('nav.settings', 'Settings');
       renderSettingsPage();
       break;
     }
+    // 'admin-manage' view removed — users are now managed under
+    // Settings → 用户管理. Route any legacy links there.
     case 'admin-manage': {
-      titleEl.textContent = 'Admin Management';
-      renderAdminManage();
+      showView('settings-hub', null);
       break;
     }
     case 'knowledge-memory': {
-      titleEl.textContent = '知识与记忆';
+      titleEl.textContent = t('nav.knowledge', '知识与记忆');
       renderKnowledgeMemoryHub();
       break;
     }
     case 'roles-skills': {
-      titleEl.textContent = '角色与技能';
+      titleEl.textContent = t('nav.rolesSkills', '角色与技能');
       renderRolesSkillsHub();
       break;
     }
     case 'tools-approvals': {
-      titleEl.textContent = '工具与审批';
+      titleEl.textContent = t('nav.toolsApprovals', '工具与审批');
       renderToolsApprovalsHub();
       break;
     }
     case 'integrations': {
-      titleEl.textContent = '集成与通知';
+      titleEl.textContent = t('nav.integrations', '集成与通知');
       actionsEl.innerHTML = '<button class="btn btn-primary btn-sm" onclick="showModal(\'add-channel\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> Add Channel</button>';
       renderIntegrationsHub();
       break;
     }
     case 'settings-hub': {
-      titleEl.textContent = '系统设置';
+      titleEl.textContent = t('nav.settings', '系统设置');
       renderSettingsHub();
       break;
     }
@@ -1006,7 +1038,7 @@ function _renderAgentCard(a) {
   var statusColor = a.status === 'idle' ? '#3fb950' : a.status === 'busy' ? '#f0883e' : a.status === 'error' ? '#f85149' : 'var(--text3)';
   var statusLabel = a.status === 'idle' ? 'Idle' : a.status === 'busy' ? 'Busy' : a.status === 'error' ? 'Error' : (a.status || 'Unknown');
   var modelShort = (a.model || 'default').split('/').pop().substring(0, 20);
-  var roleBadge = a.role ? '<span style="padding:2px 6px;border-radius:4px;font-size:9px;font-weight:700;background:rgba(203,201,255,0.12);color:var(--primary);text-transform:uppercase;letter-spacing:0.3px">'+esc(a.role)+'</span>' : '';
+  var roleBadge = a.role ? '<span style="padding:2px 6px;border-radius:4px;font-size:9px;font-weight:700;background:var(--primary-tint-12);color:var(--primary);text-transform:uppercase;letter-spacing:0.3px">'+esc(a.role)+'</span>' : '';
   var depBadge = a.department ? '<span onclick="event.stopPropagation();editAgentDepartment(\''+a.id+'\',\''+esc(a.department).replace(/\'/g,"\\'")+'\')" title="点击修改部门" style="padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;background:rgba(245,158,11,0.12);color:#f59e0b;cursor:pointer">'+esc(a.department)+'</span>' : '<span onclick="event.stopPropagation();editAgentDepartment(\''+a.id+'\',\'\')" title="点击分配部门" style="padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;background:var(--surface3);color:var(--text3);cursor:pointer;border:1px dashed var(--border-light)">+ 部门</span>';
   // V1/V2 capability badge — starts as "V1", async upgrade to "V1+V2"
   // if the V2 shell exists. Skipped entirely when V2 mode is off to
@@ -1059,7 +1091,7 @@ function _renderDepartmentSummary(agentList) {
     return '<span style="display:inline-flex;align-items:center;gap:5px;padding:5px 11px;border-radius:14px;font-size:11px;background:rgba(245,158,11,0.12);color:#f59e0b;font-weight:600"><span>'+esc(e[0])+'</span><span style="background:rgba(245,158,11,0.25);padding:1px 7px;border-radius:10px;font-weight:700">'+e[1]+'</span></span>';
   }).join('');
   if (unassigned) {
-    chips += '<span style="display:inline-flex;align-items:center;gap:5px;padding:5px 11px;border-radius:14px;font-size:11px;background:var(--surface2);color:var(--text3);font-weight:600"><span>未分配</span><span style="background:rgba(255,255,255,0.08);padding:1px 7px;border-radius:10px;font-weight:700">'+unassigned+'</span></span>';
+    chips += '<span style="display:inline-flex;align-items:center;gap:5px;padding:5px 11px;border-radius:14px;font-size:11px;background:var(--surface2);color:var(--text3);font-weight:600"><span>未分配</span><span style="background:var(--overlay-8);padding:1px 7px;border-radius:10px;font-weight:700">'+unassigned+'</span></span>';
   }
   return '<div style="background:var(--surface);border:1px solid var(--border-light);border-radius:12px;padding:14px 16px;margin-bottom:16px">' +
     '<div style="display:flex;align-items:center;gap:6px;margin-bottom:10px"><span class="material-symbols-outlined" style="font-size:18px;color:#f59e0b">apartment</span><span style="font-size:12px;font-weight:700;color:var(--text);font-family:\'Plus Jakarta Sans\',sans-serif">按部门分布</span><span style="font-size:10px;color:var(--text3);margin-left:4px">'+entries.length+' 个部门 · 共 '+agentList.length+' 个 Agent</span></div>' +
@@ -1115,7 +1147,7 @@ function renderAgentsList() {
   var officeBtn = '<div style="display:flex;justify-content:flex-end;margin-bottom:16px"><button onclick="toggleAgentsOffice()" style="padding:8px 14px;border:1px solid var(--border);background:'+(isOfficeOpen?'var(--primary)':'var(--surface2)')+';color:'+(isOfficeOpen?'#fff':'var(--text)')+';font-size:12px;font-weight:600;cursor:pointer;border-radius:8px;display:flex;align-items:center;gap:6px;font-family:inherit"><span class="material-symbols-outlined" style="font-size:16px">apartment</span>AI Office</button></div>';
 
   c.innerHTML = officeBtn
-    + (isOfficeOpen ? '<div id="agents-office-wrap" style="height:360px;margin-bottom:16px;border:1px solid var(--border-light);border-radius:12px;overflow:hidden;background:#1a1a2e;position:relative"><canvas id="office-canvas" style="width:100%;height:100%;display:block"></canvas><div style="position:absolute;top:8px;left:16px;right:16px;display:flex;align-items:center;gap:6px;z-index:10"><span class="material-symbols-outlined" style="font-size:18px;color:var(--primary)">apartment</span><span style="font-family:monospace;font-size:11px;color:var(--primary);font-weight:800">AI AGENT OFFICE</span><span id="office-agent-count" style="font-size:10px;color:var(--text3);margin-left:auto;background:rgba(255,255,255,0.1);padding:2px 8px;border-radius:10px"></span></div></div>' : '')
+    + (isOfficeOpen ? '<div id="agents-office-wrap" style="height:360px;margin-bottom:16px;border:1px solid var(--border-light);border-radius:12px;overflow:hidden;background:#1a1a2e;position:relative"><canvas id="office-canvas" style="width:100%;height:100%;display:block"></canvas><div style="position:absolute;top:8px;left:16px;right:16px;display:flex;align-items:center;gap:6px;z-index:10"><span class="material-symbols-outlined" style="font-size:18px;color:var(--primary)">apartment</span><span style="font-family:monospace;font-size:11px;color:var(--primary);font-weight:800">AI AGENT OFFICE</span><span id="office-agent-count" style="font-size:10px;color:var(--text3);margin-left:auto;background:var(--overlay-10);padding:2px 8px;border-radius:10px"></span></div></div>' : '')
     + '<div id="agents-list-content"></div>';
   if (isOfficeOpen) {
     setTimeout(function(){ try { _initOfficeScene(); } catch(e) { console.error('office init failed:', e); } }, 0);
@@ -1296,7 +1328,7 @@ function renderDashboard() {
     <section style="display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin-bottom:24px">
       <div style="background:var(--surface);border-radius:12px;padding:16px;border:1px solid var(--border-light);text-align:center;cursor:pointer;transition:all 0.15s"
            onclick="_settingsSubTab='nodes';showView('settings',null)"
-           onmouseenter="this.style.borderColor='rgba(203,201,255,0.3)';this.style.transform='translateY(-2px)'"
+           onmouseenter="this.style.borderColor='var(--primary-tint-30)';this.style.transform='translateY(-2px)'"
            onmouseleave="this.style.borderColor='var(--border-light)';this.style.transform='none'">
         <div style="font-size:9px;color:var(--text3);text-transform:uppercase;font-weight:700;letter-spacing:1px;margin-bottom:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Agents</div>
         <div style="font-family:'Plus Jakarta Sans',sans-serif;font-size:28px;font-weight:800;color:var(--primary);line-height:1">${agents.length}</div>
@@ -1332,7 +1364,7 @@ function renderDashboard() {
       </div>
       <div style="background:var(--surface);border-radius:12px;padding:16px;border:1px solid var(--border-light);text-align:center;cursor:pointer;transition:all 0.15s"
            onclick="_settingsSubTab='providers';showView('settings',null)"
-           onmouseenter="this.style.borderColor='rgba(255,255,255,0.1)';this.style.transform='translateY(-2px)'"
+           onmouseenter="this.style.borderColor='var(--overlay-10)';this.style.transform='translateY(-2px)'"
            onmouseleave="this.style.borderColor='var(--border-light)';this.style.transform='none'">
         <div style="font-size:9px;color:var(--text3);text-transform:uppercase;font-weight:700;letter-spacing:1px;margin-bottom:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Tokens Total</div>
         <div style="font-family:'Plus Jakarta Sans',sans-serif;font-size:28px;font-weight:800;color:var(--text);line-height:1">${_dashFmtTokens(tokensTotal)}</div>
@@ -1340,7 +1372,7 @@ function renderDashboard() {
       </div>
       <div style="background:var(--surface);border-radius:12px;padding:16px;border:1px solid var(--border-light);text-align:center;cursor:pointer;transition:all 0.15s"
            onclick="showView('approvals',null)"
-           onmouseenter="this.style.borderColor='${pending>0?'rgba(210,153,34,0.3)':'rgba(255,255,255,0.1)'}';this.style.transform='translateY(-2px)'"
+           onmouseenter="this.style.borderColor='${pending>0?'rgba(210,153,34,0.3)':'var(--overlay-10)'}';this.style.transform='translateY(-2px)'"
            onmouseleave="this.style.borderColor='var(--border-light)';this.style.transform='none'">
         <div style="font-size:9px;color:var(--text3);text-transform:uppercase;font-weight:700;letter-spacing:1px;margin-bottom:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Approvals</div>
         <div style="font-family:'Plus Jakarta Sans',sans-serif;font-size:28px;font-weight:800;color:${pending>0?'var(--warning)':'var(--text)'};line-height:1">${pending}</div>
@@ -1363,7 +1395,7 @@ function renderDashboard() {
           return `
           <div style="background:var(--surface);padding:12px 14px;border-radius:10px;border:1px solid var(--border-light);cursor:pointer;transition:all 0.15s;display:flex;align-items:center;gap:10px;overflow:hidden"
                onclick="showAgentView('${a.id}',null)"
-               onmouseenter="this.style.borderColor='rgba(203,201,255,0.2)';this.style.transform='translateY(-1px)'"
+               onmouseenter="this.style.borderColor='var(--primary-tint-20)';this.style.transform='translateY(-1px)'"
                onmouseleave="this.style.borderColor='var(--border-light)';this.style.transform='none'">
             <img src="${robotSrc(a)}" style="width:32px;height:32px;border-radius:8px;flex-shrink:0;background:var(--surface3)" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
             <div style="width:32px;height:32px;border-radius:8px;background:var(--surface3);display:none;align-items:center;justify-content:center;flex-shrink:0">
@@ -1415,7 +1447,7 @@ function renderDashboard() {
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px" id="dashboard-modules">
         <div style="background:var(--surface);border-radius:10px;padding:18px;border:1px solid var(--border-light);cursor:pointer;transition:all 0.15s"
              onclick="showView('nodes',null)"
-             onmouseenter="this.style.borderColor='rgba(203,201,255,0.2)'" onmouseleave="this.style.borderColor='var(--border-light)'">
+             onmouseenter="this.style.borderColor='var(--primary-tint-20)'" onmouseleave="this.style.borderColor='var(--border-light)'">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
             <span class="material-symbols-outlined" style="font-size:18px;color:var(--primary);flex-shrink:0">hub</span>
             <span style="font-size:12px;font-weight:600">Nodes</span>
@@ -1425,7 +1457,7 @@ function renderDashboard() {
         </div>
         <div style="background:var(--surface);border-radius:10px;padding:18px;border:1px solid var(--border-light);cursor:pointer;transition:all 0.15s"
              onclick="showView('channels',null)"
-             onmouseenter="this.style.borderColor='rgba(203,201,255,0.2)'" onmouseleave="this.style.borderColor='var(--border-light)'">
+             onmouseenter="this.style.borderColor='var(--primary-tint-20)'" onmouseleave="this.style.borderColor='var(--border-light)'">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
             <span class="material-symbols-outlined" style="font-size:18px;color:var(--primary);flex-shrink:0">cable</span>
             <span style="font-size:12px;font-weight:600">Channels</span>
@@ -1435,7 +1467,7 @@ function renderDashboard() {
         </div>
         <div style="background:var(--surface);border-radius:10px;padding:18px;border:1px solid var(--border-light);cursor:pointer;transition:all 0.15s"
              onclick="showView('providers',null)"
-             onmouseenter="this.style.borderColor='rgba(203,201,255,0.2)'" onmouseleave="this.style.borderColor='var(--border-light)'">
+             onmouseenter="this.style.borderColor='var(--primary-tint-20)'" onmouseleave="this.style.borderColor='var(--border-light)'">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
             <span class="material-symbols-outlined" style="font-size:18px;color:var(--primary);flex-shrink:0">dns</span>
             <span style="font-size:12px;font-weight:600">Providers</span>
@@ -1445,7 +1477,7 @@ function renderDashboard() {
         </div>
         <div style="background:var(--surface);border-radius:10px;padding:18px;border:1px solid var(--border-light);cursor:pointer;transition:all 0.15s"
              onclick="showView('approvals',null)"
-             onmouseenter="this.style.borderColor='rgba(203,201,255,0.2)'" onmouseleave="this.style.borderColor='var(--border-light)'">
+             onmouseenter="this.style.borderColor='var(--primary-tint-20)'" onmouseleave="this.style.borderColor='var(--border-light)'">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
             <span class="material-symbols-outlined" style="font-size:18px;color:${pending>0?'var(--warning)':'var(--primary)'};flex-shrink:0">shield</span>
             <span style="font-size:12px;font-weight:600">Approvals</span>
@@ -1553,7 +1585,7 @@ function renderDashboard() {
             '<div style="display:flex;gap:6px;justify-content:flex-end;margin-top:8px">' +
               '<button onclick="reviewStep(\''+esc(it.proj_id)+'\',\''+esc(it.task_id)+'\',\''+esc(it.step.id)+'\',\'reject\')" style="font-size:11px;background:rgba(239,68,68,0.15);color:#ef4444;border:1px solid rgba(239,68,68,0.4);border-radius:4px;padding:4px 12px;cursor:pointer;font-weight:600">✗ 驳回</button>' +
               '<button onclick="reviewStep(\''+esc(it.proj_id)+'\',\''+esc(it.task_id)+'\',\''+esc(it.step.id)+'\',\'approve\')" style="font-size:11px;background:#22c55e;color:#000;border:none;border-radius:4px;padding:4px 14px;cursor:pointer;font-weight:700">✓ 通过</button>' +
-              '<button onclick="openProject(\''+esc(it.proj_id)+'\')" style="font-size:11px;background:transparent;color:var(--text3);border:1px solid rgba(255,255,255,0.1);border-radius:4px;padding:4px 10px;cursor:pointer">查看</button>' +
+              '<button onclick="openProject(\''+esc(it.proj_id)+'\')" style="font-size:11px;background:transparent;color:var(--text3);border:1px solid var(--overlay-10);border-radius:4px;padding:4px 10px;cursor:pointer">查看</button>' +
             '</div>' +
           '</div>';
         }).join('');
@@ -1577,7 +1609,7 @@ function renderDashboard() {
         return '<div style="width:26px;height:26px;border-radius:50%;background:var(--surface3);border:2px solid var(--bg);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800;color:var(--primary);margin-left:-6px" title="'+esc(ag?(ag.role+'-'+ag.name):m.agent_id)+'">'+esc(initial)+'</div>';
       }).join('');
       var extraMembers = memberCount > 5 ? '<div style="width:26px;height:26px;border-radius:50%;background:var(--surface3);border:2px solid var(--bg);display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:var(--text3);margin-left:-6px">+' + (memberCount-5) + '</div>' : '';
-      return '<div style="background:var(--surface);border-radius:14px;padding:20px;border:1px solid var(--border-light);cursor:pointer;transition:all 0.15s" onclick="openProject(\''+p.id+'\')" onmouseenter="this.style.borderColor=\'rgba(203,201,255,0.2)\';this.style.transform=\'translateY(-2px)\'" onmouseleave="this.style.borderColor=\'var(--border-light)\';this.style.transform=\'none\'">' +
+      return '<div style="background:var(--surface);border-radius:14px;padding:20px;border:1px solid var(--border-light);cursor:pointer;transition:all 0.15s" onclick="openProject(\''+p.id+'\')" onmouseenter="this.style.borderColor=\'var(--primary-tint-20)\';this.style.transform=\'translateY(-2px)\'" onmouseleave="this.style.borderColor=\'var(--border-light)\';this.style.transform=\'none\'">' +
         '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px">' +
           '<div>' +
             '<div style="font-size:15px;font-weight:700;letter-spacing:0.1px">' + esc(p.name) + '</div>' +
@@ -1634,22 +1666,23 @@ function renderAgentChat(agentId) {
       '<button class="btn btn-sm btn-primary" onclick="(document.getElementById(\'agent-quick-provider-' + agentId + '\')||{}).focus&&document.getElementById(\'agent-quick-provider-' + agentId + '\').focus()" ' +
         'style="font-size:11px">选择 LLM</button>' +
     '</div>';
-  var _inputPlaceholder = _hasLLM ? 'Direct Agent Tasking...' : '🚫 请先为该 Agent 选择 LLM';
+  var _inputPlaceholder = _hasLLM ? t('chat.placeholder', 'Direct Agent Tasking...') : '🚫 请先为该 Agent 选择 LLM';
   var _inputDisabledAttrs = _hasLLM ? '' : ' disabled aria-disabled="true"';
   var _inputDisabledStyle = _hasLLM ? '' : 'opacity:0.4;cursor:not-allowed;';
   c.innerHTML = '' +
     '<!-- Chat Section: 60% height -->' +
-    '<section style="display:flex;flex-direction:column;height:60%;flex-shrink:0;background:var(--surface);border-bottom:1px solid rgba(255,255,255,0.05);overflow:hidden;position:relative">' +
-      '<div style="padding:10px 20px;border-bottom:1px solid rgba(255,255,255,0.05);display:flex;justify-content:space-between;align-items:center;background:var(--bg2);backdrop-filter:blur(16px)">' +
+    '<section style="display:flex;flex-direction:column;height:60%;flex-shrink:0;background:var(--surface);border-bottom:1px solid var(--overlay-5);overflow:hidden;position:relative">' +
+      '<div style="padding:10px 20px;border-bottom:1px solid var(--overlay-5);display:flex;justify-content:space-between;align-items:center;background:var(--bg2);backdrop-filter:blur(16px)">' +
         '<div style="display:flex;align-items:center;gap:10px">' +
           '<img src="' + (ag.robot_avatar ? '/static/robots/'+ag.robot_avatar+'.svg' : '/static/robots/robot_'+agRole+'.svg') + '" style="width:28px;height:28px" onerror="this.outerHTML=\'<span class=material-symbols-outlined style=color:var(--primary);font-size:20px>smart_toy</span>\'">' +
           '<span style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:14px;font-weight:600">' + agDisplayName + '</span>' +
           // V1/V2 capability badge — async-upgraded if V2 shell exists.
           '<span id="chat-v1v2-badge-' + agentId + '" style="display:inline-flex;align-items:center;font-size:9px;padding:2px 6px;border-radius:4px;background:var(--surface3);color:var(--text3);font-weight:700;letter-spacing:0.3px">基础</span>' +
-          '<button class="btn btn-ghost btn-sm" onclick="showSoulEditor(\'' + agentId + '\')" title="Edit SOUL.md" style="padding:4px 8px;font-size:10px"><span class="material-symbols-outlined" style="font-size:14px">auto_awesome</span> SOUL</button>' +
-          '<button class="btn btn-ghost btn-sm" onclick="showThinkingPanel(\'' + agentId + '\')" title="Active Thinking" style="padding:4px 8px;font-size:10px"><span class="material-symbols-outlined" style="font-size:14px">psychology</span> Think</button>' +
+          '<button class="btn btn-ghost btn-sm" onclick="showSoulEditor(\'' + agentId + '\')" title="Edit SOUL.md" style="padding:4px 8px;font-size:10px"><span class="material-symbols-outlined" style="font-size:14px">auto_awesome</span> <span data-i18n="chat.soul">SOUL</span></button>' +
+          '<button class="btn btn-ghost btn-sm" onclick="showThinkingPanel(\'' + agentId + '\')" title="' + t('chat.think.tooltip') + '" style="padding:4px 8px;font-size:10px"><span class="material-symbols-outlined" style="font-size:14px">psychology</span> <span data-i18n="chat.think">Think</span></button>' +
           '<button id="tts-btn-' + agentId + '" class="btn btn-ghost btn-sm" onclick="_toggleTTS(\'' + agentId + '\')" title="自动朗读新消息 (Auto TTS)" style="padding:4px 8px;font-size:10px"><span class="material-symbols-outlined" style="font-size:14px;color:var(--text3)">volume_up</span></button>' +
-          '<button class="btn btn-ghost btn-sm" onclick="wakeAgent(\'' + agentId + '\')" title="唤醒：扫描所有项目里分配给该 agent 的未完成任务并继续执行" style="padding:4px 8px;font-size:10px"><span class="material-symbols-outlined" style="font-size:14px">notifications_active</span> Wake</button>' +
+          '<button class="btn btn-ghost btn-sm" onclick="wakeAgent(\'' + agentId + '\')" title="' + t('chat.wake.tooltip') + '" style="padding:4px 8px;font-size:10px"><span class="material-symbols-outlined" style="font-size:14px">notifications_active</span> <span data-i18n="chat.wake">Wake</span></button>' +
+          '<button id="rag-btn-' + agentId + '" class="btn btn-ghost btn-sm" onclick="_toggleRagOnly(\'' + agentId + '\')" title="' + t('chat.rag.off') + '" style="padding:4px 8px;font-size:10px"><span class="material-symbols-outlined" id="rag-icon-' + agentId + '" style="font-size:14px;color:var(--text3)">search</span> <span data-i18n="chat.rag">RAG</span></button>' +
         '</div>' +
         '<div style="display:flex;align-items:center;gap:10px">' +
           '<select id="agent-quick-provider-' + agentId + '" onchange="quickSwitchModel(\'' + agentId + '\')" style="padding:4px 8px;background:var(--surface3);border:1px solid var(--border);border-radius:6px;color:var(--text2);font-size:11px;max-width:120px"></select>' +
@@ -1659,15 +1692,16 @@ function renderAgentChat(agentId) {
       '</div>' +
       '<div class="chat-messages" id="chat-msgs-' + agentId + '" style="flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:14px"></div>' +
       _llmBannerHtml +
-      '<div style="padding:14px 20px;background:var(--bg2);border-top:1px solid rgba(255,255,255,0.05)">' +
+      '<div style="padding:14px 20px;background:var(--bg2);border-top:1px solid var(--overlay-5)">' +
         '<div id="agent-attach-preview-' + agentId + '" style="display:none;flex-wrap:wrap;gap:6px;padding:6px 10px;margin-bottom:6px"></div>' +
-        '<div style="display:flex;align-items:center;gap:10px;background:var(--surface3);padding:4px;border-radius:10px;border:1px solid rgba(255,255,255,0.05);' + _inputDisabledStyle + '">' +
+        '<div style="display:flex;align-items:center;gap:10px;background:var(--surface3);padding:4px;border-radius:10px;border:1px solid var(--overlay-5);' + _inputDisabledStyle + '">' +
           '<input id="chat-input-' + agentId + '" type="text" placeholder="' + _inputPlaceholder + '"' + _inputDisabledAttrs +
             ' style="flex:1;background:transparent;border:none;color:var(--text);font-size:14px;padding:10px 16px;outline:none"' +
             ' onkeydown="if(event.key===\'Enter\'&&!event.isComposing){event.preventDefault();sendAgentMsg(\'' + agentId + '\')}">' +
           '<input type="file" id="agent-file-input-' + agentId + '" multiple accept="image/*,.pdf,.doc,.docx,.pptx,.xlsx,.xls,.txt,.csv,.json,.yaml,.yml,.md,.py,.js,.ts,.html,.css" style="display:none" onchange="handleAgentAttach(\'' + agentId + '\',this)">' +
           '<button style="background:none;border:none;padding:6px;cursor:pointer;display:flex;align-items:center;justify-content:center;border-radius:6px;transition:background .15s" onclick="document.getElementById(\'agent-file-input-' + agentId + '\').click()" title="上传图片/文件"><span class="material-symbols-outlined" style="font-size:20px;color:var(--text3)">attach_file</span></button>' +
           '<button id="stt-btn-' + agentId + '" style="background:none;border:none;padding:6px;cursor:pointer;display:flex;align-items:center;justify-content:center;border-radius:6px;transition:background .15s" onclick="_toggleSTT(\'' + agentId + '\')" title="语音输入 (STT Microphone)"><span class="material-symbols-outlined" style="font-size:20px;color:var(--text3)">mic</span></button>' +
+          '<button style="background:none;border:none;padding:6px;cursor:pointer;display:flex;align-items:center;justify-content:center;border-radius:6px;transition:background .15s" onclick="agentAbort(\'' + agentId + '\')" title="强制终止当前对话 + kill 正在运行的子进程"><span class="material-symbols-outlined" style="font-size:20px;color:var(--error)">stop_circle</span></button>' +
           '<button style="background:var(--primary);border:none;padding:10px;border-radius:8px;cursor:pointer;display:flex;align-items:center;justify-content:center" onclick="sendAgentMsg(\'' + agentId + '\')"><span class="material-symbols-outlined" style="font-size:20px;color:#282572">send</span></button>' +
         '</div>' +
       '</div>' +
@@ -1676,9 +1710,9 @@ function renderAgentChat(agentId) {
     '<!-- Bottom Section: Task Execution + Logs -->' +
     '<section style="flex:1;overflow-y:auto;display:grid;grid-template-columns:12fr;gap:0">' +
       // --- Consolidated stat strip: 4 cards instead of 9 tofu blocks ---
-      '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;padding:16px 20px;border-bottom:1px solid rgba(255,255,255,0.05)">' +
+      '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;padding:16px 20px;border-bottom:1px solid var(--overlay-5)">' +
         // Card 1: Runtime — events / tasks / tokens / memory combined
-        '<div style="background:var(--surface);border-radius:10px;padding:14px 16px;border:1px solid rgba(255,255,255,0.05)">' +
+        '<div style="background:var(--surface);border-radius:10px;padding:14px 16px;border:1px solid var(--overlay-5)">' +
           '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">' +
             '<span style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.8px">Runtime</span>' +
             '<span class="material-symbols-outlined" style="font-size:18px;color:var(--primary)">analytics</span>' +
@@ -1687,19 +1721,19 @@ function renderAgentChat(agentId) {
             '<div><div style="color:var(--text3);font-size:9px;text-transform:uppercase;letter-spacing:0.5px">Events</div><div style="font-weight:700;font-size:15px;color:var(--text)">' + (ag.event_count||0) + '</div></div>' +
             '<div><div style="color:var(--text3);font-size:9px;text-transform:uppercase;letter-spacing:0.5px">Tasks</div><div style="font-weight:700;font-size:15px;color:var(--text)" id="agent-task-count-' + agentId + '">0</div></div>' +
             '<div title="LLM token usage (in / out)"><div style="color:var(--text3);font-size:9px;text-transform:uppercase;letter-spacing:0.5px">Tokens</div><div style="font-weight:600;font-size:11px;color:var(--text2)" id="agent-token-stats-' + agentId + '">— / —</div><div id="agent-token-calls-' + agentId + '" style="font-size:9px;color:var(--text3)">0 calls</div></div>' +
-            '<div title="记忆占动态上下文比例"><div style="color:var(--text3);font-size:9px;text-transform:uppercase;letter-spacing:0.5px">Memory</div><div style="font-weight:600;font-size:11px;color:var(--text2)" id="agent-memory-ratio-' + agentId + '">—</div><div style="height:3px;background:rgba(255,255,255,0.06);border-radius:2px;margin-top:3px;overflow:hidden"><div id="agent-memory-bar-' + agentId + '" style="height:100%;width:0%;background:linear-gradient(90deg,#a78bfa,#7c5cfa);transition:width .3s"></div></div></div>' +
+            '<div title="记忆占动态上下文比例"><div style="color:var(--text3);font-size:9px;text-transform:uppercase;letter-spacing:0.5px">Memory</div><div style="font-weight:600;font-size:11px;color:var(--text2)" id="agent-memory-ratio-' + agentId + '">—</div><div style="height:3px;background:var(--overlay-6);border-radius:2px;margin-top:3px;overflow:hidden"><div id="agent-memory-bar-' + agentId + '" style="height:100%;width:0%;background:linear-gradient(90deg,#a78bfa,#7c5cfa);transition:width .3s"></div></div></div>' +
           '</div>' +
         '</div>' +
         // Card 2: Model + 专业领域
-        '<div style="background:' + (ag.enhancement ? 'linear-gradient(135deg,var(--surface),rgba(203,201,255,0.08))' : 'var(--surface)') + ';border-radius:10px;padding:14px 16px;border:1px solid ' + (ag.enhancement ? 'rgba(203,201,255,0.3)' : 'rgba(255,255,255,0.05)') + ';cursor:pointer" onclick="showEnhancementPanel(\'' + agentId + '\')">' +
+        '<div style="background:' + (ag.enhancement ? 'linear-gradient(135deg,var(--surface),var(--primary-tint-8))' : 'var(--surface)') + ';border-radius:10px;padding:14px 16px;border:1px solid ' + (ag.enhancement ? 'var(--primary-tint-30)' : 'var(--overlay-5)') + ';cursor:pointer" onclick="showEnhancementPanel(\'' + agentId + '\')">' +
           '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">' +
-            '<span style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.8px">Model & 专业领域</span>' +
+            '<span style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.8px">' + window.t('panel.modelAndDomain', 'Model & 专业领域') + '</span>' +
             '<span class="material-symbols-outlined" style="font-size:18px;color:var(--primary)">psychology</span>' +
           '</div>' +
           '<div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px">Model</div>' +
-          '<div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px;word-break:break-all">' + esc(ag.model||'default') + '</div>' +
-          '<div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px">专业领域</div>' +
-          '<div style="font-size:12px;font-weight:600;color:' + (ag.enhancement ? 'var(--primary)' : 'var(--text3)') + '">' + (ag.enhancement ? (ag.enhancement.domain.split('+').length + ' loaded') : 'Off') + '</div>' +
+          '<div title="' + esc(ag.model||'') + '" style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px;word-break:break-all">' + esc(_prettyModelLabel(ag.model)||'default') + '</div>' +
+          '<div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px">' + window.t('panel.domain', '专业领域') + '</div>' +
+          '<div style="font-size:12px;font-weight:600;color:' + (ag.enhancement ? 'var(--primary)' : 'var(--text3)') + '">' + (ag.enhancement ? (ag.enhancement.domain.split('+').length + ' ' + window.t('panel.loaded', 'loaded')) : window.t('panel.off', 'Off')) + '</div>' +
         '</div>' +
         // Card 3: Capabilities (skills + MCPs + tools)
         '<div style="background:linear-gradient(135deg,var(--surface),rgba(167,139,250,0.08));border-radius:10px;padding:14px 16px;border:1px solid rgba(167,139,250,0.3);cursor:pointer" onclick="showSkillPanel(\'' + agentId + '\')">' +
@@ -1726,41 +1760,41 @@ function renderAgentChat(agentId) {
             '</div>';
           })() +
         '</div>' +
-        // Card 4: Analysis + Role Growth (closed-loop feedback card)
-        '<div style="background:linear-gradient(135deg,var(--surface),rgba(52,211,153,0.08));border-radius:10px;padding:14px 16px;border:1px solid rgba(52,211,153,0.3);display:flex;flex-direction:column;gap:8px">' +
+        // Card 4: Think stats — replaces the old Analysis/Role-Growth
+        // card that was never populated in practice. Shows three
+        // cumulative Think-button counters: total invocations, total
+        // experiences sedimented into the role's library, and "last
+        // ran N ago". Clicking the card opens the Growth panel which
+        // has the full cross-module asset aggregates.
+        '<div style="background:linear-gradient(135deg,var(--surface),rgba(52,211,153,0.08));border-radius:10px;padding:14px 16px;border:1px solid rgba(52,211,153,0.3);display:flex;flex-direction:column;gap:8px;cursor:pointer" onclick="showGrowthPathPanel(\'' + agentId + '\')" title="点击查看完整成长统计">' +
           '<div style="display:flex;align-items:center;justify-content:space-between">' +
-            '<span style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.8px">Growth & Analysis</span>' +
-            '<span class="material-symbols-outlined" style="font-size:18px;color:#34d399">insights</span>' +
+            '<span style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.8px">Think <span id="think-stats-live-' + agentId + '" style="opacity:0.6;font-size:9px;font-weight:600">(live)</span></span>' +
+            '<span class="material-symbols-outlined" style="font-size:18px;color:#34d399">psychology</span>' +
           '</div>' +
-          '<div style="display:flex;gap:10px;flex:1">' +
-            '<div style="flex:1;cursor:pointer" onclick="showAnalysisPanel(\'' + agentId + '\')" title="Execution Analysis">' +
-              '<div style="color:var(--text3);font-size:9px;text-transform:uppercase;letter-spacing:0.5px">Analysis</div>' +
-              '<div style="font-weight:700;font-size:13px;color:#34d399">' + ((ag.recent_analyses&&ag.recent_analyses.length) ? (ag.recent_analyses.length + ' recent') : 'Auto') + '</div>' +
-            '</div>' +
-            '<div style="flex:1;cursor:pointer" onclick="showGrowthPathPanel(\'' + agentId + '\')" title="Role Growth Path">' +
-              '<div style="color:var(--text3);font-size:9px;text-transform:uppercase;letter-spacing:0.5px">Role Growth</div>' +
-              '<div style="font-weight:700;font-size:13px;color:rgb(251,146,60)">' + (ag.growth_path ? (ag.growth_path.current_stage + ' ' + ag.growth_path.overall_progress + '%') : 'Init') + '</div>' +
-            '</div>' +
+          '<div id="think-stats-body-' + agentId + '" style="display:flex;gap:10px;flex:1">' +
+            '<div style="flex:1"><div style="color:var(--text3);font-size:9px;text-transform:uppercase;letter-spacing:0.5px">' + window.t('think.reviewCount', '复盘次数') + '</div><div style="font-weight:700;font-size:13px;color:#34d399">—</div></div>' +
+            '<div style="flex:1"><div style="color:var(--text3);font-size:9px;text-transform:uppercase;letter-spacing:0.5px">' + window.t('think.savedExperience', '沉淀经验') + '</div><div style="font-weight:700;font-size:13px;color:#34d399">—</div></div>' +
+            '<div style="flex:1"><div style="color:var(--text3);font-size:9px;text-transform:uppercase;letter-spacing:0.5px">' + window.t('think.latest', '最近') + '</div><div style="font-weight:700;font-size:12px;color:var(--text2)">—</div></div>' +
           '</div>' +
         '</div>' +
       '</div>' +
 
       '<div style="display:grid;grid-template-columns:3fr 3fr 3fr 3fr;gap:0;flex:1;overflow:hidden">' +
         '<!-- Tasks -->' +
-        '<div style="border-right:1px solid rgba(255,255,255,0.05);padding:16px 20px;overflow-y:auto">' +
+        '<div style="border-right:1px solid var(--overlay-5);padding:16px 20px;overflow-y:auto">' +
           '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px"><span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--text)">Task Queue</span><button class="btn btn-sm btn-ghost" onclick="addTaskDialog(\'' + agentId + '\')"><span class="material-symbols-outlined" style="font-size:14px">add</span> Add</button></div>' +
           '<div id="tasks-list-' + agentId + '" style="display:flex;flex-direction:column;gap:4px"></div>' +
         '</div>' +
         '<!-- Event Log -->' +
-        '<div style="padding:16px 20px;overflow-y:auto;background:var(--bg);border-right:1px solid rgba(255,255,255,0.05)">' +
-          '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid rgba(255,255,255,0.05)"><div style="display:flex;align-items:center;gap:6px;color:var(--primary)"><span class="material-symbols-outlined" style="font-size:14px">terminal</span><span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px">Execution Log</span></div></div>' +
+        '<div style="padding:16px 20px;overflow-y:auto;background:var(--bg);border-right:1px solid var(--overlay-5)">' +
+          '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--overlay-5)"><div style="display:flex;align-items:center;gap:6px;color:var(--primary)"><span class="material-symbols-outlined" style="font-size:14px">terminal</span><span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px">Execution Log</span></div></div>' +
           '<div id="agent-event-log-' + agentId + '" style="font-family:monospace;font-size:11px;line-height:1.7;color:var(--text3)"></div>' +
         '</div>' +
         '<!-- Execution Steps Panel (like Claude Todo) -->' +
-        '<div style="padding:16px 16px;overflow-y:auto;background:var(--surface);border-right:1px solid rgba(255,255,255,0.05)">' +
-          '<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid rgba(255,255,255,0.05)">' +
+        '<div style="padding:16px 16px;overflow-y:auto;background:var(--surface);border-right:1px solid var(--overlay-5)">' +
+          '<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--overlay-5)">' +
             '<span class="material-symbols-outlined" style="font-size:16px;color:var(--primary)">checklist</span>' +
-            '<span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--text)">Execution Steps</span>' +
+            '<span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--text)">' + window.t('panel.todos', 'TODOs') + '</span>' +
           '</div>' +
           '<div id="execution-steps-' + agentId + '" style="display:flex;flex-direction:column;gap:0">' +
             '<div style="color:var(--text3);font-size:12px;padding:8px 0">Waiting for agent to start a task...</div>' +
@@ -1768,7 +1802,7 @@ function renderAgentChat(agentId) {
         '</div>' +
         '<!-- Inter-Agent Messages -->' +
         '<div style="padding:16px 20px;overflow-y:auto;background:var(--bg)">' +
-          '<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid rgba(255,255,255,0.05)">' +
+          '<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--overlay-5)">' +
             '<span class="material-symbols-outlined" style="font-size:14px;color:var(--primary)">mail</span>' +
             '<span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--text)">Agent Messages</span>' +
           '</div>' +
@@ -1778,7 +1812,7 @@ function renderAgentChat(agentId) {
     '</section>' +
 
     '<!-- Workspace Info -->' +
-    '<section style="padding:12px 20px;background:var(--surface2);border-top:1px solid rgba(255,255,255,0.05);font-size:12px;color:var(--text2)">' +
+    '<section style="padding:12px 20px;background:var(--surface2);border-top:1px solid var(--overlay-5);font-size:12px;color:var(--text2)">' +
       '<div><span style="color:var(--text3)">Private Workspace:</span> <code style="color:var(--primary)">~/.tudou_claw/workspaces/' + esc(agentId) + '</code></div>' +
       (ag.shared_workspace ? '<div style="margin-top:4px"><span style="color:var(--text3)">Shared Workspace:</span> <code style="color:var(--primary)">' + esc(ag.shared_workspace) + '</code></div>' : '') +
     '</section>';
@@ -1790,6 +1824,7 @@ function renderAgentChat(agentId) {
     // bubbles by matching filenames mentioned in their text.
     try { attachHistoricalFileCards(agentId); } catch(e) {}
   });
+  try { _initRagToggle(agentId); } catch(e) {}
   loadTasks(agentId);
   loadAgentEventLog(agentId);
   loadExecutionSteps(agentId);
@@ -1879,7 +1914,7 @@ function _renderEventLogFilterChips(agentId) {
     return (
       '<button onclick="_setEventLogFilter(\'' + agentId + '\',\'' + key + '\')" ' +
       'style="font-size:10px;padding:3px 8px;border-radius:4px;cursor:pointer;' +
-      'border:1px solid ' + (selected ? 'var(--primary)' : 'rgba(255,255,255,0.1)') + ';' +
+      'border:1px solid ' + (selected ? 'var(--primary)' : 'var(--overlay-10)') + ';' +
       'background:' + (selected ? 'var(--primary-weak,rgba(99,102,241,0.15))' : 'transparent') + ';' +
       'color:' + (selected ? 'var(--primary)' : 'var(--text3)') + '">' + label + '</button>'
     );
@@ -1927,7 +1962,7 @@ function _formatEventLogEntry(e) {
   }
   return (
     '<p style="margin:2px 0;line-height:1.4">' +
-      '<span style="color:rgba(203,201,255,0.3)">[' + time + ']</span> ' +
+      '<span style="color:var(--primary-tint-30)">[' + time + ']</span> ' +
       '<span style="color:' + color + ';font-weight:500">' + esc(e.kind).toUpperCase() + ':</span> ' +
       content +
     '</p>'
@@ -2032,7 +2067,7 @@ async function loadWorkspaceAccess(agentId) {
         auth.map(function(otherId) {
           var otherAgent = allAgents.agents.find(function(a) { return a.id === otherId; });
           var name = otherAgent ? otherAgent.name : otherId;
-          return '<div style="display:flex;align-items:center;justify-content:space-between;padding:6px;background:var(--bg);border-radius:4px;margin-bottom:4px;border:1px solid rgba(255,255,255,0.05)">' +
+          return '<div style="display:flex;align-items:center;justify-content:space-between;padding:6px;background:var(--bg);border-radius:4px;margin-bottom:4px;border:1px solid var(--overlay-5)">' +
             '<span style="font-size:11px;color:var(--text)">' + esc(name) + '</span>' +
             '<button style="cursor:pointer;padding:2px 8px;font-size:10px;background:rgba(255,0,0,0.1);border:1px solid rgba(255,0,0,0.3);color:#ff6b6b;border-radius:3px" onclick="revokeWorkspace(\'' + esc(agentId) + '\', \'' + esc(otherId) + '\')">' +
               'Revoke' +
@@ -2086,6 +2121,24 @@ function _clearAllStepsTimers() {
   _stepsLoading = {};
 }
 
+// Per-agent stale-step state. Populated by _pollStale, consumed by
+// renderExecutionSteps to decorate in-progress steps with a yellow
+// warning and the three manual resolution buttons. Reset when the
+// user navigates away (_clearAllStepsTimers).
+var _staleSteps = {};  // agentId → {stepId → {stale_s, reason, title}}
+
+async function _pollStale(agentId) {
+  try {
+    var r = await api('GET',
+      '/api/portal/agent/' + agentId + '/plan/stale?threshold_s=120');
+    var m = {};
+    (r.stale || []).forEach(function(s) { m[s.step_id] = s; });
+    _staleSteps[agentId] = m;
+  } catch (e) {
+    // Silent — stale info is a soft UX hint, not business-critical
+  }
+}
+
 async function loadExecutionSteps(agentId) {
   // Prevent duplicate concurrent calls for the same agent
   if (_stepsLoading[agentId]) return;
@@ -2100,6 +2153,7 @@ async function loadExecutionSteps(agentId) {
   try {
     var data = await api('GET', '/api/portal/agent/' + agentId + '/plans');
     if (!data) { _stepsLoading[agentId] = false; return; }
+    await _pollStale(agentId);
     renderExecutionSteps(agentId, data.current_plan);
     // Only start polling if plan is not completed
     if (data.current_plan && data.current_plan.status === 'completed') {
@@ -2124,6 +2178,7 @@ async function loadExecutionSteps(agentId) {
     try {
       var d = await api('GET', '/api/portal/agent/' + agentId + '/plans');
       if (!d || !d.current_plan) return;
+      await _pollStale(agentId);
       renderExecutionSteps(agentId, d.current_plan);
       // Stop polling if plan is completed
       if (d.current_plan.status === 'completed') {
@@ -2160,7 +2215,28 @@ function renderExecutionSteps(agentId, plan) {
   html += esc(plan.task_summary || 'Task').slice(0,60);
   html += '</div>';
 
-  // Steps — show completed ones compactly, active one prominently, hide pending
+  // Shared helper: status chip + llm_purpose badge for a step. Renders
+  // uniformly across all statuses so the user can read the whole plan
+  // at a glance.
+  var _statusChip = function(status) {
+    var cfg = {
+      'completed':   {bg:'rgba(63,185,80,0.15)',  fg:'#3fb950', label:'done'},
+      'in_progress': {bg:'var(--primary-tint-15)', fg:'var(--primary)', label:'进行中'},
+      'failed':      {bg:'rgba(239,68,68,0.15)',  fg:'#ef4444', label:'失败'},
+      'skipped':     {bg:'var(--surface3)',        fg:'var(--text3)', label:'跳过'},
+      'pending':     {bg:'var(--surface3)',        fg:'var(--text3)', label:'待办'},
+    }[status] || {bg:'var(--surface3)',fg:'var(--text3)',label:status};
+    return '<span style="font-size:9px;padding:1px 6px;border-radius:6px;background:'
+      + cfg.bg + ';color:' + cfg.fg + ';font-weight:600;white-space:nowrap;flex-shrink:0">'
+      + cfg.label + '</span>';
+  };
+  var _purposeChip = function(p) {
+    if (!p) return '';
+    return '<span style="font-size:9px;padding:1px 5px;border-radius:6px;background:var(--surface3);color:var(--text3);white-space:nowrap;flex-shrink:0">'
+      + esc(p) + '</span>';
+  };
+
+  // Steps — every status renders a status chip + title + optional llm_purpose.
   var hasActive = false;
   plan.steps.forEach(function(step, idx) {
     var isCompleted = step.status === 'completed';
@@ -2168,47 +2244,73 @@ function renderExecutionSteps(agentId, plan) {
     var isFailed = step.status === 'failed';
     var isSkipped = step.status === 'skipped';
     var isPending = !isCompleted && !isInProgress && !isFailed && !isSkipped;
+    var norm = isCompleted ? 'completed' : (isInProgress ? 'in_progress' :
+               (isFailed ? 'failed' : (isSkipped ? 'skipped' : 'pending')));
 
     if (isCompleted) {
-      // Compact completed step
       html += '<div style="display:flex;align-items:center;gap:6px;padding:3px 0;animation:fadeInUp 0.3s ease">';
       html += '<span class="material-symbols-outlined" style="font-size:14px;color:var(--success)">check_circle</span>';
-      html += '<span style="font-size:11px;color:var(--text3);text-decoration:line-through">' + esc(step.title) + '</span>';
+      html += _statusChip(norm);
+      html += '<span style="font-size:11px;color:var(--text3);text-decoration:line-through;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(step.title) + '</span>';
+      html += _purposeChip(step.llm_purpose);
       html += '</div>';
     } else if (isInProgress) {
       hasActive = true;
-      // Prominent active step with working indicator
+      var staleInfo = (_staleSteps[agentId] || {})[step.id];
+      // Prominent active step: shimmer background + pulse dot + 进行中 chip + llm_purpose
       html += '<div class="working-indicator" style="animation:fadeInUp 0.3s ease;margin:6px 0">';
       html += '<span class="wi-dot"></span>';
+      html += _statusChip(norm);
       html += '<div style="flex:1;min-width:0">';
-      html += '<div class="wi-text">' + esc(step.title) + '</div>';
+      html += '<div class="wi-text" style="display:flex;align-items:center;gap:6px"><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(step.title) + '</span>' + _purposeChip(step.llm_purpose) + '</div>';
       if (step.result_summary) {
         html += '<div style="font-size:10px;color:var(--text3);margin-top:2px">' + esc(step.result_summary).slice(0,80) + '</div>';
       }
       html += '</div>';
       html += '</div>';
+      // Stale warning — yellow banner + 3 manual buttons. Purely
+      // advisory; backend never auto-mutates step state.
+      if (staleInfo) {
+        var mins = Math.floor(staleInfo.stale_s / 60);
+        var secs = Math.floor(staleInfo.stale_s % 60);
+        var ago = (mins > 0 ? mins + 'm' : '') + (secs > 0 ? secs + 's' : '1s');
+        html += '<div style="background:rgba(234,179,8,0.08);border:1px solid rgba(234,179,8,0.35);border-radius:6px;padding:8px 10px;margin:6px 0 10px 0">';
+        html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">';
+        html += '<span class="material-symbols-outlined" style="font-size:15px;color:#eab308">warning</span>';
+        html += '<span style="font-size:11px;color:#eab308;font-weight:600">此步骤已 ' + esc(ago) + ' 无活动</span>';
+        html += '</div>';
+        html += '<div style="font-size:10px;color:var(--text3);margin-bottom:8px">' + esc(staleInfo.reason || '') + '</div>';
+        html += '<div style="display:flex;gap:6px;flex-wrap:wrap">';
+        html += '<button class="btn btn-sm" style="font-size:10px;padding:3px 8px" onclick="_resumeStaleStep(\'' + agentId + '\',\'' + step.id + '\')"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:middle">play_arrow</span> 继续</button>';
+        html += '<button class="btn btn-sm" style="font-size:10px;padding:3px 8px" onclick="_skipStaleStep(\'' + agentId + '\',\'' + step.id + '\')"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:middle">skip_next</span> 跳过</button>';
+        html += '<button class="btn btn-sm" style="font-size:10px;padding:3px 8px;color:#ef4444" onclick="_failStaleStep(\'' + agentId + '\',\'' + step.id + '\')"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:middle">error</span> 标记失败</button>';
+        html += '</div>';
+        html += '</div>';
+      }
     } else if (isFailed) {
       html += '<div style="display:flex;align-items:center;gap:6px;padding:3px 0">';
       html += '<span class="material-symbols-outlined" style="font-size:14px;color:var(--error)">error</span>';
-      html += '<span style="font-size:11px;color:var(--error);text-decoration:line-through">' + esc(step.title) + '</span>';
+      html += _statusChip(norm);
+      html += '<span style="font-size:11px;color:var(--error);text-decoration:line-through;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(step.title) + '</span>';
+      html += _purposeChip(step.llm_purpose);
       html += '</div>';
     } else if (isSkipped) {
       html += '<div style="display:flex;align-items:center;gap:6px;padding:3px 0">';
       html += '<span class="material-symbols-outlined" style="font-size:14px;color:var(--text3)">skip_next</span>';
-      html += '<span style="font-size:11px;color:var(--text3);text-decoration:line-through">' + esc(step.title) + '</span>';
+      html += _statusChip(norm);
+      html += '<span style="font-size:11px;color:var(--text3);text-decoration:line-through;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(step.title) + '</span>';
+      html += _purposeChip(step.llm_purpose);
+      html += '</div>';
+    } else if (isPending) {
+      // Pending step — grayed out but visible, shows 待办 chip + llm_purpose.
+      html += '<div style="display:flex;align-items:center;gap:6px;padding:3px 0;opacity:0.6">';
+      html += '<span class="material-symbols-outlined" style="font-size:14px;color:var(--text3)">radio_button_unchecked</span>';
+      html += _statusChip(norm);
+      html += '<span style="font-size:11px;color:var(--text2);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(step.title) + '</span>';
+      html += _purposeChip(step.llm_purpose);
       html += '</div>';
     }
-    // Pending steps are hidden — only show next step count
   });
-
-  // Show remaining pending count
-  var pendingCount = plan.steps.filter(function(s){ return s.status !== 'completed' && s.status !== 'in_progress' && s.status !== 'failed' && s.status !== 'skipped'; }).length;
-  if (pendingCount > 0 && plan.status !== 'completed') {
-    html += '<div style="font-size:10px;color:var(--text3);padding:4px 0;margin-top:2px;display:flex;align-items:center;gap:4px">';
-    html += '<span class="material-symbols-outlined" style="font-size:12px">more_horiz</span>';
-    html += pendingCount + ' more step' + (pendingCount>1?'s':'') + ' remaining';
-    html += '</div>';
-  }
 
   // Completion message
   if (plan.status === 'completed') {
@@ -2220,6 +2322,88 @@ function renderExecutionSteps(agentId, plan) {
 
   el.innerHTML = html;
 }
+
+// ── Stale-step manual resolution handlers ──
+// All three hit agent API endpoints then force an immediate
+// loadExecutionSteps refresh so the UI reflects the outcome without
+// waiting for the 3s poll.
+
+async function _resumeStaleStep(agentId, stepId) {
+  try {
+    await api('POST', '/api/portal/agent/' + agentId + '/plan/step/' + stepId + '/resume', {});
+    // Reset stale state so warning vanishes immediately; next poll
+    // re-evaluates.
+    if (_staleSteps[agentId]) delete _staleSteps[agentId][stepId];
+    loadExecutionSteps(agentId);
+  } catch (e) {
+    alert('继续失败: ' + (e.message || e));
+  }
+}
+
+async function _skipStaleStep(agentId, stepId) {
+  var reason = prompt('跳过原因（可选）：', '');
+  if (reason === null) return;
+  try {
+    await api('POST', '/api/portal/agent/' + agentId + '/plan/step/' + stepId + '/mark_skipped',
+               { reason: reason || 'human-skipped' });
+    if (_staleSteps[agentId]) delete _staleSteps[agentId][stepId];
+    loadExecutionSteps(agentId);
+  } catch (e) {
+    alert('跳过失败: ' + (e.message || e));
+  }
+}
+
+async function _failStaleStep(agentId, stepId) {
+  var reason = prompt('失败原因（会附到 step.result_summary 让 LLM 下轮看到）：',
+                       'agent hung — manually marked failed');
+  if (reason === null) return;
+  try {
+    await api('POST', '/api/portal/agent/' + agentId + '/plan/step/' + stepId + '/mark_failed',
+               { reason: reason || 'manually failed' });
+    if (_staleSteps[agentId]) delete _staleSteps[agentId][stepId];
+    loadExecutionSteps(agentId);
+  } catch (e) {
+    alert('标记失败出错: ' + (e.message || e));
+  }
+}
+
+
+// Turn a raw model ID into a short, human-friendly label.
+// Keep the raw ID as the <option value> so API calls still work —
+// this ONLY changes what the user sees in the dropdown.
+//
+// Examples:
+//   mlx-community/Qwen3.5-35B-A3B-4bit   → Qwen3.5 35B A3B
+//   mlx-community/GLM-4.7-Flash-4bit     → GLM-4.7 Flash
+//   anthropic/claude-sonnet-4-5-20250929 → Claude Sonnet 4.5
+//   openai/gpt-4o-mini-2024-07-18        → GPT-4o mini
+//   google/gemma-3-27b-it                → Gemma 3 27B
+function _prettyModelLabel(raw) {
+  if (!raw) return '';
+  var s = String(raw);
+  // Strip hub/org prefix (everything up to and including the last '/')
+  var slash = s.lastIndexOf('/');
+  if (slash >= 0) s = s.slice(slash + 1);
+  // Strip common quantization/variant suffixes
+  s = s.replace(/-(4bit|8bit|2bit|3bit|5bit|6bit|Q4_K_M|Q5_K_M|Q6_K|Q8_0|AWQ|GPTQ|GGUF|MLX|fp16|bf16)$/i, '');
+  // Strip date stamp suffix like -20250929 or -2024-11-20
+  s = s.replace(/-\d{4}-?\d{2}-?\d{2}$/, '');
+  // Normalize separators for readability (but keep version dots like 3.5, 4.7)
+  // Replace remaining hyphens with spaces EXCEPT inside numbers (like 4-bit would've been stripped already)
+  s = s.replace(/-(?=[A-Za-z])/g, ' ').replace(/-/g, ' ');
+  // Tidy up common provider-specific strings
+  s = s.replace(/\bclaude\s+/i, 'Claude ');
+  s = s.replace(/\bgpt\s+/i, 'GPT-');
+  s = s.replace(/\bgemma\s+/i, 'Gemma ');
+  s = s.replace(/\bglm\s+/i, 'GLM-');
+  s = s.replace(/\bqwen(\d*(?:\.\d+)?)\s+/i, function(_m, ver){ return 'Qwen' + ver + ' '; });
+  // Collapse multiple spaces
+  s = s.replace(/\s+/g, ' ').trim();
+  return s;
+}
+// Expose globally so portal_dashboard / portal_agents_list / portal_chat
+// can share the same label logic (they load in separate files).
+window._prettyModelLabel = _prettyModelLabel;
 
 function populateQuickModelSwitch(agentId) {
   var ag = agents.find(function(a){ return a.id === agentId; }) || {};
@@ -2258,15 +2442,21 @@ function populateQuickModelSwitch(agentId) {
     }
   }
   modelEl.innerHTML = models.map(function(m) {
-    return '<option value="' + esc(m) + '"' + (ag.model === m ? ' selected' : '') + '>' + esc(m) + '</option>';
+    var label = _prettyModelLabel(m);
+    return '<option value="' + esc(m) + '" title="' + esc(m) + '"' +
+           (ag.model === m ? ' selected' : '') + '>' + esc(label) + '</option>';
   }).join('');
+  // Tooltip on the select itself shows the full raw ID of current choice
+  modelEl.title = ag.model || '';
 
   // On provider change, update models
   provEl.onchange = function() {
     var pid = provEl.value;
     var ms = _availableModels[pid] || [];
     modelEl.innerHTML = ms.map(function(m) {
-      return '<option value="' + esc(m) + '">' + esc(m) + '</option>';
+      var label = _prettyModelLabel(m);
+      return '<option value="' + esc(m) + '" title="' + esc(m) + '">' +
+             esc(label) + '</option>';
     }).join('');
     quickSwitchModel(agentId);
   };
@@ -2333,6 +2523,7 @@ async function loadAgentChat(agentId, _retryCount) {
       // naturally not duplicates so they pass through; this only eats
       // templated bridge lines and true replays.
       var _seenAssistant = new Set();
+      var _lastAssistantContentDiv = null;
       for(const evt of (data.events||[])) {
         if(evt.kind==='message') {
           const role = evt.data.role||'assistant';
@@ -2344,7 +2535,17 @@ async function loadAgentChat(agentId, _retryCount) {
             if(_seenAssistant.has(trimmed)) continue;
             _seenAssistant.add(trimmed);
           }
-          addChatBubble(agentId, role, content, evt.timestamp||0);
+          var _ret = addChatBubble(agentId, role, content, evt.timestamp||0);
+          if (role === 'assistant' && _ret) {
+            _lastAssistantContentDiv = _ret;
+          }
+        } else if (evt.kind === 'memory_refs') {
+          // 新 A.10: attach 🧠 badge + per-ref delete buttons to the
+          // most recent assistant bubble in the stream.
+          var refs = (evt.data || {}).refs || [];
+          if (refs.length && _lastAssistantContentDiv) {
+            _attachMemoryRefsBadge(_lastAssistantContentDiv, refs);
+          }
         }
         // tool_call and tool_result are hidden from chat — only shown in Execution Log
       }
@@ -2400,6 +2601,50 @@ function _renderSimpleMarkdown(text, agentId) {
   if (!s) return '';
   // Escape HTML first
   s = s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  // Selectively un-escape a tiny whitelist of safe layout tags the LLM
+  // commonly emits inside tables / lists. Without this, table cells with
+  // embedded <br> for line breaks show the literal tag text. Only <br>
+  // variants — anything else stays escaped.
+  s = s.replace(/&lt;br\s*\/?&gt;/gi, '<br>');
+  // Normalize "collapsed" tables: some models (notably Qwen) emit the
+  // entire table on a single line with `||` as the row separator
+  // instead of `|\n|`. Split those back into proper rows so the
+  // table regex below can parse them. Safe: `||` in normal prose is
+  // very rare and splitting it into two `|` on adjacent lines is
+  // visually inconsequential in non-table context.
+  s = s.replace(/\|\|/g, '|\n|');
+  // GFM-style tables:
+  //   | col1 | col2 |
+  //   |------|------|
+  //   | v1   | v2   |
+  // Detect a run of 2+ pipe-terminated lines where line 2 looks like
+  // a separator (only -, :, |, spaces). Minimal: no colgroup alignment,
+  // just renders <table><thead>/<tbody>.
+  s = s.replace(
+    /(^|\n)((?:\|[^\n]*\|[ \t]*(?:\n|$))+)/g,
+    function(match, prefix, block) {
+      var lines = block.replace(/\n$/, '').split('\n');
+      if (lines.length < 2) return match;
+      var sep = lines[1].trim();
+      if (!/^\|?[\s:|-]+\|?$/.test(sep) || sep.indexOf('-') < 0) {
+        return match;
+      }
+      var splitRow = function(row) {
+        row = row.trim().replace(/^\|/, '').replace(/\|$/, '');
+        return row.split('|').map(function(c){ return c.trim(); });
+      };
+      var headers = splitRow(lines[0]);
+      var bodyRows = lines.slice(2).map(splitRow);
+      var html = '<table class="chat-md-table"><thead><tr>' +
+        headers.map(function(h){ return '<th>'+h+'</th>'; }).join('') +
+        '</tr></thead><tbody>' +
+        bodyRows.map(function(r){
+          return '<tr>' + r.map(function(c){ return '<td>'+c+'</td>'; }).join('') + '</tr>';
+        }).join('') +
+        '</tbody></table>';
+      return prefix + html;
+    }
+  );
   // Code blocks: ```lang\n...\n```
   s = s.replace(/```(\w*)\n([\s\S]*?)```/g, function(m,lang,code){
     return '<pre><code class="lang-'+lang+'">' + code + '</code></pre>';
@@ -2464,6 +2709,13 @@ function _renderSimpleMarkdown(text, agentId) {
   s = s.replace(/<ul>([\s\S]*?)<\/ul>/g, function(m,inner){
     return '<ul>' + inner.replace(/<br>/g, '') + '</ul>';
   });
+  // Clean up stray <br> that landed BETWEEN table structural elements
+  // (these come from the "\n → <br>" pass above). Cells keep their
+  // <br>s — only strip <br> that sit between </tr>, </thead>, <tr>, etc.
+  s = s.replace(/(<\/(?:tr|thead|tbody|table)>)\s*(?:<br>\s*)+/gi, '$1');
+  s = s.replace(/(?:<br>\s*)+(<(?:tr|thead|tbody|\/table)\b)/gi, '$1');
+  s = s.replace(/<br>\s*(<table\b)/gi, '$1');
+  s = s.replace(/(<\/table>)\s*<br>/gi, '$1');
   // Wrap [File: ...] blocks in collapsible containers
   s = _wrapFileBlocks(s);
   return s;
@@ -2536,6 +2788,44 @@ function addChatBubble(agentId, role, text, timestamp) {
   var ts = (typeof timestamp === 'number') ? timestamp : (Date.now() / 1000);
   var timeLabel = _formatChatTime(ts);
 
+  // Bubble-merge logic: if the previous bubble in the panel is from the
+  // same role AND was posted within 2 minutes, mark the new one as
+  // "merged-follow" so CSS hides the repeated avatar and tightens the
+  // vertical gap. Each message still keeps its own timestamp + action bar.
+  (function tagMergedFollow() {
+    try {
+      var last = el.lastElementChild;
+      if (!last) return;
+      var lastIsAssistant = last.classList && last.classList.contains('chat-msg-row');
+      var lastIsUser = last.classList && last.classList.contains('chat-msg')
+                       && last.classList.contains('user');
+      var nowIsAssistant = role.indexOf('assistant') !== -1
+                           && role.indexOf('thinking') === -1;
+      var nowIsUser = role === 'user';
+      var sameRole = (lastIsAssistant && nowIsAssistant)
+                     || (lastIsUser && nowIsUser);
+      if (!sameRole) return;
+      var lastTs = 0;
+      if (lastIsAssistant) {
+        var c = last.querySelector('.chat-msg-content');
+        if (c && typeof c._timestamp === 'number') lastTs = c._timestamp;
+      } else if (lastIsUser) {
+        // User bubbles don't have contentDiv — stash ts on the msg div below.
+        if (typeof last._timestamp === 'number') lastTs = last._timestamp;
+      }
+      // 120 s window — arbitrary but matches "one thought burst"
+      if (lastTs && (ts - lastTs) < 120) {
+        if (nowIsAssistant) {
+          // The assistant row will be created later; defer by attaching
+          // a flag we'll read after the row is built.
+          div._pendingMergedFollow = true;
+        } else {
+          div.classList.add('merged-follow');
+        }
+      }
+    } catch (e) { /* never fail chat rendering for a UX enhancement */ }
+  })();
+
   // For assistant messages, wrap in row: [robot avatar] [bubble]
   if (role.indexOf('assistant') !== -1 && role.indexOf('thinking') === -1) {
     var row = document.createElement('div');
@@ -2563,16 +2853,21 @@ function addChatBubble(agentId, role, text, timestamp) {
     var timeSpan = document.createElement('span');
     timeSpan.className = 'chat-msg-time';
     timeSpan.textContent = timeLabel;
-    timeSpan.style.cssText = 'display:block;font-size:11px;color:var(--text3,#999);margin-top:2px;';
+    timeSpan.style.cssText = 'display:block;margin-top:2px;';
     div.appendChild(timeSpan);
     var actionBar = document.createElement('div');
     actionBar.className = 'chat-msg-actions';
-    actionBar.innerHTML = '<button class="chat-action-btn" onclick="_speakBubble(this)" title="朗读此消息"><span class="material-symbols-outlined" style="font-size:14px">volume_up</span></button>' +
-      '<button class="chat-action-btn" onclick="_saveToFile(this,\''+agentId+'\')" title="Save to file"><span class="material-symbols-outlined" style="font-size:14px">save</span> Save</button>' +
-      '<button class="chat-action-btn" onclick="_copyToClipboard(this)" title="Copy"><span class="material-symbols-outlined" style="font-size:14px">content_copy</span></button>';
+    actionBar.innerHTML = '<button class="chat-action-btn" onclick="_speakBubble(this)" title="' + window.t('bubble.speak', '朗读此消息') + '"><span class="material-symbols-outlined" style="font-size:14px">volume_up</span></button>' +
+      '<button class="chat-action-btn" onclick="_saveToFile(this,\''+agentId+'\')" title="' + window.t('bubble.saveFile', '保存为文件') + '"><span class="material-symbols-outlined" style="font-size:14px">save</span> ' + window.t('action.save', 'Save') + '</button>' +
+      '<button class="chat-action-btn" onclick="_copyToClipboard(this)" title="' + window.t('bubble.copy', '复制') + '"><span class="material-symbols-outlined" style="font-size:14px">content_copy</span> ' + window.t('bubble.copy', '复制') + '</button>';
     div.appendChild(actionBar);
     row.appendChild(div);
     div._contentDiv = contentDiv;
+    // Propagate merged-follow flag from div → row (the DOM level CSS
+    // hooks for avatar hide + margin collapse live on the row).
+    if (div._pendingMergedFollow) {
+      row.classList.add('merged-follow');
+    }
     el.appendChild(row);
     el.scrollTop = el.scrollHeight;
     return contentDiv;
@@ -2588,8 +2883,10 @@ function addChatBubble(agentId, role, text, timestamp) {
     var timeSpan = document.createElement('span');
     timeSpan.className = 'chat-msg-time';
     timeSpan.textContent = timeLabel;
-    timeSpan.style.cssText = 'display:block;font-size:11px;color:var(--text3,#999);margin-top:2px;text-align:right;';
+    timeSpan.style.cssText = 'display:block;margin-top:2px;text-align:right;';
     div.appendChild(timeSpan);
+    // Stash ts on the user msg div so the next call can compare against it.
+    div._timestamp = ts;
     el.appendChild(div);
     el.scrollTop = el.scrollHeight;
     return div;
@@ -2862,7 +3159,7 @@ function addApprovalBubble(agentId, evt) {
     '<div style="display:flex;gap:8px">' +
       '<button class="btn btn-sm btn-danger" onclick="chatApprovalAction(\'' + agentId + '\',\'deny\',this)" style="font-size:11px;padding:6px 12px"><span class="material-symbols-outlined" style="font-size:14px">block</span> Deny</button>' +
       '<button class="btn btn-sm btn-success" onclick="chatApprovalAction(\'' + agentId + '\',\'approve\',this)" style="font-size:11px;padding:6px 12px"><span class="material-symbols-outlined" style="font-size:14px">check</span> Approve</button>' +
-      '<button class="btn btn-sm" onclick="chatApprovalAction(\'' + agentId + '\',\'approve_session\',this)" style="font-size:11px;padding:6px 12px;background:var(--primary);color:#0e141b"><span class="material-symbols-outlined" style="font-size:14px">verified</span> Approve (Session)</button>' +
+      '<button class="btn btn-sm" onclick="chatApprovalAction(\'' + agentId + '\',\'approve_session\',this)" style="font-size:11px;padding:6px 12px;background:var(--primary);color:var(--primary-text)"><span class="material-symbols-outlined" style="font-size:14px">verified</span> Approve (Session)</button>' +
     '</div>';
   el.appendChild(div);
   el.scrollTop = el.scrollHeight;
@@ -3205,7 +3502,7 @@ function _renderAgentAttachPreview(agentId) {
       ? '<img src="'+a.preview_url+'" style="width:36px;height:36px;object-fit:cover;border-radius:4px">'
       : '<span class="material-symbols-outlined" style="font-size:20px;color:var(--text3)">draft</span>';
     var sizeKb = Math.max(1, Math.round((a.size||0)/1024));
-    return '<div style="display:inline-flex;align-items:center;gap:6px;background:var(--surface);border:1px solid rgba(255,255,255,0.08);border-radius:6px;padding:4px 8px;font-size:11px;color:var(--text)">' +
+    return '<div style="display:inline-flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--overlay-8);border-radius:6px;padding:4px 8px;font-size:11px;color:var(--text)">' +
       thumb +
       '<div style="display:flex;flex-direction:column;max-width:140px">' +
         '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(a.name)+'</span>' +
@@ -3240,6 +3537,72 @@ function handleAgentAttach(agentId, fileInput) {
   fileInput.value = '';
 }
 
+// ── Slash-command preprocessor ──
+// Parse leading "/cmd args..." from the raw input.
+//
+// Return shape:
+//   { text, flags, note, armOnly }
+// where:
+//   - `text`    is the message to send (slash stripped)
+//   - `flags`   is the side-channel payload (e.g. skip_history)
+//   - `note`    is the marker rendered inside the user bubble
+//   - `armOnly` means "do NOT submit now — just arm the flag for next send"
+//
+// `/new`         → armOnly=true: nothing sent; next real message uses
+//                  skip_history. UI shows a persistent chip until consumed.
+// `/new <msg>`   → armOnly=false + skip_history: send msg immediately
+//                  with pruned history (one-shot).
+function _parseSlashCommand(raw) {
+  if (!raw) return { text: '', flags: {}, note: '', armOnly: false };
+  var m = /^\/new(?:\s+([\s\S]+))?$/i.exec(raw.trim());
+  if (m) {
+    var tail = (m[1] || '').trim();
+    if (!tail) {
+      return { text: '', flags: { skip_history: true }, note: '',
+               armOnly: true };
+    }
+    return {
+      text: tail,
+      flags: { skip_history: true },
+      note: window.t ? window.t('chat.slashNewBadge', '⟲ 新对话 (/new — 本轮不带聊天历史)')
+                     : '⟲ 新对话 (/new — 本轮不带聊天历史)',
+      armOnly: false,
+    };
+  }
+  return { text: raw, flags: {}, note: '', armOnly: false };
+}
+
+// Per-agent "/new is armed" state. When set, the NEXT sendChatMessage call
+// automatically includes skip_history=true and clears the flag.
+window._slashNewArmed = window._slashNewArmed || {};
+
+function _showSlashNewChip(agentId) {
+  var chipId = 'slash-new-chip-' + agentId;
+  if (document.getElementById(chipId)) return;   // already shown
+  var inputEl = document.getElementById('chat-input-' + agentId);
+  if (!inputEl) return;
+  var host = inputEl.parentElement || inputEl;
+  var chip = document.createElement('div');
+  chip.id = chipId;
+  chip.style.cssText = 'display:inline-flex;align-items:center;gap:6px;'
+    + 'background:var(--primary-tint-15);color:var(--primary);'
+    + 'padding:4px 10px;border-radius:12px;font-size:11px;'
+    + 'margin:0 0 4px 2px;cursor:pointer;user-select:none';
+  chip.title = (window.t && window.t('chat.slashNewDismiss',
+    '点击取消 / 下一条消息将使用新对话')) || '点击取消';
+  chip.innerHTML = '⟲ ' + ((window.t && window.t('chat.slashNewArmed',
+    '下一条消息将使用新对话（无历史）')) || '下一条消息将使用新对话（无历史）')
+    + ' <span style="opacity:0.7;margin-left:4px">×</span>';
+  chip.onclick = function() { _clearSlashNewArm(agentId); };
+  host.insertBefore(chip, inputEl);
+}
+
+function _clearSlashNewArm(agentId) {
+  delete window._slashNewArmed[agentId];
+  var el = document.getElementById('slash-new-chip-' + agentId);
+  if (el && el.parentElement) el.parentElement.removeChild(el);
+}
+
 // Active task streams per agent (so we can reconnect)
 var _activeTaskStreams = {};  // agentId -> {taskId, abortCtrl}
 
@@ -3251,14 +3614,56 @@ async function sendAgentMsg(agentId) {
     alert('该 Agent 还没有配置 LLM。请先从顶部选择 provider / model。');
     return;
   }
-  const text = inputEl.value.trim();
+  // Defensive cleanup: clear any stale stream slot left over from a prior
+  // turn that ended without a proper `done` event (SSE reconnect race,
+  // page-visibility drop, etc.). Without this, every N-th send fails
+  // silently because the new request's SSE handler aliases onto the dead
+  // AbortController. Costs nothing when state is already clean.
+  var stale = _activeTaskStreams[agentId];
+  if (stale) {
+    try { if (stale.abortCtrl) stale.abortCtrl.abort(); } catch(e){}
+    delete _activeTaskStreams[agentId];
+  }
+  // Also sweep any orphan progress bar from a prior aborted turn.
+  try { _removeProgressBar(agentId); } catch(e){}
+  var rawText = inputEl.value.trim();
   var attachments = _agentAttachList(agentId).slice();
-  if(!text && !attachments.length) return;
+  if(!rawText && !attachments.length) return;
+
+  // Slash-command preprocessing.
+  var slash = _parseSlashCommand(rawText);
+
+  // /new alone → arm the flag for next send, show a chip, consume the
+  // input but DO NOT submit anything to the LLM.
+  if (slash.armOnly) {
+    window._slashNewArmed[agentId] = true;
+    _showSlashNewChip(agentId);
+    inputEl.value = '';
+    return;
+  }
+
+  var text = slash.text;
+  var slashFlags = slash.flags || {};
+
+  // Promote a previously-armed /new (via solo slash earlier) into this send.
+  if (window._slashNewArmed[agentId]) {
+    slashFlags.skip_history = true;
+    if (!slash.note) {
+      slash.note = window.t ? window.t('chat.slashNewBadge',
+                       '⟲ 新对话 (/new — 本轮不带聊天历史)')
+                            : '⟲ 新对话 (/new — 本轮不带聊天历史)';
+    }
+    _clearSlashNewArm(agentId);
+  }
+
   inputEl.value = '';
   _agentAttachments[agentId] = [];
   _renderAgentAttachPreview(agentId);
 
   var displayText = text || '';
+  if (slash.note) {
+    displayText = slash.note + (displayText ? '\n' + displayText : '');
+  }
   if (attachments.length) {
     var attNames = attachments.map(function(a){ return '📎'+a.name; }).join(' ');
     displayText = displayText ? displayText + '\n' + attNames : attNames;
@@ -3275,6 +3680,14 @@ async function sendAgentMsg(agentId) {
       chatBody.attachments = attachments.map(function(a) {
         return { name: a.name, mime: a.mime, data_base64: a.data_base64 };
       });
+    }
+    // Chat-header "🔍 RAG" toggle: hard-route to knowledge_lookup only
+    if (window._ragOnly && window._ragOnly[agentId]) {
+      chatBody.rag_only = true;
+    }
+    // Slash-command flags — forwarded to the backend chat loop.
+    if (slashFlags && slashFlags.skip_history) {
+      chatBody.skip_history = true;
     }
     const resp = await fetch('/api/portal/agent/'+agentId+'/chat', {
       method:'POST',
@@ -3437,7 +3850,7 @@ function _appendToolCall(agentId, toolName, args) {
 
   var entry = document.createElement('div');
   entry.id = 'tool-entry-'+agentId+'-'+idx;
-  entry.style.cssText = 'display:flex;align-items:flex-start;gap:4px;padding:2px 0;border-bottom:1px solid var(--border,rgba(255,255,255,0.06));opacity:0;transition:opacity 0.3s';
+  entry.style.cssText = 'display:flex;align-items:flex-start;gap:4px;padding:2px 0;border-bottom:1px solid var(--border,var(--overlay-6));opacity:0;transition:opacity 0.3s';
 
   // Primary-arg-first rendering (Clowder-style compact CLI output).
   // Shows the single most useful field inline; full args stashed as a
@@ -3625,6 +4038,55 @@ function _renderPlanBlock(planData) {
   );
 }
 
+function _renderHandoffBlock(data) {
+  // data: {handoff: {summary, deliverable_path, highlights:[str], followups:[{for,task}]}, from_agent}
+  var payload = (data || {}).handoff || {};
+  var summary = _escHtml(payload.summary || '');
+  if (!summary) return '';
+  var dpath = _escHtml(payload.deliverable_path || '');
+  var hls = payload.highlights || [];
+  var fus = payload.followups || [];
+  var hlsHtml = hls.length ? (
+    '<div style="margin-top:6px">' +
+      '<div style="font-size:11px;color:var(--text3);margin-bottom:2px">要点</div>' +
+      '<ul style="margin:0;padding-left:16px;color:var(--text);font-size:12px;line-height:1.5">' +
+        hls.map(function(h){ return '<li>' + _escHtml(String(h)) + '</li>'; }).join('') +
+      '</ul>' +
+    '</div>'
+  ) : '';
+  var fusHtml = fus.length ? (
+    '<div style="margin-top:6px">' +
+      '<div style="font-size:11px;color:var(--text3);margin-bottom:2px">下一棒</div>' +
+      '<ul style="margin:0;padding-left:16px;color:var(--text);font-size:12px;line-height:1.5">' +
+        fus.map(function(f){
+          var who = _escHtml(String(f.for || ''));
+          var task = _escHtml(String(f.task || ''));
+          return '<li><b>' + who + '</b>: ' + task + '</li>';
+        }).join('') +
+      '</ul>' +
+    '</div>'
+  ) : '';
+  var dpathHtml = dpath ? (
+    '<div style="margin-top:4px;font-size:12px;color:var(--text2)">' +
+      '📎 产出: <code style="background:var(--overlay-6);padding:1px 4px;border-radius:3px">' + dpath + '</code>' +
+    '</div>'
+  ) : '';
+  return (
+    '<div class="msg-handoff-block" style="margin-top:8px;padding:10px 12px;' +
+      'background:linear-gradient(135deg,rgba(52,211,153,0.08),rgba(99,102,241,0.05));' +
+      'border-left:3px solid #34d399;border-radius:4px">' +
+      '<div style="display:flex;align-items:center;gap:6px;font-size:11px;color:#34d399;' +
+        'font-weight:600;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">' +
+        '🤝 交接 Handoff' +
+      '</div>' +
+      '<div style="font-size:13px;color:var(--text);line-height:1.5">' + summary + '</div>' +
+      dpathHtml +
+      hlsHtml +
+      fusHtml +
+    '</div>'
+  );
+}
+
 function _renderSkillMatchBadge(data) {
   // data: {skill_name, reason}
   var name = _escHtml(data.skill_name || '');
@@ -3649,7 +4111,7 @@ function _appendMessageBlocks(agentId, msgDiv, blocks) {
     if (evt.kind === 'tool_call') {
       if (!toolLog) {
         toolLog = document.createElement('div');
-        toolLog.style.cssText = 'margin-top:8px;padding:6px 10px;background:rgba(255,255,255,0.03);border-left:2px solid var(--primary);border-radius:4px';
+        toolLog.style.cssText = 'margin-top:8px;padding:6px 10px;background:color-mix(in srgb, var(--text) 3%, transparent);border-left:2px solid var(--primary);border-radius:4px';
         msgDiv.appendChild(toolLog);
       }
       toolLog.insertAdjacentHTML('beforeend', _renderCompactToolCall(evt.data || {}));
@@ -3680,6 +4142,12 @@ function _appendMessageBlocks(agentId, msgDiv, blocks) {
         }
       } catch (e) {
         console.warn('[blocks] ui_block render failed', e);
+      }
+    } else if (evt.kind === 'handoff') {
+      // Structured baton-pass card. Renders once per emit_handoff call.
+      var handoffHtml = _renderHandoffBlock(evt.data || {});
+      if (handoffHtml) {
+        msgDiv.insertAdjacentHTML('beforeend', handoffHtml);
       }
     } else if (evt.kind === 'ellipsis') {
       if (toolLog) {
@@ -4055,7 +4523,7 @@ async function _streamTaskEvents(agentId, taskId, thinkDiv, progressBar) {
             } else if(evt.type==='thinking') {
               if (msgDiv) { msgDiv = null; fullText = ''; }
               // Update progress bar phase text instead of separate thinkDiv
-              _updateProgress(agentId, 0, evt.content || 'Thinking...');
+              _updateProgress(agentId, 0, evt.content || '发言中…');
             } else if(evt.type==='tool_call') {
               // Show tool name in progress bar + append to tool log
               _updateProgress(agentId, 0, '🔧 ' + esc(evt.name||''));
@@ -4063,7 +4531,7 @@ async function _streamTaskEvents(agentId, taskId, thinkDiv, progressBar) {
             } else if(evt.type==='tool_result') {
               // Mark last tool as done + reset progress bar
               _markToolResult(agentId, evt.content||'');
-              _updateProgress(agentId, 0, 'Thinking...');
+              _updateProgress(agentId, 0, '发言中…');
             } else if(evt.type==='approval_request') {
               if (thinkDiv.parentNode) thinkDiv.remove();
               addApprovalBubble(agentId, evt);
@@ -4414,7 +4882,7 @@ function renderApprovals() {
           '</div>' +
           '<div class="approval-actions">' +
             '<button class="btn btn-sm btn-success" onclick="approveRequest(\'' + a.approval_id + '\')"><span class="material-symbols-outlined" style="font-size:14px">check</span> Approve</button>' +
-            '<button class="btn btn-sm" onclick="approveRequest(\'' + a.approval_id + '\',\'session\')" style="background:var(--primary);color:#0e141b"><span class="material-symbols-outlined" style="font-size:14px">verified</span> Session</button>' +
+            '<button class="btn btn-sm" onclick="approveRequest(\'' + a.approval_id + '\',\'session\')" style="background:var(--primary);color:var(--primary-text)"><span class="material-symbols-outlined" style="font-size:14px">verified</span> Session</button>' +
             '<button class="btn btn-sm btn-danger" onclick="denyRequest(\'' + a.approval_id + '\')"><span class="material-symbols-outlined" style="font-size:14px">close</span> Deny</button>' +
           '</div>' +
         '</div>';
@@ -4741,13 +5209,11 @@ function renderNodes(container) {
   // Header
   var onlineCount = nodes.filter(function(n){ return n.status === 'online'; }).length;
   var remoteCount = nodes.filter(function(n){ return !n.is_self; }).length;
+  // Removed top-right "+ Connect Node" button per design pass.
   c.innerHTML = '' +
-    '<div style="margin-bottom:28px;display:flex;justify-content:space-between;align-items:flex-start">' +
-      '<div>' +
-        '<h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:28px;font-weight:800;letter-spacing:-0.5px">Network Nodes</h2>' +
-        '<p style="color:var(--text2);font-size:14px;margin-top:4px">Manage connected machines and multi-node agent orchestration.</p>' +
-      '</div>' +
-      '<button class="btn btn-primary btn-sm" onclick="showModal(\'add-node\')" style="flex-shrink:0"><span class="material-symbols-outlined" style="font-size:16px">add</span> Connect Node</button>' +
+    '<div style="margin-bottom:28px">' +
+      '<h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:28px;font-weight:800;letter-spacing:-0.5px">Network Nodes</h2>' +
+      '<p style="color:var(--text2);font-size:14px;margin-top:4px">Manage connected machines and multi-node agent orchestration.</p>' +
     '</div>' +
     '<div id="nodes-grid" style="display:grid;grid-template-columns:repeat(2,1fr);gap:20px"></div>';
 
@@ -4770,7 +5236,7 @@ function renderNodes(container) {
           '<div>' +
             '<div style="display:flex;align-items:center;gap:8px">' +
               '<span style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:16px;font-weight:700">' + esc(n.name) + '</span>' +
-              '<span style="font-size:10px;background:' + (isSelf ? 'rgba(76,175,80,0.1)' : 'rgba(203,201,255,0.1)') + ';color:' + (isSelf ? 'var(--success)' : 'var(--primary)') + ';padding:2px 8px;border-radius:4px;text-transform:uppercase;letter-spacing:0.5px;font-weight:700">' + nodeLabel + '</span>' +
+              '<span style="font-size:10px;background:' + (isSelf ? 'rgba(76,175,80,0.1)' : 'var(--primary-tint-10)') + ';color:' + (isSelf ? 'var(--success)' : 'var(--primary)') + ';padding:2px 8px;border-radius:4px;text-transform:uppercase;letter-spacing:0.5px;font-weight:700">' + nodeLabel + '</span>' +
             '</div>' +
             '<div style="font-size:12px;color:var(--text3);margin-top:2px">' + esc(n.url === 'local' ? 'localhost' : n.url) + ' · Node ID: ' + esc(n.node_id) + '</div>' +
           '</div>' +
@@ -5042,7 +5508,7 @@ function renderMessages() {
           '<span class="material-symbols-outlined" style="font-size:18px;color:var(--primary)">apartment</span>' +
           '<span style="font-family:monospace;font-size:11px;color:var(--primary);font-weight:800">AI AGENT OFFICE</span>' +
           '<div id="office-node-tabs" style="display:flex;gap:4px;margin-left:12px"></div>' +
-          '<span id="office-agent-count" style="font-size:10px;color:var(--text3);margin-left:auto;background:rgba(255,255,255,0.1);padding:2px 8px;border-radius:10px"></span>' +
+          '<span id="office-agent-count" style="font-size:10px;color:var(--text3);margin-left:auto;background:var(--overlay-10);padding:2px 8px;border-radius:10px"></span>' +
         '</div>' +
       '</div>' +
       '<!-- 下半：消息列表 -->' +
@@ -5077,7 +5543,7 @@ function _renderOfficeMessages() {
     var typeIcon = m.msg_type === 'task' ? 'assignment' : m.msg_type === 'response' ? 'reply' : 'chat';
     var fromName = m.from_agent_name || agentName(m.from_agent);
     var toName = m.to_agent_name || agentName(m.to_agent);
-    return '<div style="background:var(--surface);border-radius:10px;padding:12px 14px;border:1px solid rgba(255,255,255,0.05);font-size:12px">' +
+    return '<div style="background:var(--surface);border-radius:10px;padding:12px 14px;border:1px solid var(--overlay-5);font-size:12px">' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">' +
         '<span class="material-symbols-outlined" style="font-size:14px;color:var(--primary)">' + typeIcon + '</span>' +
         '<span style="font-weight:700;color:var(--text)">' + esc(fromName) + '</span>' +
@@ -5141,7 +5607,7 @@ function _renderNodeTabs() {
 
   var html = '<div onclick="_switchOfficeNode(\'all\')" class="office-tab" ' +
     'style="cursor:pointer;padding:2px 8px;border-radius:8px;font-size:10px;' +
-    (_officeCurrentNode === 'all' ? 'background:var(--primary);color:#fff' : 'background:rgba(255,255,255,0.08);color:var(--text3)') + '">' +
+    (_officeCurrentNode === 'all' ? 'background:var(--primary);color:#fff' : 'background:var(--overlay-8);color:var(--text3)') + '">' +
     'All (' + agents.length + ')</div>';
 
   nodes.forEach(function(n) {
@@ -5149,7 +5615,7 @@ function _renderNodeTabs() {
     var statusDot = '🟢';
     html += '<div onclick="_switchOfficeNode(\'' + esc(n.node_id) + '\')" class="office-tab" ' +
       'style="cursor:pointer;padding:2px 8px;border-radius:8px;font-size:10px;' +
-      (isActive ? 'background:var(--primary);color:#fff' : 'background:rgba(255,255,255,0.08);color:var(--text3)') + '">' +
+      (isActive ? 'background:var(--primary);color:#fff' : 'background:var(--overlay-8);color:var(--text3)') + '">' +
       statusDot + ' ' + esc(n.name) + ' (' + n.count + ')</div>';
   });
 
@@ -5280,7 +5746,7 @@ function _initOfficeScene() {
     ctx.fillStyle = '#1e293b';
     ctx.fillRect(0, H * 0.65, W, H * 0.35);
     // 地板网格线
-    ctx.strokeStyle = 'rgba(255,255,255,0.03)';
+    ctx.strokeStyle = 'color-mix(in srgb, var(--text) 3%, transparent)';
     ctx.lineWidth = 1;
     for (var gy = H * 0.65; gy < H; gy += 20) {
       ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(W, gy); ctx.stroke();
@@ -6359,7 +6825,7 @@ async function viewTemplate(templateId) {
       '</div>' +
     '</div>' +
     '<div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap">' +
-      (t.roles||[]).map(r => '<span style="font-size:10px;background:rgba(203,201,255,0.15);color:var(--primary);padding:2px 8px;border-radius:4px;font-weight:600">' + esc(r) + '</span>').join('') +
+      (t.roles||[]).map(r => '<span style="font-size:10px;background:var(--primary-tint-15);color:var(--primary);padding:2px 8px;border-radius:4px;font-weight:600">' + esc(r) + '</span>').join('') +
       (t.tags||[]).map(tg => '<span style="font-size:10px;background:var(--surface3);padding:2px 6px;border-radius:4px;color:var(--text3)">' + esc(tg) + '</span>').join('') +
     '</div>' +
     '<div style="border:1px solid var(--border-light);border-radius:8px;padding:16px;background:var(--bg);font-size:13px;line-height:1.6;max-height:50vh;overflow-y:auto">' + contentHtml + '</div>' +
@@ -6613,7 +7079,7 @@ function _jobWorkflowChanged() {
   var stepRows = tmpl.steps.map(function(s, i) {
     return '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">' +
       '<span style="font-size:11px;color:var(--text);min-width:140px;font-weight:600">Step '+(i+1)+': '+esc(s.name||s.title||'')+'</span>' +
-      '<select class="job-step-agent input" data-step="'+i+'" style="flex:1;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:6px 8px;color:var(--text);font-size:12px">' +
+      '<select class="job-step-agent input" data-step="'+i+'" style="flex:1;background:var(--surface);border:1px solid var(--overlay-10);border-radius:6px;padding:6px 8px;color:var(--text);font-size:12px">' +
         '<option value="">— 使用默认 Agent —</option>' + agentOpts +
       '</select>' +
       '<label title="启动前需人工批准" style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text3);cursor:pointer;white-space:nowrap">' +
@@ -7691,7 +8157,7 @@ function toggleEnhPreset(agentId, presetId, el) {
     if (list.length >= 8) { alert('最多只能选择 8 个技能'); return; }
     list.push(presetId);
     el.style.borderColor = 'var(--primary)';
-    el.style.background = 'rgba(203,201,255,0.08)';
+    el.style.background = 'var(--primary-tint-8)';
   }
   window._enhSelected[agentId] = list;
   const bar = document.getElementById('enh-selected-bar');
@@ -8410,6 +8876,69 @@ async function skillStoreOpenCatalog(agentId) {
   _ssCatalogReload(agentId);
 }
 
+// Build the "适用角色 + 适用场景" block for a skill entry.
+// - `entry` is the catalog entry from /api/portal/skill-store
+// - `agentRole` (optional) is the agent we're considering granting to;
+//   when present and the agent's role matches one of applicable_roles,
+//   we highlight the matching chip in green and prepend a "✓ 匹配此 agent"
+//   badge. When present but NOT matching, we show "⚠ 此 agent 角色不在推荐列表"
+//   but still let the user grant (soft guidance, not a hard gate).
+// Returns raw HTML — callers embed it in their card layout.
+function _renderSkillApplicabilityBlock(entry, agentRole) {
+  var roles = Array.isArray(entry.applicable_roles) ? entry.applicable_roles : [];
+  var scenarios = Array.isArray(entry.scenarios) ? entry.scenarios : [];
+  if (!roles.length && !scenarios.length) return '';
+
+  var matchBadge = '';
+  var roleNorm = (agentRole || '').toLowerCase().trim();
+  if (roleNorm && roles.length) {
+    var matched = roles.some(function(r){ return String(r).toLowerCase().trim() === roleNorm; });
+    if (matched) {
+      matchBadge = '<span style="display:inline-flex;align-items:center;gap:3px;'
+        + 'padding:2px 8px;font-size:10px;background:rgba(16,185,129,0.15);'
+        + 'color:#10b981;border:1px solid rgba(16,185,129,0.35);border-radius:10px;'
+        + 'margin-right:6px;font-weight:600">✓ 匹配此 agent</span>';
+    } else {
+      matchBadge = '<span title="此 agent 的 role 不在推荐列表中 — 仍可强制授权" '
+        + 'style="display:inline-flex;align-items:center;gap:3px;'
+        + 'padding:2px 8px;font-size:10px;background:rgba(251,191,36,0.12);'
+        + 'color:#f59e0b;border:1px solid rgba(251,191,36,0.3);border-radius:10px;'
+        + 'margin-right:6px">⚠ 角色不匹配</span>';
+    }
+  }
+
+  var rolesHtml = roles.length
+    ? '<div style="font-size:10px;color:var(--text3);margin-top:4px">'
+      + '<span style="margin-right:4px">👤 适用角色:</span>'
+      + roles.map(function(r){
+          var isMatch = roleNorm && String(r).toLowerCase().trim() === roleNorm;
+          var style = isMatch
+            ? 'background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.4);font-weight:600'
+            : 'background:rgba(99,102,241,0.08);color:var(--text2);border:1px solid rgba(99,102,241,0.25)';
+          return '<span style="display:inline-block;padding:1px 7px;margin:0 3px 2px 0;'
+            + 'border-radius:10px;font-size:10px;' + style + '">' + esc(r) + '</span>';
+        }).join('')
+      + '</div>'
+    : '';
+
+  var scenariosHtml = scenarios.length
+    ? '<div style="font-size:10px;color:var(--text3);margin-top:3px">'
+      + '<span style="margin-right:4px">🎯 适用场景:</span>'
+      + scenarios.slice(0, 6).map(function(s){
+          return '<span style="display:inline-block;padding:1px 7px;margin:0 3px 2px 0;'
+            + 'background:rgba(167,139,250,0.08);color:var(--text2);'
+            + 'border:1px solid rgba(167,139,250,0.25);border-radius:10px;font-size:10px">'
+            + esc(s) + '</span>';
+        }).join('')
+      + (scenarios.length > 6 ? '<span style="font-size:10px;color:var(--text3);margin-left:4px">+' + (scenarios.length - 6) + '</span>' : '')
+      + '</div>'
+    : '';
+
+  return (matchBadge ? '<div style="margin-top:4px">' + matchBadge + '</div>' : '')
+    + rolesHtml
+    + scenariosHtml;
+}
+
 async function _ssCatalogReload(agentId) {
   var list = document.getElementById('ss-cat-list');
   if (!list) return;
@@ -8428,12 +8957,19 @@ async function _ssCatalogReload(agentId) {
       list.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:20px;text-align:center">目录为空。把 SKILL.md 或 manifest.yaml 放到 data/skill_catalog/ 下再点"重新扫描"。</div>';
       return;
     }
+    // Look up the target agent's role so the match badge can highlight
+    // skills whose applicable_roles include it.
+    var agList = window._cachedAgents || (typeof agents !== 'undefined' ? agents : []);
+    var _agRec = agList.find(function(a){ return a.id === agentId; });
+    var agentRole = _agRec ? (_agRec.role || '') : '';
+
     var h = '';
     entries.forEach(function(e){
       var runtimeIcon = (e.runtime === 'markdown') ? '📖' : (e.runtime === 'python' ? '🐍' : '📦');
       var installedBadge = e.installed
         ? '<span style="font-size:10px;color:#10b981;border:1px solid #10b981;border-radius:4px;padding:1px 6px;margin-left:6px">已安装</span>'
         : '';
+      var applicabilityHtml = _renderSkillApplicabilityBlock(e, agentRole);
       h += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:6px;display:flex;align-items:flex-start;gap:10px">' +
         '<div style="font-size:20px;line-height:1">'+runtimeIcon+'</div>' +
         '<div style="flex:1;min-width:0">' +
@@ -8445,6 +8981,7 @@ async function _ssCatalogReload(agentId) {
             '<span>source: '+esc(e.source||'')+'</span>' +
             (e.version ? '<span>v'+esc(e.version)+'</span>':'') +
           '</div>' +
+          applicabilityHtml +
         '</div>';
       h += '<div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end">';
       if (!e.installed) {
@@ -8603,7 +9140,7 @@ async function showAnalysisPanel(agentId) {
       }
       html += '</div>';
       if (a.tool_issues && a.tool_issues.length) {
-        html += '<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.04)">';
+        html += '<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--overlay-4)">';
         a.tool_issues.forEach(function(ti) {
           var sevColor = ti.severity==='high'?'#ef4444':ti.severity==='medium'?'#f59e0b':'var(--text3)';
           html += '<div style="font-size:10px;color:' + sevColor + '">⚠ ' + esc(ti.tool_name) + ': ' + esc(ti.issue_type) + ' — ' + esc(ti.description) + '</div>';
@@ -8620,9 +9157,42 @@ async function showAnalysisPanel(agentId) {
 
 // ============ Role Growth Path Panel ============
 async function showGrowthPathPanel(agentId) {
-  const data = await api('GET', '/api/portal/agent/' + agentId + '/growth');
+  // Pull both: role-growth stages + the read-only asset aggregate.
+  const [data, stats] = await Promise.all([
+    api('GET', '/api/portal/agent/' + agentId + '/growth'),
+    api('GET', '/api/portal/agent/' + agentId + '/growth-stats').catch(function(){return null;}),
+  ]);
   let html = '<div style="padding:20px;max-width:800px;min-width:560px">';
   html += '<h3 style="margin-bottom:4px"><span class="material-symbols-outlined" style="vertical-align:middle;color:rgb(251,146,60)">school</span> Role Growth Path</h3>';
+
+  // Asset aggregate ("成长资产" — purely read-only counters from existing modules)
+  if (stats) {
+    var fmtAgo = function(ts) {
+      if (!ts) return '—';
+      var diff = Date.now()/1000 - ts;
+      if (diff < 60) return '刚刚';
+      if (diff < 3600) return Math.floor(diff/60) + ' 分钟前';
+      if (diff < 86400) return Math.floor(diff/3600) + ' 小时前';
+      return Math.floor(diff/86400) + ' 天前';
+    };
+    var kbList = (stats.domain_kbs || []).map(function(k){
+      return esc(k.name) + '(' + k.doc_count + ')';
+    }).join(', ') || '—';
+    var cellStyle = 'background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 12px';
+    var labelStyle = 'font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px';
+    var valueStyle = 'font-weight:700;font-size:18px;color:var(--text);margin-top:2px';
+    var hintStyle = 'font-size:10px;color:var(--text3);margin-top:3px';
+    html += '<div style="margin:16px 0 20px 0">';
+    html += '<div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.8px;margin-bottom:10px">成长资产 (Growth Assets)</div>';
+    html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">';
+    html += '<div style="'+cellStyle+'"><div style="'+labelStyle+'">📚 经验库</div><div style="'+valueStyle+'">' + stats.experience_count + '</div><div style="'+hintStyle+'">role=' + esc(stats.role||'') + '</div></div>';
+    html += '<div style="'+cellStyle+'"><div style="'+labelStyle+'">🧠 长期记忆</div><div style="'+valueStyle+'">' + stats.memory_facts + '</div><div style="'+hintStyle+'">L3 facts</div></div>';
+    html += '<div style="'+cellStyle+'"><div style="'+labelStyle+'">🛠 授予技能</div><div style="'+valueStyle+'">' + stats.granted_skills + '</div><div style="'+hintStyle+'">+' + stats.bound_prompt_packs + ' prompt packs</div></div>';
+    html += '<div style="'+cellStyle+'"><div style="'+labelStyle+'">📖 知识库</div><div style="'+valueStyle+'">' + (stats.domain_kbs||[]).length + '</div><div style="'+hintStyle+'" title="' + esc(kbList) + '">' + stats.domain_kb_chunks_total + ' chunks</div></div>';
+    html += '<div style="'+cellStyle+'"><div style="'+labelStyle+'">🎓 共享贡献</div><div style="'+valueStyle+'">' + stats.shared_knowledge_contributions + '</div><div style="'+hintStyle+'">Knowledge Wiki</div></div>';
+    html += '<div style="'+cellStyle+'"><div style="'+labelStyle+'">✨ 最近总结</div><div style="font-weight:700;font-size:13px;color:var(--text);margin-top:6px">' + fmtAgo(stats.last_self_summary_at) + '</div><div style="'+hintStyle+'" title="' + esc(stats.last_self_summary_preview||'') + '">' + (stats.last_self_summary_preview ? esc(stats.last_self_summary_preview.slice(0,40)) + '…' : '点 Think 按钮') + '</div></div>';
+    html += '</div></div>';
+  }
   if (!data || !data.growth_path) {
     html += '<div style="color:var(--text3);font-size:13px;margin:16px 0">' + (data && data.message ? esc(data.message) : 'No growth path available.') + '</div>';
     html += '<button class="btn" onclick="initGrowthPath(\'' + agentId + '\')">Initialize Growth Path</button>';
@@ -8697,7 +9267,8 @@ function renderProviders(container) {
   if (!container) c.style.padding = '24px';
   var epoch = _renderEpoch;
   // Show header immediately
-  c.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:28px"><div><h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:28px;font-weight:800;letter-spacing:-0.5px">LLM Providers</h2><p style="color:var(--text2);font-size:14px;margin-top:4px">Manage external compute endpoints and local model integrations.</p></div><button class="btn btn-primary" onclick="showModal(\'add-provider\')" style="flex-shrink:0"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle;margin-right:4px">add</span>Add Provider</button></div><div id="providers-grid" style="display:grid;grid-template-columns:repeat(2,1fr);gap:20px"><div style="color:var(--text3);padding:20px">Loading...</div></div>';
+  // Removed top-right "+ Add Provider" button per design pass.
+  c.innerHTML = '<div style="margin-bottom:28px"><h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:28px;font-weight:800;letter-spacing:-0.5px">LLM Providers</h2><p style="color:var(--text2);font-size:14px;margin-top:4px">Manage external compute endpoints and local model integrations.</p></div><div id="providers-grid" style="display:grid;grid-template-columns:repeat(2,1fr);gap:20px"><div style="color:var(--text3);padding:20px">Loading...</div></div>';
   api('GET', '/api/portal/providers').then(function(data) {
     if (!data || epoch !== _renderEpoch) return;
     providers = data.providers || [];
@@ -8710,7 +9281,7 @@ function renderProviders(container) {
         '<div style="display:flex;align-items:center;gap:14px">' +
           '<div style="width:48px;height:48px;background:var(--surface3);border-radius:10px;display:flex;align-items:center;justify-content:center"><span class="material-symbols-outlined" style="font-size:28px;color:var(--primary)">' + kindIcon(p.kind) + '</span></div>' +
           '<div>' +
-            '<div style="display:flex;align-items:center;gap:8px"><span style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:16px;font-weight:700">' + esc(p.name) + '</span><span style="font-size:10px;background:rgba(203,201,255,0.1);color:var(--primary);padding:2px 8px;border-radius:4px;text-transform:uppercase;letter-spacing:0.5px;font-weight:700">' + kindLabel(p.kind) + '</span></div>' +
+            '<div style="display:flex;align-items:center;gap:8px"><span style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:16px;font-weight:700">' + esc(p.name) + '</span><span style="font-size:10px;background:var(--primary-tint-10);color:var(--primary);padding:2px 8px;border-radius:4px;text-transform:uppercase;letter-spacing:0.5px;font-weight:700">' + kindLabel(p.kind) + '</span></div>' +
             '<div style="font-size:12px;color:var(--text3);margin-top:2px">' + esc(p.base_url) + '</div>' +
           '</div>' +
         '</div>' +
@@ -8924,21 +9495,14 @@ async function loadAvailableModels() {
 }
 
 function populateProviderSelects() {
-  // Fill all provider <select> elements that have a default option only
-  // ea-learning-provider / ea-multimodal-provider use a different blank label
-  // ("use default") but otherwise share the same option list.
-  var selIds = [
-    'ca-provider', 'ea-provider',
-    'ea-learning-provider', 'ea-multimodal-provider', 'ea-coding-provider'
-  ];
+  // Top-level provider selects only — per-slot provider selects inside
+  // the Extra LLM Slots list are populated individually by eaRenderExtraLlms.
+  var selIds = ['ca-provider', 'ea-provider'];
   selIds.forEach(selId => {
     const sel = document.getElementById(selId);
     if (!sel) return;
     const curVal = sel.value;
-    var blankLabel = (selId === 'ea-learning-provider' || selId === 'ea-multimodal-provider' || selId === 'ea-coding-provider')
-      ? '（使用默认）'
-      : 'Default (global)';
-    sel.innerHTML = '<option value="">' + blankLabel + '</option>';
+    sel.innerHTML = '<option value="">Default (global)</option>';
     _providerList.forEach(p => {
       const opt = document.createElement('option');
       opt.value = p.id;
@@ -8963,47 +9527,16 @@ function updateModelSelect(providerSelectId, modelSelectId, currentModel) {
     if (currentModel && m === currentModel) opt.selected = true;
     modelEl.appendChild(opt);
   });
-  // Update multimodal tools hint when multimodal provider changes
-  if (providerSelectId === 'ea-multimodal-provider') {
-    _updateMmToolsHint();
-  }
 }
 
-// ── Multimodal supports-tools hint ──
-var _CLOUD_PROVIDER_KINDS = ['openai', 'claude', 'anthropic'];
+// (Removed _updateMmToolsHint — the hardcoded multimodal slot UI is gone;
+// multimodal routing is now handled by the score-based llm_router picking
+// whichever extra_llms slot scores highest for category=multimodal.)
 
-function _updateMmToolsHint() {
-  var hintEl = document.getElementById('ea-mm-tools-hint');
-  var cb = document.getElementById('ea-mm-supports-tools');
-  var provEl = document.getElementById('ea-multimodal-provider');
-  if (!hintEl || !cb || !provEl) return;
-
-  var provId = provEl.value || '';
-  if (!provId) { hintEl.style.display = 'none'; return; }
-
-  var pInfo = _providerList.find(function(p) { return p.id === provId; });
-  var kind = pInfo ? (pInfo.kind || '').toLowerCase() : '';
-  var name = pInfo ? pInfo.name : provId;
-  var isCloud = _CLOUD_PROVIDER_KINDS.indexOf(kind) >= 0
-    || (kind === 'openai' || /openai|claude|anthropic|gemini|doubao|qwen|deepseek/i.test(name));
-  var isLocal = (kind === 'ollama') || /ollama|lm.?studio|local/i.test(name);
-
-  hintEl.style.display = 'block';
-  if (isCloud) {
-    hintEl.style.background = 'var(--primary-alpha, rgba(59,130,246,0.1))';
-    hintEl.style.color = 'var(--primary, #3b82f6)';
-    hintEl.innerHTML = '💡 <b>' + name + '</b> 为云端模型，通常支持 Vision + Tools，建议 <b>开启</b>';
-    cb.checked = true;
-  } else if (isLocal) {
-    hintEl.style.background = 'var(--warning-alpha, rgba(245,158,11,0.1))';
-    hintEl.style.color = 'var(--warning, #f59e0b)';
-    hintEl.innerHTML = '💡 <b>' + name + '</b> 为本地模型，多数 Vision 模型不支持 Tools，建议 <b>关闭</b>';
-    cb.checked = false;
-  } else {
-    hintEl.style.background = 'var(--surface3, #333)';
-    hintEl.style.color = 'var(--text2, #999)';
-    hintEl.innerHTML = '💡 请根据模型能力手动选择是否开启 Tools';
-  }
+function _noop_removed_mm_hint() {
+  // Kept as a no-op so any lingering inline-handler reference doesn't
+  // throw. Safe to delete once the HTML audit confirms no callers.
+  return;
 }
 
 // Load available models on startup
@@ -9086,7 +9619,7 @@ function renderSkillPickerModal(filter) {
     items.forEach(function(p) {
       const isSelected = selected.indexOf(p.id) >= 0;
       html += '<div data-skill-id="' + esc(p.id) + '" onclick="toggleCaSkill(\'' + esc(p.id) + '\',this)" ' +
-        'style="background:' + (isSelected?'rgba(203,201,255,0.12)':'var(--surface3)') + ';border-radius:8px;padding:10px;cursor:pointer;border:1px solid ' + (isSelected?'var(--primary)':'var(--border-light)') + ';transition:all 0.15s">' +
+        'style="background:' + (isSelected?'var(--primary-tint-12)':'var(--surface3)') + ';border-radius:8px;padding:10px;cursor:pointer;border:1px solid ' + (isSelected?'var(--primary)':'var(--border-light)') + ';transition:all 0.15s">' +
         '<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">' +
         '<span style="font-size:15px">' + (p.icon||'📦') + '</span>' +
         '<div style="font-weight:600;font-size:12px;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(p.name) + '</div>' +
@@ -9119,7 +9652,7 @@ function toggleCaSkill(presetId, el) {
     if (list.length >= 8) { alert('最多只能选择 8 个技能'); return; }
     list.push(presetId);
     el.style.borderColor = 'var(--primary)';
-    el.style.background = 'rgba(203,201,255,0.12)';
+    el.style.background = 'var(--primary-tint-12)';
   }
   window._caSelectedSkills = list;
   const c1 = document.getElementById('sp-count');
@@ -9142,7 +9675,7 @@ function confirmCaSkillSelection() {
       chips.style.color = 'var(--text)';
       chips.innerHTML = list.map(function(id) {
         const p = byId[id] || {name:id, icon:'📦'};
-        return '<span style="background:var(--primary);color:#0e141b;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:600;display:inline-flex;align-items:center;gap:4px">' +
+        return '<span style="background:var(--primary);color:var(--primary-text);padding:3px 8px;border-radius:12px;font-size:11px;font-weight:600;display:inline-flex;align-items:center;gap:4px">' +
           (p.icon||'📦') + ' ' + esc(p.name) +
           '<span onclick="event.stopPropagation();removeCaSkill(\'' + esc(id) + '\')" style="cursor:pointer;margin-left:2px">✕</span></span>';
       }).join('');
@@ -9207,9 +9740,57 @@ function eaToggleLlmPanel() {
   if (icon) icon.textContent = willShow ? 'expand_less' : 'expand_more';
 }
 
+// ── Extra LLM Slots — score-based router-aware editor ──
+// Each slot has:
+//   purpose : one of CATEGORIES (dropdown) or "" for "general / no auto-route preference"
+//   provider, model : standard
+//   scores  : {category: float} user-override map. Empty = use public scores from model_scores.json.
+
+var EA_CATEGORIES = ['tool-heavy', 'multimodal', 'reasoning', 'analysis', 'default'];
+window._eaRouterScores = null;   // cached model_scores.json response
+
+async function _eaEnsureRouterScores() {
+  if (window._eaRouterScores) return window._eaRouterScores;
+  try {
+    var r = await api('GET', '/api/portal/llm_router/scores');
+    window._eaRouterScores = r || {models:{}, aliases:{}};
+  } catch (e) {
+    window._eaRouterScores = {models:{}, aliases:{}};
+  }
+  return window._eaRouterScores;
+}
+
+function _eaLookupPublicScore(model, category) {
+  // Mirror of llm_router.resolve_to_canonical + score_for_model.
+  if (!model) return null;
+  var d = window._eaRouterScores; if (!d) return null;
+  var models = d.models || {}; var aliases = d.aliases || {};
+  // exact (case-insensitive)
+  var canonical = null;
+  for (var k in models) { if (k.toLowerCase() === model.toLowerCase()) { canonical = k; break; } }
+  // alias
+  if (!canonical) canonical = aliases[model.toLowerCase()] || aliases[model];
+  // normalize: strip mlx-community/... prefix + quant suffix like -4bit
+  if (!canonical) {
+    var norm = model.replace(/^(mlx-community\/|unsloth\/|bartowski\/|TheBloke\/)/i, '')
+                    .replace(/[-_]?(4bit|8bit|q4|q5|q6|q8|awq|gguf|int4|int8)(-\w+)?$/i, '')
+                    .toLowerCase();
+    canonical = aliases[norm];
+    if (!canonical) {
+      for (var k2 in models) {
+        if (k2.toLowerCase() === norm) { canonical = k2; break; }
+      }
+    }
+  }
+  var entry = canonical ? models[canonical] : null;
+  if (!entry) return null;
+  var v = entry[category];
+  return (v === undefined || v === null) ? null : v;
+}
+
 function eaAddExtraLlmRow() {
   if (!Array.isArray(window._eaExtraLlms)) window._eaExtraLlms = [];
-  window._eaExtraLlms.push({label:'', provider:'', model:'', purpose:'', note:''});
+  window._eaExtraLlms.push({label:'', provider:'', model:'', purpose:'', scores:{}, note:''});
   eaRenderExtraLlms();
 }
 
@@ -9224,47 +9805,131 @@ function eaExtraLlmSet(idx, field, value) {
   if (!Array.isArray(window._eaExtraLlms)) return;
   if (!window._eaExtraLlms[idx]) return;
   window._eaExtraLlms[idx][field] = value;
-  // provider change needs model dropdown refresh
   if (field === 'provider') {
     var modelSelId = 'ea-extra-llm-model-' + idx;
     var provSelId = 'ea-extra-llm-provider-' + idx;
-    // temporarily stash value so updateModelSelect can honor it
     window._eaExtraLlms[idx].model = '';
     updateModelSelect(provSelId, modelSelId, '');
+    // After provider+model picks change, refresh the scores hint for this row
+    setTimeout(function(){ _eaRefreshScoresHint(idx); }, 50);
+  } else if (field === 'model') {
+    _eaRefreshScoresHint(idx);
   }
+}
+
+// Update the inline "public: tool=X reason=Y ..." summary under a slot row
+function _eaRefreshScoresHint(idx) {
+  var el = document.getElementById('ea-slot-scores-hint-' + idx);
+  if (!el) return;
+  var s = (window._eaExtraLlms || [])[idx]; if (!s) return;
+  var parts = [];
+  EA_CATEGORIES.forEach(function(cat){
+    var v = _eaLookupPublicScore(s.model, cat);
+    parts.push(cat + '=' + (v == null ? '—' : v.toFixed(1)));
+  });
+  el.textContent = 'public: ' + parts.join('  ');
+}
+
+function eaExtraLlmSetScore(idx, category, rawValue) {
+  if (!Array.isArray(window._eaExtraLlms)) return;
+  if (!window._eaExtraLlms[idx]) return;
+  if (!window._eaExtraLlms[idx].scores) window._eaExtraLlms[idx].scores = {};
+  var v = String(rawValue || '').trim();
+  if (v === '') {
+    delete window._eaExtraLlms[idx].scores[category];
+    return;
+  }
+  var f = parseFloat(v);
+  if (isNaN(f)) return;
+  // Clamp to 0-10
+  if (f < 0) f = 0; if (f > 10) f = 10;
+  window._eaExtraLlms[idx].scores[category] = f;
+}
+
+function eaToggleSlotScores(idx) {
+  var panel = document.getElementById('ea-slot-scores-panel-' + idx);
+  var caret = document.getElementById('ea-slot-scores-caret-' + idx);
+  if (!panel) return;
+  var show = panel.style.display === 'none';
+  panel.style.display = show ? 'block' : 'none';
+  if (caret) caret.textContent = show ? 'expand_less' : 'expand_more';
 }
 
 function eaRenderExtraLlms() {
   var host = document.getElementById('ea-extra-llms-rows');
   if (!host) return;
   var slots = window._eaExtraLlms || [];
+  // Ensure score table is loaded (async, non-blocking for the first render)
+  _eaEnsureRouterScores().then(function(){
+    // Re-run this function once scores arrive so hints populate
+    slots.forEach(function(_, i){ _eaRefreshScoresHint(i); });
+  });
   if (!slots.length) {
-    host.innerHTML = '<div style="font-size:11px;color:var(--text3);padding:6px 0">（还没有 slot — 点击右上角「添加」来配置第一个）</div>';
+    host.innerHTML = '<div style="font-size:11px;color:var(--text3);padding:6px 0">'
+      + '（还没有 slot — 点击右上角「添加」来配置一个）</div>';
     return;
   }
-  // Build rows: [label | purpose | provider | model | note | ×]
+  var esc = function(v){ return String(v==null?'':v).replace(/"/g,'&quot;'); };
   var providerOptions = '<option value="">（使用默认）</option>' +
     (_providerList || []).map(function(p){
       return '<option value="'+p.id+'">'+p.name+'</option>';
     }).join('');
+  // Purpose dropdown options — known categories + a blank (general) option.
+  var purposeOptions = '<option value="">（通用 / 不指定）</option>'
+    + EA_CATEGORIES.map(function(c){
+        return '<option value="'+c+'">'+c+'</option>';
+      }).join('')
+    + '<option value="fallback">fallback（主模型失败时兜底）</option>';
   var html = '';
   slots.forEach(function(s, i){
-    var esc = function(v){ return String(v==null?'':v).replace(/"/g,'&quot;'); };
-    html += '<div style="display:grid;grid-template-columns:110px 110px 110px 140px 1fr 28px;gap:6px;margin-bottom:6px;align-items:center">' +
-      '<input placeholder="label*" value="'+esc(s.label)+'" onchange="eaExtraLlmSet('+i+',\'label\',this.value)" style="font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:6px 8px">' +
-      '<input placeholder="purpose" value="'+esc(s.purpose)+'" onchange="eaExtraLlmSet('+i+',\'purpose\',this.value)" style="font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:6px 8px">' +
-      '<select id="ea-extra-llm-provider-'+i+'" onchange="eaExtraLlmSet('+i+',\'provider\',this.value)" style="font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:6px 8px">'+providerOptions+'</select>' +
-      '<select id="ea-extra-llm-model-'+i+'" onchange="eaExtraLlmSet('+i+',\'model\',this.value)" style="font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:6px 8px"><option value="">（使用默认）</option></select>' +
-      '<input placeholder="note（可选备注）" value="'+esc(s.note)+'" onchange="eaExtraLlmSet('+i+',\'note\',this.value)" style="font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:6px 8px">' +
-      '<button type="button" class="btn btn-ghost btn-sm" onclick="eaRemoveExtraLlm('+i+')" title="删除" style="padding:2px 4px"><span class="material-symbols-outlined" style="font-size:14px">close</span></button>' +
+    var rowGrid = '1fr 180px 180px 28px 28px';
+    // Score override inputs: 5 categories × 1 input each. Placeholder shows
+    // current public score so user can see "what they'd be overriding".
+    var scoreInputs = EA_CATEGORIES.map(function(cat){
+      var override = (s.scores && s.scores[cat] != null) ? s.scores[cat] : '';
+      return '<div style="display:flex;align-items:center;gap:6px;font-size:11px;margin-bottom:4px">' +
+        '<span style="width:90px;color:var(--text2)">' + cat + '</span>' +
+        '<input type="number" step="0.1" min="0" max="10" value="' + esc(override) + '" ' +
+        'oninput="eaExtraLlmSetScore(' + i + ',\'' + cat + '\',this.value)" ' +
+        'placeholder="use public" ' +
+        'style="width:80px;font-size:11px;background:var(--bg);border:1px solid var(--border);' +
+        'border-radius:4px;color:var(--text);padding:3px 6px">' +
+        '<span id="ea-slot-score-public-' + i + '-' + cat + '" style="color:var(--text3);font-size:10px">' +
+        '</span></div>';
+    }).join('');
+    html += '<div style="background:var(--surface);border:1px solid var(--border-light);border-radius:8px;padding:8px 10px;margin-bottom:8px">' +
+      // Top row: purpose dropdown, provider, model, scores toggle, delete
+      '<div style="display:grid;grid-template-columns:' + rowGrid + ';gap:6px;align-items:center">' +
+        '<select onchange="eaExtraLlmSet(' + i + ',\'purpose\',this.value)" style="font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:6px 8px">' +
+          purposeOptions.replace('value="' + esc(s.purpose) + '"', 'value="' + esc(s.purpose) + '" selected') +
+        '</select>' +
+        '<select id="ea-extra-llm-provider-' + i + '" onchange="eaExtraLlmSet(' + i + ',\'provider\',this.value)" style="font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:6px 8px">' + providerOptions + '</select>' +
+        '<select id="ea-extra-llm-model-' + i + '" onchange="eaExtraLlmSet(' + i + ',\'model\',this.value)" style="font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:6px 8px"><option value="">（使用默认）</option></select>' +
+        '<button type="button" class="btn btn-ghost btn-sm" onclick="eaToggleSlotScores(' + i + ')" title="编辑评分" style="padding:2px 4px">' +
+          '<span id="ea-slot-scores-caret-' + i + '" class="material-symbols-outlined" style="font-size:14px">expand_more</span>' +
+        '</button>' +
+        '<button type="button" class="btn btn-ghost btn-sm" onclick="eaRemoveExtraLlm(' + i + ')" title="删除" style="padding:2px 4px">' +
+          '<span class="material-symbols-outlined" style="font-size:14px">close</span>' +
+        '</button>' +
+      '</div>' +
+      // Public-score summary (always visible)
+      '<div id="ea-slot-scores-hint-' + i + '" style="font-family:monospace;font-size:10px;color:var(--text3);margin-top:4px;padding:0 4px">public: …</div>' +
+      // Expandable per-category override panel
+      '<div id="ea-slot-scores-panel-' + i + '" style="display:none;margin-top:8px;padding:8px;background:var(--surface2);border-radius:6px">' +
+        '<div style="font-size:11px;color:var(--text3);margin-bottom:6px">' +
+          '按类别覆盖公共分 (0-10)；留空 = 用公共分' +
+        '</div>' +
+        scoreInputs +
+      '</div>' +
     '</div>';
   });
   host.innerHTML = html;
-  // After insertion, set provider/model dropdown values + populate models
+  // Set provider/model dropdown values + populate models + seed score hints
   slots.forEach(function(s, i){
-    var provSel = document.getElementById('ea-extra-llm-provider-'+i);
+    var provSel = document.getElementById('ea-extra-llm-provider-' + i);
     if (provSel) provSel.value = s.provider || '';
-    updateModelSelect('ea-extra-llm-provider-'+i, 'ea-extra-llm-model-'+i, s.model || '');
+    updateModelSelect('ea-extra-llm-provider-' + i, 'ea-extra-llm-model-' + i, s.model || '');
+    _eaRefreshScoresHint(i);
   });
 }
 
@@ -9593,8 +10258,8 @@ async function loadTasks(agentId) {
       ph.setAttribute('data-v1-empty', '1');
       ph.style.cssText = 'color:var(--text3);padding:8px;font-size:11px';
       ph.textContent = doneCount > 0
-        ? '✅ 全部完成 (' + doneCount + ' 条已归档)'
-        : '暂无进行中的任务';
+        ? '✅ ' + window.t('tasks.allDone', '全部完成') + ' (' + doneCount + ' ' + window.t('tasks.archivedSuffix', '条已归档') + ')'
+        : window.t('tasks.noneActive', '暂无进行中的任务');
       el.insertBefore(ph, el.firstChild);
     }
     try {
@@ -9861,105 +10526,35 @@ async function _saveSoul(agentId) {
   if (currentAgent === agentId) renderCurrentView();
 }
 
-// ── Active Thinking Panel ──
+// ── Think button: on-demand self-summary ──
+// Replaces the old Active Thinking panel + scheduler. Click → server
+// asks the LLM to summarize the recent N turns of this conversation,
+// distill any rules worth saving (via save_experience), and insert
+// the summary as an assistant bubble.
 async function showThinkingPanel(agentId) {
-  var resp = await api('GET', '/api/portal/agent/'+agentId+'/thinking');
-  var stats = (resp && resp.stats) || {enabled:false};
-  var history = (resp && resp.history) || [];
-
-  var overlay = document.createElement('div');
-  overlay.id = 'thinking-panel-overlay';
-  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
-
-  var historyHtml = history.length === 0 ? '<div style="color:var(--text3);padding:16px;text-align:center">暂无思考记录。启用后点击"立即思考"触发第一次。</div>' :
-    history.map(function(h) {
-      var dt = new Date(h.created_at * 1000);
-      var timeStr = dt.toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
-      var triggerBadge = {manual:'手动',time_driven:'定时',idle:'空闲',state_change:'状态变化',goal_gap:'目标差距'}[h.trigger]||h.trigger;
-      return '<div style="padding:10px 12px;border-bottom:1px solid var(--border);cursor:pointer" onclick="this.querySelector(\'.think-detail\').style.display=this.querySelector(\'.think-detail\').style.display===\'none\'?\'block\':\'none\'">' +
-        '<div style="display:flex;justify-content:space-between;align-items:center">' +
-          '<div><span style="font-size:11px;color:var(--text3)">'+timeStr+'</span> <span style="font-size:10px;padding:1px 6px;border-radius:4px;background:rgba(203,201,255,0.15);color:var(--primary)">'+triggerBadge+'</span></div>' +
-          '<div style="font-size:11px;color:var(--success)">质量: '+h.quality_score+'/100</div>' +
-        '</div>' +
-        '<div class="think-detail" style="display:none;margin-top:8px;font-size:12px;color:var(--text2);line-height:1.6">' +
-          (h.step3_problem ? '<div><b>核心问题:</b> '+esc(h.step3_problem).substring(0,200)+'</div>' : '') +
-          (h.step5_best_action ? '<div><b>最优行动:</b> '+esc(h.step5_best_action).substring(0,200)+'</div>' : '') +
-          (h.step7_reflection ? '<div><b>反思:</b> '+esc(h.step7_reflection).substring(0,200)+'</div>' : '') +
-          (h.proposed_actions && h.proposed_actions.length ? '<div style="margin-top:4px"><b>提议行动:</b><ol style="margin:2px 0 0 16px">' + h.proposed_actions.map(function(a){return '<li>'+esc(a)+'</li>';}).join('') + '</ol></div>' : '') +
-        '</div>' +
-      '</div>';
-    }).join('');
-
-  overlay.innerHTML = '' +
-    '<div style="background:var(--bg2);border-radius:16px;width:700px;max-width:90vw;max-height:85vh;display:flex;flex-direction:column;border:1px solid var(--border);overflow:hidden">' +
-      '<div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">' +
-        '<div style="display:flex;align-items:center;gap:10px">' +
-          '<span class="material-symbols-outlined" style="color:var(--primary);font-size:22px">psychology</span>' +
-          '<span style="font-size:16px;font-weight:700;font-family:\'Plus Jakarta Sans\',sans-serif">主动思考 (Active Thinking)</span>' +
-          '<span style="font-size:11px;padding:2px 8px;border-radius:4px;background:'+(stats.enabled?'rgba(76,175,80,0.15);color:var(--success)':'rgba(255,255,255,0.1);color:var(--text3)')+'">'+(stats.enabled?'已启用':'未启用')+'</span>' +
-        '</div>' +
-        '<button onclick="document.getElementById(\'thinking-panel-overlay\').remove()" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:20px">✕</button>' +
-      '</div>' +
-      '<div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;gap:12px;flex-wrap:wrap;align-items:center">' +
-        '<button class="btn btn-sm '+(stats.enabled?'btn-danger':'btn-primary')+'" onclick="_toggleThinking(\''+agentId+'\','+(!stats.enabled)+')">'+(stats.enabled?'停用':'启用')+' Active Thinking</button>' +
-        '<button class="btn btn-sm btn-ghost" onclick="_triggerThinking(\''+agentId+'\',\'manual\')"><span class="material-symbols-outlined" style="font-size:14px">play_arrow</span> 立即思考</button>' +
-        '<div style="flex:1"></div>' +
-        (stats.enabled ? '<div style="font-size:11px;color:var(--text3)">间隔: '+((stats.config&&stats.config.time_interval_minutes)||60)+'分钟 | 总次数: '+(stats.total_thinks||0)+' | 平均质量: '+(stats.avg_quality_score||0)+'</div>' : '') +
-      '</div>' +
-      '<div style="padding:0 4px">' +
-        '<div style="padding:12px 16px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text3)">思考历史 (Thinking History)</div>' +
-      '</div>' +
-      '<div style="flex:1;overflow-y:auto">' +
-        historyHtml +
-      '</div>' +
-      '<div style="padding:12px 20px;border-top:1px solid var(--border);display:flex;gap:8px;align-items:center">' +
-        '<span style="font-size:11px;color:var(--text3)">配置：</span>' +
-        '<label style="font-size:11px;color:var(--text2)">间隔(分钟)</label>' +
-        '<input id="think-interval" type="number" value="'+((stats.config&&stats.config.time_interval_minutes)||60)+'" min="5" max="1440" style="width:60px;padding:4px;background:var(--surface3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:11px">' +
-        '<label style="font-size:11px;color:var(--text2);margin-left:8px">空闲触发</label>' +
-        '<input id="think-idle" type="checkbox" '+((stats.config&&stats.config.auto_think_on_idle)?'checked':'')+' style="margin-left:4px">' +
-        '<div style="flex:1"></div>' +
-        '<button class="btn btn-ghost btn-sm" onclick="_saveThinkingConfig(\''+agentId+'\')">保存配置</button>' +
-      '</div>' +
-    '</div>';
-  document.body.appendChild(overlay);
-}
-
-async function _toggleThinking(agentId, enable) {
-  if (enable) {
-    var interval = parseInt(document.getElementById('think-interval').value) || 60;
-    var idle = document.getElementById('think-idle').checked;
-    await api('POST', '/api/portal/agent/'+agentId+'/thinking/enable', {
-      time_interval_minutes: interval,
-      auto_think_on_idle: idle
-    });
-  } else {
-    await api('POST', '/api/portal/agent/'+agentId+'/thinking/disable', {});
+  var btn = event && event.target ? event.target.closest('button') : null;
+  var origHtml = btn ? btn.innerHTML : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="material-symbols-outlined" style="font-size:14px;animation:spin 1s linear infinite">progress_activity</span> 总结中';
   }
-  document.getElementById('thinking-panel-overlay').remove();
-  showThinkingPanel(agentId);
-}
-
-async function _triggerThinking(agentId, trigger) {
-  var btn = event.target.closest('button');
-  if (btn) { btn.disabled = true; btn.textContent = '思考中...'; }
-  await api('POST', '/api/portal/agent/'+agentId+'/thinking/trigger', {trigger: trigger});
-  if (btn) { btn.disabled = false; btn.textContent = '✓ 完成'; }
-  setTimeout(function() {
-    document.getElementById('thinking-panel-overlay').remove();
-    showThinkingPanel(agentId);
-  }, 1000);
-}
-
-async function _saveThinkingConfig(agentId) {
-  var interval = parseInt(document.getElementById('think-interval').value) || 60;
-  var idle = document.getElementById('think-idle').checked;
-  await api('POST', '/api/portal/agent/'+agentId+'/thinking/enable', {
-    time_interval_minutes: interval,
-    auto_think_on_idle: idle
-  });
-  document.getElementById('thinking-panel-overlay').remove();
-  showThinkingPanel(agentId);
+  try {
+    var resp = await api('POST', '/api/portal/agent/' + agentId + '/think-now', {});
+    if (!resp || !resp.ok) {
+      alert('自我总结失败：' + ((resp && resp.error) || '未知错误'));
+      return;
+    }
+    // The backend already appended the summary into the agent's event
+    // stream as an assistant message — reload to show it.
+    loadAgentChat(agentId);
+  } catch (e) {
+    alert('自我总结失败：' + (e && e.message ? e.message : e));
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = origHtml;
+    }
+  }
 }
 
 // Cache RolePresetV2 list for the Edit Agent form
@@ -9986,6 +10581,47 @@ async function _eaPopulateRolePresetSelect(currentId) {
   }
   sel.innerHTML = html;
   sel.value = currentId || '';
+}
+
+// ── RAG binding helpers for edit-agent modal ──────────────────────────
+function _eaOnRagModeChange(mode) {
+  var area = document.getElementById('ea-rag-domain-kb-area');
+  if (!area) return;
+  // Domain-KB bindings are only meaningful for private / both.
+  area.style.display = (mode === 'private' || mode === 'both') ? 'block' : 'none';
+}
+
+async function _eaRenderDomainKbCheckboxes(selectedIds) {
+  var box = document.getElementById('ea-rag-domain-kb-list');
+  if (!box) return;
+  box.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:4px">加载中…</div>';
+  try {
+    var data = await api('POST', '/api/portal/domain-kb/list');
+    var kbs = (data && data.knowledge_bases) || [];
+    if (!kbs.length) {
+      box.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:4px">尚无知识库，请先到"知识与记忆"页面创建</div>';
+      return;
+    }
+    var sel = new Set(selectedIds || []);
+    box.innerHTML = kbs.map(function(kb) {
+      var checked = sel.has(kb.id) ? 'checked' : '';
+      return '<label style="display:flex;align-items:center;gap:8px;padding:6px 4px;cursor:pointer;font-size:13px">'
+        + '<input type="checkbox" class="ea-rag-kb-cb" value="' + esc(kb.id) + '" ' + checked + '>'
+        + '<span style="flex:1;color:var(--text)">' + esc(kb.name) + '</span>'
+        + '<span style="color:var(--text3);font-size:11px">' + (kb.doc_count || 0) + ' 块</span>'
+        + '</label>';
+    }).join('');
+  } catch(e) {
+    box.innerHTML = '<div style="color:var(--error);font-size:12px;padding:4px">加载失败: ' + e + '</div>';
+  }
+}
+
+function _eaCollectRagCollectionIds() {
+  var ids = [];
+  document.querySelectorAll('.ea-rag-kb-cb:checked').forEach(function(cb) {
+    ids.push(cb.value);
+  });
+  return ids;
 }
 
 async function editAgentProfile(agentId) {
@@ -10024,46 +10660,26 @@ async function editAgentProfile(agentId) {
   // Populate provider and model selects
   document.getElementById('ea-provider').value = agent.provider || '';
   updateModelSelect('ea-provider', 'ea-model', agent.model || '');
-  // ── 方案甲: learning / multimodal slots ──
-  var lpEl = document.getElementById('ea-learning-provider');
-  if (lpEl) {
-    lpEl.value = agent.learning_provider || '';
-    updateModelSelect('ea-learning-provider', 'ea-learning-model', agent.learning_model || '');
-  }
-  var mpEl = document.getElementById('ea-multimodal-provider');
-  if (mpEl) {
-    mpEl.value = agent.multimodal_provider || '';
-    updateModelSelect('ea-multimodal-provider', 'ea-multimodal-model', agent.multimodal_model || '');
-  }
-  var cpEl = document.getElementById('ea-coding-provider');
-  if (cpEl) {
-    cpEl.value = agent.coding_provider || '';
-    updateModelSelect('ea-coding-provider', 'ea-coding-model', agent.coding_model || '');
-  }
-  // multimodal_supports_tools checkbox + hint
-  var mmToolsCb = document.getElementById('ea-mm-supports-tools');
-  if (mmToolsCb) mmToolsCb.checked = !!agent.multimodal_supports_tools;
-  _updateMmToolsHint();
-  // ── 方案乙(a): extra_llms 任意命名 slot ──
+  // Extra LLM Slots (unified multi-slot). Legacy learning_/multimodal_/
+  // coding_ provider fields are no longer surfaced — if present in the
+  // agent record, they stay in the DB but the UI doesn't show them.
   window._eaExtraLlms = Array.isArray(agent.extra_llms) ? agent.extra_llms.map(function(s){
     return {
       label: (s && s.label) || '',
       provider: (s && s.provider) || '',
       model: (s && s.model) || '',
       purpose: (s && s.purpose) || '',
+      scores: (s && s.scores && typeof s.scores === 'object') ? s.scores : {},
       note: (s && s.note) || '',
     };
   }) : [];
   eaRenderExtraLlms();
-  // ── 方案乙(b): auto_route 启发式 ──
+  // Score-based auto-route — only 2 editable fields left: enabled + threshold.
   var ar = agent.auto_route || {};
   var arEn = document.getElementById('ea-ar-enabled');
   if (arEn) arEn.checked = !!ar.enabled;
-  var arDef = document.getElementById('ea-ar-default'); if (arDef) arDef.value = ar['default'] || '';
-  var arCpx = document.getElementById('ea-ar-complex'); if (arCpx) arCpx.value = ar['complex'] || '';
-  var arMm = document.getElementById('ea-ar-multimodal'); if (arMm) arMm.value = ar['multimodal'] || '';
-  var arCd = document.getElementById('ea-ar-coding'); if (arCd) arCd.value = ar['coding'] || '';
-  var arTh = document.getElementById('ea-ar-threshold'); if (arTh) arTh.value = ar['complex_threshold_chars'] || 2000;
+  var arTh = document.getElementById('ea-ar-threshold');
+  if (arTh) arTh.value = ar['complex_threshold_chars'] || 2000;
   // 面板默认收起；如果用户已经配过任意 extra_llms / learning / multimodal / auto_route，就自动展开
   var panel = document.getElementById('ea-llm-panel');
   var toggleIcon = document.getElementById('ea-llm-toggle-label');
@@ -10087,6 +10703,13 @@ async function editAgentProfile(agentId) {
   _renderAvatarGrid('ea-avatar-grid', '_eaSelectedAvatar', 'eaPickAvatar');
   document.getElementById('ea-language').value = prof.language || 'auto';
   document.getElementById('ea-prompt').value = prof.custom_instructions || '';
+
+  // RAG configuration (mode + domain KB bindings)
+  var eaRagMode = document.getElementById('ea-rag-mode');
+  var ragModeVal = prof.rag_mode || 'shared';
+  if (eaRagMode) eaRagMode.value = ragModeVal;
+  _eaRenderDomainKbCheckboxes(prof.rag_collection_ids || []);
+  _eaOnRagModeChange(ragModeVal);
 
   // Self-improvement state
   var si = agent.self_improvement;
@@ -10125,41 +10748,40 @@ async function saveAgentProfile() {
     if (!name) { alert('Agent name is required'); return; }
 
     const eaTags = window._eaTags || [];
-    // 收集 extra_llms —— 过滤掉空行
+    // Collect extra_llms — keep any slot that has provider OR model OR
+    // purpose OR label (anything meaningful). Scores are carried through
+    // as-is (user overrides from the expandable scores panel).
     var extraLlms = (window._eaExtraLlms || []).filter(function(s){
-      return s && String(s.label || '').trim();
+      if (!s) return false;
+      return String(s.label || '').trim()
+          || String(s.provider || '').trim()
+          || String(s.model || '').trim()
+          || String(s.purpose || '').trim();
     }).map(function(s){
+      // Sanitize scores: drop non-numeric / out-of-range / null values.
+      var cleanedScores = {};
+      if (s.scores && typeof s.scores === 'object') {
+        Object.keys(s.scores).forEach(function(k){
+          var v = parseFloat(s.scores[k]);
+          if (!isNaN(v) && v >= 0 && v <= 10) cleanedScores[k] = v;
+        });
+      }
       return {
         label: String(s.label || '').trim(),
         provider: String(s.provider || '').trim(),
         model: String(s.model || '').trim(),
         purpose: String(s.purpose || '').trim(),
+        scores: cleanedScores,
         note: String(s.note || '').trim(),
       };
     });
-    // 收集 auto_route
+    // Score-based auto_route: only 2 knobs remain.
     var arEn = document.getElementById('ea-ar-enabled');
-    var arDef = document.getElementById('ea-ar-default');
-    var arCpx = document.getElementById('ea-ar-complex');
-    var arMm = document.getElementById('ea-ar-multimodal');
-    var arCd = document.getElementById('ea-ar-coding');
     var arTh = document.getElementById('ea-ar-threshold');
     var autoRoute = {
       enabled: !!(arEn && arEn.checked),
-      'default': arDef ? arDef.value.trim() : '',
-      'complex': arCpx ? arCpx.value.trim() : '',
-      multimodal: arMm ? arMm.value.trim() : '',
-      coding: arCd ? arCd.value.trim() : '',
       complex_threshold_chars: arTh ? (parseInt(arTh.value, 10) || 2000) : 2000,
     };
-    // 学习 / 多模态 / 编码 slot
-    var lp = document.getElementById('ea-learning-provider');
-    var lm = document.getElementById('ea-learning-model');
-    var mp = document.getElementById('ea-multimodal-provider');
-    var mm = document.getElementById('ea-multimodal-model');
-    var cdp = document.getElementById('ea-coding-provider');
-    var cdm = document.getElementById('ea-coding-model');
-    var mmToolsCb = document.getElementById('ea-mm-supports-tools');
     // Collect department
     var eaDeptSel2 = document.getElementById('ea-department');
     var eaDeptCustom2 = document.getElementById('ea-department-custom');
@@ -10179,13 +10801,6 @@ async function saveAgentProfile() {
       working_dir: workdirEl ? workdirEl.value.trim() : '',
       provider: providerEl ? providerEl.value : '',
       model: modelEl ? modelEl.value : '',
-      learning_provider: lp ? lp.value : '',
-      learning_model: lm ? lm.value : '',
-      multimodal_provider: mp ? mp.value : '',
-      multimodal_model: mm ? mm.value : '',
-      coding_provider: cdp ? cdp.value : '',
-      coding_model: cdm ? cdm.value : '',
-      multimodal_supports_tools: !!(mmToolsCb && mmToolsCb.checked),
       extra_llms: extraLlms,
       auto_route: autoRoute,
       personality: personalityEl ? personalityEl.value.trim() : '',
@@ -10195,6 +10810,8 @@ async function saveAgentProfile() {
       robot_avatar: window._eaSelectedAvatar || '',
       language: languageEl ? languageEl.value : 'auto',
       custom_instructions: promptEl ? promptEl.value.trim() : '',
+      rag_mode: (document.getElementById('ea-rag-mode') || {}).value || 'shared',
+      rag_collection_ids: _eaCollectRagCollectionIds(),
     };
 
     console.log('saveAgentProfile payload:', agentId, payload);
@@ -10299,9 +10916,13 @@ function renderChannels(container) {
                     ${ch.webhook_url ? '<div style="font-size:12px;color:var(--text3);margin-top:2px">Outbound: '+esc(ch.webhook_url)+'</div>' : ''}
                   </div>
                 </div>
-                <div style="margin-top:10px;display:flex;gap:6px">
+                <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
                   <button class="btn btn-sm btn-ghost" onclick="editChannel('${esc(ch.id)}')">Edit</button>
-                  <button class="btn btn-sm btn-ghost" onclick="testChannel('${esc(ch.id)}')">Test</button>
+                  ${ch.enabled
+                    ? `<button class="btn btn-sm btn-ghost" onclick="testChannel('${esc(ch.id)}')">Test</button>
+                       <button class="btn btn-sm btn-ghost" style="color:#f59e0b" onclick="toggleChannelEnabled('${esc(ch.id)}',false)">⏸ Disable</button>`
+                    : `<button class="btn btn-sm btn-ghost" disabled title="Channel disabled — enable first" style="opacity:0.5;cursor:not-allowed">Test</button>
+                       <button class="btn btn-sm btn-ghost" style="color:#10b981" onclick="toggleChannelEnabled('${esc(ch.id)}',true)">▶ Enable</button>`}
                   <button class="btn btn-sm btn-danger" onclick="deleteChannel('${esc(ch.id)}')">Delete</button>
                 </div>
               </div>
@@ -10408,12 +11029,44 @@ async function deleteChannel(id) {
   renderChannels();
 }
 
+async function toggleChannelEnabled(id, enable) {
+  var verb = enable ? 'enable' : 'disable';
+  try {
+    var r = await api('POST', `/api/portal/channels/${id}/${verb}`);
+    if (r && r.ok) {
+      // UI reassurance — short inline note.
+      if (window._toast) {
+        window._toast(
+          enable ? `Channel enabled — polling resumed`
+                 : `Channel disabled — no availability monitoring`,
+          'ok');
+      }
+      renderChannels();
+    } else {
+      alert(`${verb} failed: ` + JSON.stringify(r));
+    }
+  } catch (e) {
+    alert(`${verb} failed: ` + (e.message || String(e)));
+  }
+}
+
 async function testChannel(id) {
   var btn = event && event.target ? event.target : null;
   if (btn) { btn.disabled = true; btn.textContent = 'Testing...'; }
   try {
     const data = await api('POST', `/api/portal/channels/${id}/test`);
     if (!data) return;
+    // New: disabled channels short-circuit with skipped=true.
+    if (data.skipped) {
+      var card = btn ? btn.closest('.card') : null;
+      var tst = document.createElement('div');
+      tst.style.cssText = 'margin-top:8px;padding:8px 12px;border-radius:6px;font-size:12px;background:var(--primary-tint-10);color:var(--text2);border:1px solid var(--border)';
+      tst.textContent = '⏸ ' + (data.message || 'Channel disabled; test skipped.');
+      if (card) card.appendChild(tst);
+      else document.body.appendChild(tst);
+      setTimeout(function(){ tst.style.opacity = '0'; setTimeout(function(){ tst.remove(); }, 300); }, 5000);
+      return;
+    }
     var ok = data.success;
     var msg = ok ? (data.message || 'Connected!') : ('Failed: ' + (data.error || 'unknown'));
     if (ok && data.polling) msg += ' · Polling: ' + data.polling;
@@ -10457,8 +11110,8 @@ async function renderProjects() {
   var _projHeader = ''
     + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">'
     + '  <div><h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:22px;font-weight:800;margin:0">Projects</h2>'
-    + '    <p style="font-size:12px;color:var(--text3);margin-top:4px">组织多 agent 协作项目与任务</p></div>'
-    + '  <button class="btn btn-primary btn-sm" onclick="showCreateProjectModal()"><span class="material-symbols-outlined" style="font-size:14px">add</span> New Project</button>'
+    + '    <p style="font-size:12px;color:var(--text3);margin-top:4px">' + t('project.subtitle', '组织多 agent 协作项目与任务') + '</p></div>'
+    + '  <button class="btn btn-primary btn-sm" onclick="showCreateProjectModal()"><span class="material-symbols-outlined" style="font-size:14px">add</span> ' + t('project.new', 'New Project') + '</button>'
     + '</div>';
   try {
     var data = await api('GET', '/api/portal/projects');
@@ -10466,7 +11119,7 @@ async function renderProjects() {
     var pcEl = document.getElementById('project-count');
     if (pcEl) pcEl.textContent = projects.length;
     if (!projects.length) {
-      c.innerHTML = _projHeader + '<div style="text-align:center;padding:60px 20px;color:var(--text3)"><span class="material-symbols-outlined" style="font-size:48px;display:block;margin-bottom:12px">folder_special</span><div style="font-size:18px;font-weight:700;margin-bottom:8px">No Projects Yet</div><div style="font-size:13px;margin-bottom:16px">Create a project to organize agents into collaborative teams</div><button class="btn btn-primary" onclick="showCreateProjectModal()"><span class="material-symbols-outlined" style="font-size:16px">add</span> Create Project</button></div>';
+      c.innerHTML = _projHeader + '<div style="text-align:center;padding:60px 20px;color:var(--text3)"><span class="material-symbols-outlined" style="font-size:48px;display:block;margin-bottom:12px">folder_special</span><div style="font-size:18px;font-weight:700;margin-bottom:8px">' + t('project.none', 'No Projects Yet') + '</div><div style="font-size:13px;margin-bottom:16px">' + t('project.noneHint', 'Create a project to organize agents into collaborative teams') + '</div><button class="btn btn-primary" onclick="showCreateProjectModal()"><span class="material-symbols-outlined" style="font-size:16px">add</span> ' + t('project.create', 'Create Project') + '</button></div>';
       return;
     }
     // Sort by created_at descending (newest first)
@@ -10478,14 +11131,14 @@ async function renderProjects() {
     // Status metadata — label / color / bg per lifecycle state
     var STATUS_META = {
       planning:  { label: '未开始', zh: '未开始', color: '#9ca3af', bg: 'rgba(156,163,175,0.12)' },
-      active:    { label: '进行中', zh: '进行中', color: 'var(--primary)', bg: 'rgba(203,201,255,0.12)' },
+      active:    { label: '进行中', zh: '进行中', color: 'var(--primary)', bg: 'var(--primary-tint-12)' },
       suspended: { label: '挂起',   zh: '挂起',   color: '#f59e0b', bg: 'rgba(245,158,11,0.12)' },
       cancelled: { label: '停止',   zh: '停止',   color: '#ef4444', bg: 'rgba(239,68,68,0.12)' },
       completed: { label: '结束',   zh: '结束',   color: '#22c55e', bg: 'rgba(34,197,94,0.12)' },
       archived:  { label: '归档',   zh: '归档',   color: '#6b7280', bg: 'rgba(107,114,128,0.12)' },
     };
     function _statusMeta(s){
-      return STATUS_META[s] || { label: s || 'unknown', color: 'var(--text3)', bg: 'rgba(255,255,255,0.05)' };
+      return STATUS_META[s] || { label: s || 'unknown', color: 'var(--text3)', bg: 'var(--overlay-5)' };
     }
 
     // Split into active (in-flight) vs closed (结束/停止/归档)
@@ -10532,9 +11185,9 @@ async function renderProjects() {
         '<div style="display:flex;gap:8px;font-size:11px;margin-bottom:16px">' +
           '<span style="padding:3px 8px;border-radius:4px;background:rgba(34,197,94,0.1);color:#22c55e;font-weight:600">✓ '+(ts.done||0)+' done</span>' +
           '<span style="padding:3px 8px;border-radius:4px;background:rgba(59,130,246,0.1);color:#3b82f6;font-weight:600">⏳ '+(ts.in_progress||0)+' active</span>' +
-          '<span style="padding:3px 8px;border-radius:4px;background:rgba(255,255,255,0.05);color:var(--text3);font-weight:600">📋 '+(ts.todo||0)+' todo</span>' +
+          '<span style="padding:3px 8px;border-radius:4px;background:var(--overlay-5);color:var(--text3);font-weight:600">📋 '+(ts.todo||0)+' todo</span>' +
         '</div>' +
-        '<div style="display:flex;gap:6px;border-top:1px solid rgba(255,255,255,0.06);padding-top:14px;flex-wrap:wrap">' +
+        '<div style="display:flex;gap:6px;border-top:1px solid var(--overlay-6);padding-top:14px;flex-wrap:wrap">' +
           '<button class="btn btn-primary btn-sm" style="flex:none" onclick="event.stopPropagation();openProject(\''+p.id+'\')"><span class="material-symbols-outlined" style="font-size:14px">open_in_new</span> Open</button>' +
           statusBtns +
           '<button class="btn btn-ghost btn-sm" style="flex:none" onclick="event.stopPropagation();editProject(\''+p.id+'\',\''+esc(p.name).replace(/'/g,"\\'")+'\',\''+esc(p.description||'').replace(/'/g,"\\'")+'\')"><span class="material-symbols-outlined" style="font-size:14px">edit</span> Edit</button>' +
@@ -10550,7 +11203,7 @@ async function renderProjects() {
         '<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">' +
           '<span class="material-symbols-outlined" style="font-size:20px;color:var(--primary)">rocket_launch</span>' +
           '<span style="font-size:15px;font-weight:700;color:var(--text)">Active Projects</span>' +
-          '<span style="font-size:11px;padding:2px 8px;border-radius:10px;background:rgba(203,201,255,0.12);color:var(--primary);font-weight:700">'+activeProjs.length+'</span>' +
+          '<span style="font-size:11px;padding:2px 8px;border-radius:10px;background:var(--primary-tint-12);color:var(--primary);font-weight:700">'+activeProjs.length+'</span>' +
         '</div>' +
         '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(400px,1fr));gap:18px">' +
           activeProjs.map(_projCard).join('') +
@@ -10612,7 +11265,12 @@ async function renderProjectDetail(projId) {
       closeBtn =
         '<button class="btn btn-ghost btn-sm" style="color:var(--primary)" onclick="changeProjectStatus(\''+projId+'\',\'active\')"><span class="material-symbols-outlined" style="font-size:16px">restart_alt</span> 重新激活</button>';
     }
-    actionsEl.innerHTML = pauseBtn + closeBtn + '<button class="btn btn-ghost btn-sm" onclick="showProjectMemberModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">group_add</span> Members</button><button class="btn btn-ghost btn-sm" onclick="showProjectTaskModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">add_task</span> Task</button><button class="btn btn-ghost btn-sm" onclick="editProject(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">edit</span> Edit</button><button class="btn btn-ghost btn-sm" style="color:var(--error)" onclick="deleteProject(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">delete</span> Delete</button><button class="btn btn-ghost btn-sm" onclick="currentView=\'projects\';renderCurrentView()"><span class="material-symbols-outlined" style="font-size:16px">arrow_back</span> Back</button>';
+    // 强制终止按钮 — 只在项目还活跃时显示
+    var abortBtn = '';
+    if (proj.status !== 'completed' && proj.status !== 'cancelled' && proj.status !== 'archived') {
+      abortBtn = '<button class="btn btn-ghost btn-sm" style="color:var(--error)" onclick="projectAbort(\''+projId+'\')" title="停止任何正在运行的 Agent + kill 子进程"><span class="material-symbols-outlined" style="font-size:16px">stop_circle</span> 终止</button>';
+    }
+    actionsEl.innerHTML = pauseBtn + closeBtn + abortBtn + '<button class="btn btn-ghost btn-sm" onclick="showProjectMemberModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">group_add</span> Members</button><button class="btn btn-ghost btn-sm" onclick="showProjectTaskModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">add_task</span> Task</button><button class="btn btn-ghost btn-sm" onclick="editProject(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">edit</span> Edit</button><button class="btn btn-ghost btn-sm" style="color:var(--error)" onclick="deleteProject(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">delete</span> Delete</button><button class="btn btn-ghost btn-sm" onclick="currentView=\'projects\';renderCurrentView()"><span class="material-symbols-outlined" style="font-size:16px">arrow_back</span> Back</button>';
     if (proj.paused) {
       var pausedBanner = '<div style="background:rgba(255,152,0,0.15);border-bottom:1px solid var(--warning,#ff9800);padding:8px 16px;color:var(--warning,#ff9800);font-size:12px">⏸️ 项目已暂停 — 暂停人: '+esc(proj.paused_by||'-')+(proj.paused_reason?'，原因: '+esc(proj.paused_reason):'')+(proj.paused_queue_count?'  ·  排队消息: '+proj.paused_queue_count:'')+'</div>';
       // banner inserted via wrapper below
@@ -10628,7 +11286,7 @@ async function renderProjectDetail(projId) {
       var active = (_activeTab === key);
       return '<button onclick="switchProjectTab(\''+projId+'\',\''+key+'\')" class="btn btn-ghost btn-sm" style="border-radius:0;border-bottom:2px solid '+(active?'var(--primary)':'transparent')+';color:'+(active?'var(--primary)':'var(--text2)')+';font-weight:'+(active?'700':'500')+';padding:10px 16px"><span class="material-symbols-outlined" style="font-size:16px;margin-right:4px">'+icon+'</span>'+label+'</button>';
     };
-    var tabBar = '<div style="display:flex;gap:2px;border-bottom:1px solid rgba(255,255,255,0.05);background:var(--bg);flex-shrink:0">' +
+    var tabBar = '<div style="display:flex;gap:2px;border-bottom:1px solid var(--overlay-5);background:var(--bg);flex-shrink:0">' +
       _tabBtn('overview','Overview','dashboard') +
       _tabBtn('goals','目标','flag') +
       _tabBtn('milestones','里程碑','timeline') +
@@ -10647,15 +11305,15 @@ async function renderProjectDetail(projId) {
       '<div id="proj-pane-chat-'+projId+'" style="flex:1;min-height:0;'+paneVis('chat')+'">' +
       '<div style="display:grid;grid-template-columns:1fr 300px;height:100%;min-height:0;overflow:hidden">' +
       '<!-- Chat Area -->' +
-      '<div style="display:flex;flex-direction:column;min-height:0;border-right:1px solid rgba(255,255,255,0.05)">' +
+      '<div style="display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--overlay-5)">' +
         '<div id="project-chat-msgs-'+projId+'" style="flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px;min-height:0"></div>' +
-        '<div style="padding:12px 16px;border-top:1px solid rgba(255,255,255,0.05);display:flex;flex-direction:column;gap:6px;position:relative">' +
+        '<div style="padding:12px 16px;border-top:1px solid var(--overlay-5);display:flex;flex-direction:column;gap:6px;position:relative">' +
           '<div id="mention-dropdown-'+projId+'" class="mention-dropdown"></div>' +
           '<div id="proj-attach-preview-'+projId+'" style="display:none;flex-wrap:wrap;gap:6px"></div>' +
           '<div style="display:flex;gap:8px;align-items:center">' +
             '<input type="file" id="proj-attach-file-'+projId+'" multiple style="display:none" onchange="handleProjAttach(\''+projId+'\',this)">' +
             '<button class="btn btn-ghost btn-sm" title="Attach files" onclick="document.getElementById(\'proj-attach-file-'+projId+'\').click()"><span class="material-symbols-outlined" style="font-size:18px">attach_file</span></button>' +
-            '<input type="text" id="project-chat-input-'+projId+'" placeholder="Message the team... (@ to mention)" style="flex:1;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:10px 14px;color:var(--text);font-size:13px" onkeydown="_projInputKeydown(event,\''+projId+'\')" oninput="_projInputChange(\''+projId+'\')">' +
+            '<input type="text" id="project-chat-input-'+projId+'" placeholder="Message the team... (@ to mention)" style="flex:1;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;padding:10px 14px;color:var(--text);font-size:13px" onkeydown="_projInputKeydown(event,\''+projId+'\')" oninput="_projInputChange(\''+projId+'\')">' +
             '<button class="btn btn-primary btn-sm" onclick="sendProjectMsg(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:18px">send</span></button>' +
           '</div>' +
         '</div>' +
@@ -10696,7 +11354,7 @@ async function renderProjectDetail(projId) {
           var name = ag ? ag.name : m.agent_id;
           var role = ag ? _resolveRobotRole(ag) : 'general';
           var avatarSrc = _miniRobotDataURL(role);
-          return '<span style="display:inline-flex;align-items:center;gap:5px;background:var(--surface);border-radius:12px;padding:3px 10px 3px 4px;border:1px solid rgba(255,255,255,0.08);font-size:11px;color:var(--text)">' +
+          return '<span style="display:inline-flex;align-items:center;gap:5px;background:var(--surface);border-radius:12px;padding:3px 10px 3px 4px;border:1px solid var(--overlay-8);font-size:11px;color:var(--text)">' +
             '<img src="'+avatarSrc+'" style="width:20px;height:22px;image-rendering:pixelated" />' +
             esc(name) +
           '</span>';
@@ -10708,7 +11366,7 @@ async function renderProjectDetail(projId) {
           var name = ag ? (ag.role+'-'+ag.name) : m.agent_id;
           var role = ag ? _resolveRobotRole(ag) : 'general';
           var avatarSrc = _miniRobotDataURL(role);
-          return '<div style="display:flex;align-items:center;gap:8px;background:var(--surface);border-radius:8px;padding:8px 10px;border:1px solid rgba(255,255,255,0.05);font-size:12px">' +
+          return '<div style="display:flex;align-items:center;gap:8px;background:var(--surface);border-radius:8px;padding:8px 10px;border:1px solid var(--overlay-5);font-size:12px">' +
             '<img src="'+avatarSrc+'" style="width:32px;height:36px;flex-shrink:0;image-rendering:pixelated" />' +
             '<div style="min-width:0">' +
               '<div style="font-weight:700;color:var(--text)">'+esc(name)+'</div>' +
@@ -10746,7 +11404,7 @@ async function renderProjectDetail(projId) {
           var agentId = stepAgentMap[stepIdx] || t.assigned_to || '';
           var ag = agents.find(function(a){ return a.id === agentId; });
           var agentName = ag ? ag.name : (agentId || '—');
-          var barColor = isDone ? 'var(--success, #4caf50)' : isInProgress ? 'var(--warning, #ff9800)' : 'rgba(255,255,255,0.1)';
+          var barColor = isDone ? 'var(--success, #4caf50)' : isInProgress ? 'var(--warning, #ff9800)' : 'var(--overlay-10)';
           var toggleBtn = isDone ?
             '<span class="material-symbols-outlined" style="font-size:14px;cursor:pointer;color:var(--success,#4caf50)" onclick="toggleWfStep(\''+projId+'\',\''+t.id+'\',\'todo\')" title="标记为未完成">check_circle</span>' :
             '<span class="material-symbols-outlined" style="font-size:14px;cursor:pointer;color:var(--text3);opacity:0.5" onclick="toggleWfStep(\''+projId+'\',\''+t.id+'\',\'done\')" title="标记为完成">radio_button_unchecked</span>';
@@ -10759,7 +11417,7 @@ async function renderProjectDetail(projId) {
               '</div>'
             : '';
           var borderExtra = pendingApproval ? ';border-color:rgba(59,130,246,0.4)' : '';
-          return '<div style="background:var(--surface);border-radius:8px;padding:8px 10px;border:1px solid rgba(255,255,255,0.05)'+borderExtra+';font-size:11px;border-left:3px solid '+barColor+'">' +
+          return '<div style="background:var(--surface);border-radius:8px;padding:8px 10px;border:1px solid var(--overlay-5)'+borderExtra+';font-size:11px;border-left:3px solid '+barColor+'">' +
             '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px">' +
               toggleBtn +
               '<span style="flex:1;font-weight:600;color:'+(isDone?'var(--text3)':'var(--text)')+';'+(isDone?'text-decoration:line-through':'')+'">' +esc(stepName)+'</span>' +
@@ -10776,7 +11434,7 @@ async function renderProjectDetail(projId) {
         wfStepsEl.insertAdjacentHTML('afterbegin',
           '<div style="margin-bottom:8px">' +
             '<div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text3);margin-bottom:4px"><span>Progress</span><span>'+doneCount+'/'+wfTasks.length+' ('+pct+'%)</span></div>' +
-            '<div style="height:4px;background:rgba(255,255,255,0.08);border-radius:2px;overflow:hidden"><div style="height:100%;width:'+pct+'%;background:var(--primary);border-radius:2px;transition:width 0.3s"></div></div>' +
+            '<div style="height:4px;background:var(--overlay-8);border-radius:2px;overflow:hidden"><div style="height:100%;width:'+pct+'%;background:var(--primary);border-radius:2px;transition:width 0.3s"></div></div>' +
           '</div>'
         );
       }
@@ -10799,7 +11457,7 @@ async function renderProjectDetail(projId) {
           }
           var reasonLine = m.status==='rejected' && m.rejected_reason
             ? '<div style="color:var(--error);font-size:10px;margin-top:2px">驳回原因: '+esc(m.rejected_reason)+'</div>' : '';
-          return '<div style="background:var(--surface);border-radius:8px;padding:8px 10px;border:1px solid rgba(255,255,255,0.05);font-size:11px;cursor:pointer" onclick="showMilestoneUpdateModal(\''+projId+'\',\''+m.id+'\',\''+esc(m.name).replace(/'/g,"\\\'")+'\',\''+m.status+'\')" title="Click to update">' +
+          return '<div style="background:var(--surface);border-radius:8px;padding:8px 10px;border:1px solid var(--overlay-5);font-size:11px;cursor:pointer" onclick="showMilestoneUpdateModal(\''+projId+'\',\''+m.id+'\',\''+esc(m.name).replace(/'/g,"\\\'")+'\',\''+m.status+'\')" title="Click to update">' +
             '<div style="font-weight:600">'+statusIcon+' '+esc(m.name)+'</div>' +
             '<div style="color:var(--text3);font-size:10px;margin-top:2px">'+esc(responsible)+' · '+dueDate+'</div>' +
             reasonLine + actions +
@@ -10850,9 +11508,9 @@ async function renderProjectDetail(projId) {
             }).join('') +
           '</div>';
         }
-        var editBtn = '<button onclick="editTaskSteps(\''+esc(projId)+'\',\''+esc(t.id)+'\')" title="编辑步骤" style="font-size:10px;background:transparent;color:var(--text3);border:1px solid rgba(255,255,255,0.1);border-radius:3px;padding:1px 6px;cursor:pointer;margin-left:6px">⚙️ 步骤</button>';
+        var editBtn = '<button onclick="editTaskSteps(\''+esc(projId)+'\',\''+esc(t.id)+'\')" title="编辑步骤" style="font-size:10px;background:transparent;color:var(--text3);border:1px solid var(--overlay-10);border-radius:3px;padding:1px 6px;cursor:pointer;margin-left:6px">⚙️ 步骤</button>';
         var pausedBadge = hasReview ? '<span style="font-size:9px;background:rgba(59,130,246,0.18);color:#3b82f6;padding:1px 6px;border-radius:3px;margin-left:6px">⏸ 等待审核</span>' : '';
-        return '<div style="background:var(--surface);border-radius:8px;padding:8px 10px;border:1px solid '+(hasReview?'rgba(59,130,246,0.4)':'rgba(255,255,255,0.05)')+';font-size:12px">' +
+        return '<div style="background:var(--surface);border-radius:8px;padding:8px 10px;border:1px solid '+(hasReview?'rgba(59,130,246,0.4)':'var(--overlay-5)')+';font-size:12px">' +
           '<div style="display:flex;justify-content:space-between;align-items:center">' +
             '<span style="font-weight:600">'+statusIcon+' '+esc(t.title)+pausedBadge+editBtn+'</span>' +
             '<span style="font-size:10px;color:var(--text3)">→ '+esc(assignee)+'</span>' +
@@ -10911,21 +11569,21 @@ async function loadProjectTabContent(projId, tabKey) {
 function _pctBar(pct) {
   pct = Math.max(0, Math.min(100, pct||0));
   var color = pct >= 100 ? '#22c55e' : pct >= 50 ? 'var(--primary)' : '#f59e0b';
-  return '<div style="height:6px;background:rgba(255,255,255,0.08);border-radius:3px;overflow:hidden"><div style="height:100%;width:'+pct+'%;background:'+color+';transition:width 0.3s"></div></div>';
+  return '<div style="height:6px;background:var(--overlay-8);border-radius:3px;overflow:hidden"><div style="height:100%;width:'+pct+'%;background:'+color+';transition:width 0.3s"></div></div>';
 }
 
 function _renderProjectOverview(projId, d) {
   var gs = d.goal_summary || {}; var ds = d.deliverable_summary || {}; var is = d.issue_summary || {}; var ts = d.task_summary || {};
   var goals = d.goals || []; var deliverables = d.deliverables || []; var issues = d.issues || [];
   var recentGoals = goals.slice(0,5).map(function(g){
-    return '<div style="background:var(--surface);border-radius:8px;padding:10px 12px;border:1px solid rgba(255,255,255,0.05);margin-bottom:8px">' +
+    return '<div style="background:var(--surface);border-radius:8px;padding:10px 12px;border:1px solid var(--overlay-5);margin-bottom:8px">' +
       '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><span style="font-weight:600;font-size:13px">'+esc(g.name||'(未命名目标)')+'</span><span style="font-size:11px;color:var(--text3)">'+(g.progress||0).toFixed(1)+'%</span></div>' +
       _pctBar(g.progress||0) +
     '</div>';
   }).join('') || '<div style="color:var(--text3);font-size:12px">暂无目标，点击 Goals 标签创建</div>';
   var pending = deliverables.filter(function(x){return x.status==='submitted';});
   var pendingHtml = pending.slice(0,5).map(function(x){
-    return '<div style="background:var(--surface);border-radius:8px;padding:8px 12px;border:1px solid rgba(255,255,255,0.05);margin-bottom:6px;display:flex;justify-content:space-between;align-items:center">' +
+    return '<div style="background:var(--surface);border-radius:8px;padding:8px 12px;border:1px solid var(--overlay-5);margin-bottom:6px;display:flex;justify-content:space-between;align-items:center">' +
       '<div><div style="font-weight:600;font-size:13px">'+esc(x.title)+'</div><div style="font-size:10px;color:var(--text3)">v'+x.version+' · '+esc(x.kind)+'</div></div>' +
       '<div style="display:flex;gap:4px">' +
         '<button class="btn btn-primary btn-xs" onclick="reviewDeliverable(\''+projId+'\',\''+x.id+'\',true)">通过</button>' +
@@ -10936,13 +11594,13 @@ function _renderProjectOverview(projId, d) {
   var openIssues = issues.filter(function(x){return x.status==='open'||x.status==='investigating';});
   var issuesHtml = openIssues.slice(0,5).map(function(x){
     var sevColor = x.severity==='critical'?'#ef4444':x.severity==='high'?'#f59e0b':x.severity==='medium'?'var(--primary)':'var(--text3)';
-    return '<div style="background:var(--surface);border-radius:8px;padding:8px 12px;border:1px solid rgba(255,255,255,0.05);margin-bottom:6px;border-left:3px solid '+sevColor+'">' +
+    return '<div style="background:var(--surface);border-radius:8px;padding:8px 12px;border:1px solid var(--overlay-5);margin-bottom:6px;border-left:3px solid '+sevColor+'">' +
       '<div style="font-weight:600;font-size:13px">'+esc(x.title)+'</div>' +
       '<div style="font-size:10px;color:var(--text3);margin-top:2px">'+esc(x.severity)+' · '+esc(x.status)+(x.assigned_to?' · → '+esc(x.assigned_to):'')+'</div>' +
     '</div>';
   }).join('') || '<div style="color:var(--text3);font-size:12px">目前没有未解决的问题</div>';
   var statCard = function(label, val, sub){
-    return '<div style="background:var(--surface);border-radius:8px;padding:14px 16px;border:1px solid rgba(255,255,255,0.05)">' +
+    return '<div style="background:var(--surface);border-radius:8px;padding:14px 16px;border:1px solid var(--overlay-5)">' +
       '<div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.6px">'+label+'</div>' +
       '<div style="font-size:22px;font-weight:700;color:var(--text);margin-top:4px">'+val+'</div>' +
       (sub?'<div style="font-size:10px;color:var(--text3);margin-top:2px">'+sub+'</div>':'') +
@@ -10970,7 +11628,7 @@ function _renderProjectGoals(projId, goals) {
                       g.metric==='percent' ? (g.current_value+' / '+g.target_value+'%') :
                       g.metric==='boolean' ? (g.done?'✅ 已达成':'⬜ 未达成') :
                       esc(g.target_text||'');
-    return '<div style="background:var(--surface);border-radius:10px;padding:14px 16px;border:1px solid rgba(255,255,255,0.06);margin-bottom:10px">' +
+    return '<div style="background:var(--surface);border-radius:10px;padding:14px 16px;border:1px solid var(--overlay-6);margin-bottom:10px">' +
       '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">' +
         '<div style="flex:1;min-width:0">' +
           '<div style="font-weight:700;font-size:14px;color:var(--text)">'+esc(g.name||'(未命名)')+'</div>' +
@@ -11004,7 +11662,7 @@ function _renderProjectMilestonesTab(projId, milestones) {
         '<button class="btn btn-ghost btn-xs" style="color:var(--error)" onclick="rejectMilestone(\''+projId+'\',\''+m.id+'\')">驳回</button>' +
       '</div>';
     }
-    return '<div style="background:var(--surface);border-radius:10px;padding:14px 16px;border:1px solid rgba(255,255,255,0.06);margin-bottom:10px">' +
+    return '<div style="background:var(--surface);border-radius:10px;padding:14px 16px;border:1px solid var(--overlay-6);margin-bottom:10px">' +
       '<div style="font-weight:700;font-size:14px">'+statusIcon+' '+esc(m.name||'')+'</div>' +
       '<div style="font-size:11px;color:var(--text3);margin-top:4px">负责: '+esc(m.responsible_agent_id||'—')+' · 到期: '+esc(m.due_date||'—')+' · 状态: '+esc(m.status||'pending')+'</div>' +
       (m.rejected_reason?'<div style="color:var(--error);font-size:11px;margin-top:4px">驳回原因: '+esc(m.rejected_reason)+'</div>':'') +
@@ -11026,7 +11684,7 @@ function _renderProjectDeliverables(projId, data) {
   var statusBadge = function(s){
     var map = {draft:['草稿','var(--text3)'], submitted:['待审阅','#f59e0b'], approved:['已通过','#22c55e'], rejected:['已驳回','#ef4444'], archived:['归档','var(--text3)']};
     var x = map[s]||[s,'var(--text3)'];
-    return '<span style="font-size:10px;background:rgba(255,255,255,0.08);color:'+x[1]+';padding:2px 8px;border-radius:10px;font-weight:600">'+x[0]+'</span>';
+    return '<span style="font-size:10px;background:var(--overlay-8);color:'+x[1]+';padding:2px 8px;border-radius:10px;font-weight:600">'+x[0]+'</span>';
   };
   var fmtSize = function(n){
     if (!n && n !== 0) return '';
@@ -11049,8 +11707,8 @@ function _renderProjectDeliverables(projId, data) {
     }
     var preview = dv.content_text ? '<div style="font-size:12px;color:var(--text2);margin-top:6px;max-height:72px;overflow:hidden;line-height:1.5">'+esc(dv.content_text.slice(0,300))+(dv.content_text.length>300?'…':'')+'</div>' : '';
     var link = dv.url ? '<a href="'+esc(dv.url)+'" target="_blank" style="font-size:11px;color:var(--primary)">'+esc(dv.url)+'</a>' : (dv.file_path?'<span style="font-size:11px;color:var(--text3)">📎 '+esc(dv.file_path)+'</span>':'');
-    var reviewComment = dv.review_comment ? '<div style="margin-top:6px;font-size:11px;color:var(--text3);padding:6px 8px;background:rgba(255,255,255,0.03);border-left:2px solid '+(dv.status==='approved'?'#22c55e':'#ef4444')+';border-radius:3px">审阅意见: '+esc(dv.review_comment)+'</div>' : '';
-    return '<div style="background:var(--surface);border-radius:10px;padding:12px 14px;border:1px solid rgba(255,255,255,0.06);margin-bottom:8px">' +
+    var reviewComment = dv.review_comment ? '<div style="margin-top:6px;font-size:11px;color:var(--text3);padding:6px 8px;background:color-mix(in srgb, var(--text) 3%, transparent);border-left:2px solid '+(dv.status==='approved'?'#22c55e':'#ef4444')+';border-radius:3px">审阅意见: '+esc(dv.review_comment)+'</div>' : '';
+    return '<div style="background:var(--surface);border-radius:10px;padding:12px 14px;border:1px solid var(--overlay-6);margin-bottom:8px">' +
       '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">' +
         '<div style="flex:1;min-width:0">' +
           '<div style="display:flex;align-items:center;gap:8px"><span style="font-weight:700;font-size:13px">'+esc(dv.title)+'</span>'+statusBadge(dv.status)+'<span style="font-size:10px;color:var(--text3)">v'+dv.version+'</span></div>' +
@@ -11080,7 +11738,7 @@ function _renderProjectDeliverables(projId, data) {
       name = '<span style="font-size:13px;font-weight:600">'+esc(displayName)+'</span>';
     }
     var rel = f.rel_path && f.rel_path !== f.name ? '<div style="font-size:10px;color:var(--text3);margin-top:2px">'+esc(f.rel_path)+'</div>' : '';
-    return '<div style="display:flex;align-items:flex-start;gap:10px;padding:8px 12px;border-bottom:1px solid rgba(255,255,255,0.04)">' +
+    return '<div style="display:flex;align-items:flex-start;gap:10px;padding:8px 12px;border-bottom:1px solid var(--overlay-4)">' +
       '<div style="font-size:14px;line-height:1">'+icon+'</div>' +
       '<div style="flex:1;min-width:0">'+name+rel+
         (meta.length?'<div style="font-size:10px;color:var(--text3);margin-top:2px">'+meta.join(' · ')+'</div>':'') +
@@ -11092,7 +11750,7 @@ function _renderProjectDeliverables(projId, data) {
     var files = (ag.files||[]).map(renderFileRow).join('');
     var emptyHint = (!explicit && !files) ? '<div style="color:var(--text3);font-size:12px;padding:14px;text-align:center">该 Agent 暂无交付物</div>' : '';
     var dirHint = ag.deliverable_dir ? '<div style="font-size:10px;color:var(--text3);margin-top:2px;font-family:monospace">📁 '+esc(ag.deliverable_dir)+'</div>' : '';
-    return '<div style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:14px;margin-bottom:14px">' +
+    return '<div style="background:var(--overlay-2);border:1px solid var(--overlay-6);border-radius:12px;padding:14px;margin-bottom:14px">' +
       '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;gap:10px">' +
         '<div style="flex:1;min-width:0">' +
           '<div style="font-size:14px;font-weight:700">👤 '+esc(ag.agent_name||ag.agent_id)+(ag.role?' <span style="font-size:11px;color:var(--text3);font-weight:400">('+esc(ag.role)+')</span>':'')+'</div>' +
@@ -11107,7 +11765,7 @@ function _renderProjectDeliverables(projId, data) {
   }).join('');
   var unassignedSection = '';
   if (unassigned && unassigned.length) {
-    unassignedSection = '<div style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:14px;margin-bottom:14px">' +
+    unassignedSection = '<div style="background:var(--overlay-2);border:1px solid var(--overlay-6);border-radius:12px;padding:14px;margin-bottom:14px">' +
       '<div style="font-size:14px;font-weight:700;margin-bottom:10px">❓ 未指派作者</div>' +
       unassigned.map(renderDeliverableCard).join('') +
     '</div>';
@@ -11121,7 +11779,7 @@ function _renderProjectDeliverables(projId, data) {
   if (sharedFiles.length || sharedDir) {
     var rows = sharedFiles.map(renderFileRow).join('') ||
       '<div style="color:var(--text3);font-size:12px;padding:14px;text-align:center">共享目录为空</div>';
-    sharedSection = '<div style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:14px;margin-bottom:14px">' +
+    sharedSection = '<div style="background:var(--overlay-2);border:1px solid var(--overlay-6);border-radius:12px;padding:14px;margin-bottom:14px">' +
       '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;gap:10px">' +
         '<div style="flex:1;min-width:0">' +
           '<div style="font-size:14px;font-weight:700">📁 项目共享目录</div>' +
@@ -11150,7 +11808,7 @@ function _renderProjectIssues(projId, items) {
     var actions = resolved ? '' :
       '<button class="btn btn-primary btn-xs" onclick="resolveIssuePrompt(\''+projId+'\',\''+iss.id+'\')">标记解决</button>';
     var resLine = iss.resolution ? '<div style="margin-top:6px;font-size:11px;color:#22c55e;padding:6px 8px;background:rgba(34,197,94,0.08);border-radius:3px">✓ '+esc(iss.resolution)+'</div>' : '';
-    return '<div style="background:var(--surface);border-radius:10px;padding:14px 16px;border:1px solid rgba(255,255,255,0.06);margin-bottom:10px;border-left:3px solid '+sevColor(iss.severity)+'">' +
+    return '<div style="background:var(--surface);border-radius:10px;padding:14px 16px;border:1px solid var(--overlay-6);margin-bottom:10px;border-left:3px solid '+sevColor(iss.severity)+'">' +
       '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">' +
         '<div style="flex:1;min-width:0">' +
           '<div style="font-weight:700;font-size:14px">'+esc(iss.title)+(resolved?' <span style="font-size:10px;color:var(--text3)">['+esc(iss.status)+']</span>':'')+'</div>' +
@@ -11474,9 +12132,9 @@ function _renderRichContent(text) {
           if (/^\|[\s\-:]+\|$/.test(row)) return;
           var cells = row.split('|').filter(function(c,ci){ return ci > 0 && ci < row.split('|').length - 1; });
           var tag = ri === 0 ? 'th' : 'td';
-          var bgStyle = ri === 0 ? 'background:rgba(203,201,255,0.1);font-weight:700' : '';
+          var bgStyle = ri === 0 ? 'background:var(--primary-tint-10);font-weight:700' : '';
           thtml += '<tr>' + cells.map(function(c){
-            return '<'+tag+' style="padding:6px 10px;border:1px solid rgba(255,255,255,0.1);text-align:left;'+bgStyle+'">'+c.trim()+'</'+tag+'>';
+            return '<'+tag+' style="padding:6px 10px;border:1px solid var(--overlay-10);text-align:left;'+bgStyle+'">'+c.trim()+'</'+tag+'>';
           }).join('') + '</tr>';
         });
         thtml += '</table></div>';
@@ -11492,7 +12150,7 @@ function _renderRichContent(text) {
   s = out.join('\n');
   // ── Code blocks: ```...``` → <pre><code>
   s = s.replace(/```(\w*)\n([\s\S]*?)```/g, function(_, lang, code) {
-    return '<pre style="background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:10px;margin:8px 0;overflow-x:auto;font-size:12px;font-family:monospace"><code>' + code + '</code></pre>';
+    return '<pre style="background:rgba(0,0,0,0.3);border:1px solid var(--overlay-10);border-radius:6px;padding:10px;margin:8px 0;overflow-x:auto;font-size:12px;font-family:monospace"><code>' + code + '</code></pre>';
   });
   // ── Inline code: `...`
   s = s.replace(/`([^`]+)`/g, '<code style="background:rgba(0,0,0,0.25);padding:1px 5px;border-radius:3px;font-size:12px;font-family:monospace">$1</code>');
@@ -11525,20 +12183,20 @@ function _renderRichContent(text) {
     if (!isImage && /^data:image\//i.test(rawSrc)) isImage = true;
     if (!isImage) return '';
     var safeAlt = String(alt || '').replace(/"/g, '&quot;');
-    return '<div style="margin:8px 0"><img src="' + rawSrc + '" alt="' + safeAlt + '" style="max-width:100%;border-radius:8px;border:1px solid rgba(255,255,255,0.1)" onerror="this.style.display=\'none\'" /><div style="font-size:10px;color:var(--text3);margin-top:2px">' + safeAlt + '</div></div>';
+    return '<div style="margin:8px 0"><img src="' + rawSrc + '" alt="' + safeAlt + '" style="max-width:100%;border-radius:8px;border:1px solid var(--overlay-10)" onerror="this.style.display=\'none\'" /><div style="font-size:10px;color:var(--text3);margin-top:2px">' + safeAlt + '</div></div>';
   });
   // ── Links: [text](url)
   s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" style="color:var(--primary);text-decoration:underline">$1</a>');
   // ── Attachments: 📎filename.ext or [attachment:filename]
-  s = s.replace(/📎(\S+)/g, '<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(203,201,255,0.1);padding:3px 8px;border-radius:4px;font-size:11px;cursor:pointer"><span class="material-symbols-outlined" style="font-size:14px">attach_file</span>$1</span>');
-  s = s.replace(/\[attachment:([^\]]+)\]/g, '<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(203,201,255,0.1);padding:3px 8px;border-radius:4px;font-size:11px;cursor:pointer"><span class="material-symbols-outlined" style="font-size:14px">attach_file</span>$1</span>');
+  s = s.replace(/📎(\S+)/g, '<span style="display:inline-flex;align-items:center;gap:4px;background:var(--primary-tint-10);padding:3px 8px;border-radius:4px;font-size:11px;cursor:pointer"><span class="material-symbols-outlined" style="font-size:14px">attach_file</span>$1</span>');
+  s = s.replace(/\[attachment:([^\]]+)\]/g, '<span style="display:inline-flex;align-items:center;gap:4px;background:var(--primary-tint-10);padding:3px 8px;border-radius:4px;font-size:11px;cursor:pointer"><span class="material-symbols-outlined" style="font-size:14px">attach_file</span>$1</span>');
   // ── Audio: [audio:url] or 🎤 voice message
   s = s.replace(/\[audio:([^\]]+)\]/g, '<div style="margin:6px 0"><audio controls style="width:100%;max-width:300px;height:32px"><source src="$1"></audio></div>');
   // ── Horizontal rule: ---
-  s = s.replace(/^---$/gm, '<hr style="border:none;border-top:1px solid rgba(255,255,255,0.1);margin:8px 0">');
+  s = s.replace(/^---$/gm, '<hr style="border:none;border-top:1px solid var(--overlay-10);margin:8px 0">');
   // ── Emojis: checkboxes ✅ 🔴 🟢
   // ── @mentions highlight
-  s = s.replace(/@(\S+)/g, '<span style="color:var(--primary);font-weight:600;background:rgba(203,201,255,0.08);padding:0 3px;border-radius:3px">@$1</span>');
+  s = s.replace(/@(\S+)/g, '<span style="color:var(--primary);font-weight:600;background:var(--primary-tint-8);padding:0 3px;border-radius:3px">@$1</span>');
   // ── Newlines → <br> (for remaining plain text)
   s = s.replace(/\n/g, '<br>');
   return s;
@@ -11554,8 +12212,8 @@ async function loadProjectChat(projId) {
       var isUser = m.sender === 'user';
       var div = document.createElement('div');
       div.style.cssText = 'max-width:85%;padding:12px 16px;border-radius:12px;font-size:13px;line-height:1.6;word-wrap:break-word;overflow-wrap:break-word;' +
-        (isUser ? 'align-self:flex-end;background:linear-gradient(135deg,#1a2332,#243447);color:#e0e6ed;border:1px solid rgba(255,255,255,0.08);border-bottom-right-radius:4px' :
-                  'align-self:flex-start;background:var(--surface);border:1px solid rgba(255,255,255,0.05);border-bottom-left-radius:4px');
+        (isUser ? 'align-self:flex-end;background:linear-gradient(135deg,#1a2332,#243447);color:#e0e6ed;border:1px solid var(--overlay-8);border-bottom-right-radius:4px' :
+                  'align-self:flex-start;background:var(--surface);border:1px solid var(--overlay-5);border-bottom-left-radius:4px');
       // 时间戳格式化
       var timeStr = '';
       if (m.timestamp) {
@@ -11625,7 +12283,7 @@ async function loadProjectChat(projId) {
           // data-agent-id lets _decorateTypingBubbles find this bubble
           // and append a live activity suffix (current tool, count).
           bubble.setAttribute('data-agent-id', aid);
-          bubble.style.cssText = 'align-self:flex-start;background:var(--surface);border:1px solid rgba(255,255,255,0.05);border-radius:12px;border-bottom-left-radius:4px;padding:10px 14px;font-size:12px;color:var(--text3);display:inline-flex;align-items:center;gap:8px;max-width:70%;flex-wrap:wrap';
+          bubble.style.cssText = 'align-self:flex-start;background:var(--surface);border:1px solid var(--overlay-5);border-radius:12px;border-bottom-left-radius:4px;padding:10px 14px;font-size:12px;color:var(--text3);display:inline-flex;align-items:center;gap:8px;max-width:70%;flex-wrap:wrap';
           bubble.innerHTML =
             '<span class="material-symbols-outlined" style="font-size:16px;color:var(--primary);animation:robotTyping 1s infinite">smart_toy</span>' +
             '<span style="font-weight:700;color:var(--primary);font-size:11px">'+esc(label)+'</span>' +
@@ -11664,7 +12322,7 @@ function _renderProjAttachPreview(projId) {
       thumb = '<span class="material-symbols-outlined" style="font-size:20px;color:var(--text3)">draft</span>';
     }
     var sizeKb = Math.max(1, Math.round((a.size||0)/1024));
-    return '<div style="display:inline-flex;align-items:center;gap:6px;background:var(--surface);border:1px solid rgba(255,255,255,0.08);border-radius:6px;padding:4px 8px;font-size:11px;color:var(--text)">' +
+    return '<div style="display:inline-flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--overlay-8);border-radius:6px;padding:4px 8px;font-size:11px;color:var(--text)">' +
              thumb +
              '<div style="display:flex;flex-direction:column;max-width:140px">' +
                '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(a.name)+'</span>' +
@@ -11729,7 +12387,7 @@ async function sendProjectMsg(projId) {
   var el = document.getElementById('project-chat-msgs-'+projId);
   if (el) {
     var div = document.createElement('div');
-    div.style.cssText = 'max-width:80%;padding:10px 14px;border-radius:12px;font-size:13px;line-height:1.5;white-space:pre-wrap;word-wrap:break-word;align-self:flex-end;background:linear-gradient(135deg,#1a2332,#243447);color:#e0e6ed;border:1px solid rgba(255,255,255,0.08);border-bottom-right-radius:4px';
+    div.style.cssText = 'max-width:80%;padding:10px 14px;border-radius:12px;font-size:13px;line-height:1.5;white-space:pre-wrap;word-wrap:break-word;align-self:flex-end;background:linear-gradient(135deg,#1a2332,#243447);color:#e0e6ed;border:1px solid var(--overlay-8);border-bottom-right-radius:4px';
     div.textContent = text;
     el.appendChild(div);
     el.scrollTop = el.scrollHeight;
@@ -11820,15 +12478,15 @@ async function editProject(projId, currentName, currentDesc) {
     tmplData.map(function(t){ return '<option value="'+t.id+'"'+(t.id===currentWfId?' selected':'')+'>'+esc(t.name)+' ('+((t.steps||[]).length)+' steps)</option>'; }).join('');
 
   var box = document.createElement('div');
-  box.style.cssText = 'background:var(--bg);border:1px solid rgba(255,255,255,0.1);border-radius:12px;padding:24px;width:520px;max-height:80vh;overflow-y:auto;color:var(--text)';
+  box.style.cssText = 'background:var(--bg);border:1px solid var(--overlay-10);border-radius:12px;padding:24px;width:520px;max-height:80vh;overflow-y:auto;color:var(--text)';
   box.innerHTML =
     '<div style="font-size:16px;font-weight:700;margin-bottom:16px">编辑项目</div>' +
     '<label style="font-size:12px;color:var(--text3)">项目名称</label>' +
-    '<input id="ep-name" type="text" value="'+esc(proj.name).replace(/"/g,'&quot;')+'" style="width:100%;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;margin:4px 0 12px">' +
+    '<input id="ep-name" type="text" value="'+esc(proj.name).replace(/"/g,'&quot;')+'" style="width:100%;background:var(--surface);border:1px solid var(--overlay-10);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;margin:4px 0 12px">' +
     '<label style="font-size:12px;color:var(--text3)">项目描述</label>' +
-    '<textarea id="ep-desc" rows="2" style="width:100%;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;margin:4px 0 12px;resize:vertical">'+esc(proj.description||'')+'</textarea>' +
+    '<textarea id="ep-desc" rows="2" style="width:100%;background:var(--surface);border:1px solid var(--overlay-10);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;margin:4px 0 12px;resize:vertical">'+esc(proj.description||'')+'</textarea>' +
     '<label style="font-size:12px;color:var(--text3)">绑定 Workflow</label>' +
-    '<select id="ep-workflow" style="width:100%;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;margin:4px 0 12px">'+wfOptions+'</select>' +
+    '<select id="ep-workflow" style="width:100%;background:var(--surface);border:1px solid var(--overlay-10);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;margin:4px 0 12px">'+wfOptions+'</select>' +
     '<div id="ep-step-assignments" style="margin-bottom:16px"></div>' +
     '<div style="display:flex;justify-content:flex-end;gap:8px">' +
       '<button class="btn btn-ghost btn-sm" onclick="this.closest(\'div[style*=fixed]\').remove()">取消</button>' +
@@ -11861,7 +12519,7 @@ async function editProject(projId, currentName, currentDesc) {
         var opts = agentOpts.replace('value="'+curAgent+'"', 'value="'+curAgent+'" selected');
         return '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">' +
           '<span style="font-size:11px;color:var(--text);min-width:120px;font-weight:600">Step '+(i+1)+': '+esc(s.name||'')+'</span>' +
-          '<select class="ep-agent-sel" data-step="'+i+'" style="flex:1;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:6px 8px;color:var(--text);font-size:12px">'+opts+'</select>' +
+          '<select class="ep-agent-sel" data-step="'+i+'" style="flex:1;background:var(--surface);border:1px solid var(--overlay-10);border-radius:6px;padding:6px 8px;color:var(--text);font-size:12px">'+opts+'</select>' +
           '<label title="启动前需人工批准" style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text3);cursor:pointer;white-space:nowrap">' +
             '<input type="checkbox" class="ep-approval-chk" data-step="'+i+'"'+(curApproval?' checked':'')+' style="cursor:pointer">审核' +
           '</label>' +
@@ -11951,7 +12609,7 @@ async function editTaskSteps(projId, taskId) {
     var lockNote = locked ? '<span style="font-size:10px;color:var(--text3);margin-left:6px">(已完成/审核中，不可修改)</span>' : '';
     return '<div data-row="'+idx+'" style="display:flex;align-items:center;gap:8px;margin-bottom:8px;padding:8px;background:var(--surface2);border-radius:6px">' +
       '<span style="color:var(--text3);font-size:12px;width:18px">'+(idx+1)+'.</span>' +
-      '<input type="text" data-step-name value="'+esc(name).replace(/"/g,'&quot;')+'" '+(locked?'readonly':'')+' style="flex:1;background:var(--surface);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:4px;padding:6px 8px;font-size:13px" placeholder="步骤名称">' +
+      '<input type="text" data-step-name value="'+esc(name).replace(/"/g,'&quot;')+'" '+(locked?'readonly':'')+' style="flex:1;background:var(--surface);color:var(--text);border:1px solid var(--overlay-10);border-radius:4px;padding:6px 8px;font-size:13px" placeholder="步骤名称">' +
       '<label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text2);white-space:nowrap;cursor:pointer">' +
         '<input type="checkbox" data-step-review '+(mr?'checked':'')+' '+(locked?'disabled':'')+' style="cursor:pointer">人工审核' +
       '</label>' +
@@ -12128,10 +12786,10 @@ async function renderWorkflows() {
         }).join('<span style="color:var(--text3);font-size:10px;margin:0 2px">&rarr;</span>');
         if (stepsArr.length > 5) stepsPreview += '<span style="font-size:10px;color:var(--text3);margin-left:4px">+' + (stepsArr.length - 5) + ' more</span>';
 
-        html += '<div class="card" style="background:var(--surface);border-radius:12px;padding:18px;border:1px solid rgba(255,255,255,0.06)">' +
+        html += '<div class="card" style="background:var(--surface);border-radius:12px;padding:18px;border:1px solid var(--overlay-6)">' +
           '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">' +
             '<div style="display:flex;align-items:center;gap:8px"><span class="material-symbols-outlined" style="font-size:18px;color:var(--primary)">account_tree</span><span style="font-size:15px;font-weight:700">' + esc(wf.name) + '</span></div>' +
-            '<span style="font-size:10px;padding:2px 8px;border-radius:4px;background:rgba(203,201,255,0.1);color:var(--primary);font-weight:700">TEMPLATE</span>' +
+            '<span style="font-size:10px;padding:2px 8px;border-radius:4px;background:var(--primary-tint-10);color:var(--primary);font-weight:700">TEMPLATE</span>' +
           '</div>' +
           '<div style="font-size:12px;color:var(--text3);margin-bottom:10px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">' + esc(wf.description||'No description') + '</div>' +
           '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin-bottom:12px">' + (stepsPreview || '<span style="font-size:11px;color:var(--text3)">No steps</span>') + '</div>' +
@@ -12172,7 +12830,7 @@ async function renderWorkflows() {
         var tags = (t.tags || []).map(function(tag) {
           return '<span style="font-size:9px;padding:2px 6px;border-radius:4px;background:rgba(255,152,0,0.1);color:#FF9800">' + esc(tag) + '</span>';
         }).join('');
-        html += '<div class="card wf-catalog-card" data-category="' + esc(t.category||'') + '" style="background:var(--surface);border-radius:12px;padding:18px;border:1px solid rgba(255,255,255,0.06);cursor:pointer;transition:border-color 0.15s,transform 0.15s;' + (hidden ? 'display:none' : '') + '" onmouseenter="this.style.borderColor=\'#FF9800\';this.style.transform=\'translateY(-2px)\'" onmouseleave="this.style.borderColor=\'rgba(255,255,255,0.06)\';this.style.transform=\'none\'" onclick="useWfCatalog(\'' + t.id + '\')">';
+        html += '<div class="card wf-catalog-card" data-category="' + esc(t.category||'') + '" style="background:var(--surface);border-radius:12px;padding:18px;border:1px solid var(--overlay-6);cursor:pointer;transition:border-color 0.15s,transform 0.15s;' + (hidden ? 'display:none' : '') + '" onmouseenter="this.style.borderColor=\'#FF9800\';this.style.transform=\'translateY(-2px)\'" onmouseleave="this.style.borderColor=\'var(--overlay-6)\';this.style.transform=\'none\'" onclick="useWfCatalog(\'' + t.id + '\')">';
         html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">';
         html += '<div style="display:flex;align-items:center;gap:8px"><span style="font-size:20px">' + (t.icon||'📋') + '</span><span style="font-size:14px;font-weight:700">' + esc(t.name) + '</span></div>';
         html += '<span style="font-size:10px;padding:2px 8px;border-radius:4px;background:rgba(255,152,0,0.1);color:#FF9800;font-weight:600">' + t.step_count + ' 步</span>';
@@ -12803,7 +13461,7 @@ function showCreateWorkflowModal() {
   html += '<span style="font-size:13px;font-weight:700;color:var(--text)">Steps</span>';
   html += '</div>';
   html += '<div id="wf-nodes-container" style="position:relative;min-height:80px;margin-bottom:12px"></div>';
-  html += '<div style="display:flex;justify-content:center;margin-bottom:16px"><div onclick="addWfStep()" style="width:48px;height:48px;border-radius:50%;background:var(--primary);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:transform 0.15s;box-shadow:0 2px 12px rgba(203,201,255,0.3)" onmouseenter="this.style.transform=\'scale(1.1)\'" onmouseleave="this.style.transform=\'scale(1)\'"><span class="material-symbols-outlined" style="font-size:28px;color:#282572">add</span></div></div>';
+  html += '<div style="display:flex;justify-content:center;margin-bottom:16px"><div onclick="addWfStep()" style="width:48px;height:48px;border-radius:50%;background:var(--primary);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:transform 0.15s;box-shadow:0 2px 12px var(--primary-tint-30)" onmouseenter="this.style.transform=\'scale(1.1)\'" onmouseleave="this.style.transform=\'scale(1)\'"><span class="material-symbols-outlined" style="font-size:28px;color:#282572">add</span></div></div>';
   html += '<div class="form-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button>';
   html += '<button class="btn btn-primary" onclick="createWorkflowFromDesigner()">Create</button></div>';
   html += '</div>';
@@ -12948,7 +13606,7 @@ async function editWorkflow(wfId) {
   html += '<div id="wf-nodes-container" style="position:relative;min-height:80px;margin-bottom:12px;max-height:400px;overflow-y:auto"></div>';
   // Add step circle button
   html += '<div style="display:flex;justify-content:center;margin-bottom:16px">';
-  html += '<div onclick="addWfStep();document.getElementById(\'wf-step-count\').textContent=_wfSteps.length" style="width:48px;height:48px;border-radius:50%;background:var(--primary);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:transform 0.15s;box-shadow:0 2px 12px rgba(203,201,255,0.3)" onmouseenter="this.style.transform=\'scale(1.1)\'" onmouseleave="this.style.transform=\'scale(1)\'">';
+  html += '<div onclick="addWfStep();document.getElementById(\'wf-step-count\').textContent=_wfSteps.length" style="width:48px;height:48px;border-radius:50%;background:var(--primary);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:transform 0.15s;box-shadow:0 2px 12px var(--primary-tint-30)" onmouseenter="this.style.transform=\'scale(1.1)\'" onmouseleave="this.style.transform=\'scale(1)\'">';
   html += '<span class="material-symbols-outlined" style="font-size:28px;color:#282572">add</span></div></div>';
   // Actions
   html += '<div class="form-actions" style="display:flex;justify-content:space-between;align-items:center">';
@@ -13177,25 +13835,25 @@ async function showCreateProjectModal() {
     }).join('');
 
   var html = '<div style="padding:24px;max-width:600px"><h3 style="margin:0 0 16px">Create Project</h3>' +
-    '<input id="new-proj-name" placeholder="Project Name" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--text);font-size:13px;box-sizing:border-box">' +
-    '<textarea id="new-proj-desc" placeholder="Description" rows="3" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--text);font-size:13px;resize:vertical;box-sizing:border-box"></textarea>' +
+    '<input id="new-proj-name" placeholder="Project Name" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px;box-sizing:border-box">' +
+    '<textarea id="new-proj-desc" placeholder="Description" rows="3" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px;resize:vertical;box-sizing:border-box"></textarea>' +
     // Shared project directory — auto-generated, read-only for users.
     // This is the canonical place where agents drop deliverables; all team
     // members share it. The actual <project_id> is only known after create,
     // so we show the template here and let the backend fill it in.
-    '<div style="background:var(--surface);border:1px solid rgba(255,255,255,0.08);border-left:3px solid var(--primary);border-radius:8px;padding:10px 12px;margin-bottom:10px;font-size:12px;color:var(--text2);line-height:1.5">' +
+    '<div style="background:var(--surface);border:1px solid var(--overlay-8);border-left:3px solid var(--primary);border-radius:8px;padding:10px 12px;margin-bottom:10px;font-size:12px;color:var(--text2);line-height:1.5">' +
       '<div style="font-weight:700;color:var(--text);margin-bottom:4px">📁 项目共享目录 (自动创建)</div>' +
       '<div style="font-family:monospace;font-size:11px;color:var(--text3);word-break:break-all">~/.tudou_claw/workspaces/shared/&lt;项目ID&gt;/</div>' +
       '<div style="font-size:11px;color:var(--text3);margin-top:4px">所有成员的交付件统一存放在这里。项目创建后可在详情页查看完整路径。</div>' +
     '</div>' +
-    '<select id="new-proj-node" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--text);font-size:13px;box-sizing:border-box">' +
+    '<select id="new-proj-node" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px;box-sizing:border-box">' +
       '<option value="local">Local Node</option>' +
       nodes.map(function(n){ return n.is_self ? '' : '<option value="'+n.id+'">'+esc(n.name||n.id)+'</option>'; }).join('') +
     '</select>' +
 
     // Workflow template selection
     '<div style="font-size:12px;font-weight:700;margin-bottom:6px"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">account_tree</span> Workflow Template</div>' +
-    '<select id="new-proj-workflow" onchange="_onProjWorkflowChange()" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--text);font-size:13px;box-sizing:border-box">' + wfOpts + '</select>' +
+    '<select id="new-proj-workflow" onchange="_onProjWorkflowChange()" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px;box-sizing:border-box">' + wfOpts + '</select>' +
 
     // Step-Agent assignment area (hidden initially)
     '<div id="proj-wf-steps" style="display:none;margin-bottom:12px"></div>' +
@@ -13319,7 +13977,7 @@ function showProjectMemberModal(projId) {
   var html = '<div style="padding:24px"><h3 style="margin:0 0 16px">Manage Members</h3>' +
     '<div id="proj-add-members">' +
       agents.map(function(a) {
-        return '<label style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12px;cursor:pointer"><input type="checkbox" class="proj-add-member-cb" value="'+a.id+'"> '+esc(a.role+'-'+a.name)+' <input type="text" class="proj-resp-input" data-aid="'+a.id+'" placeholder="Responsibility" style="flex:1;padding:4px 8px;background:var(--bg);border:1px solid rgba(255,255,255,0.1);border-radius:4px;color:var(--text);font-size:11px"></label>';
+        return '<label style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12px;cursor:pointer"><input type="checkbox" class="proj-add-member-cb" value="'+a.id+'"> '+esc(a.role+'-'+a.name)+' <input type="text" class="proj-resp-input" data-aid="'+a.id+'" placeholder="Responsibility" style="flex:1;padding:4px 8px;background:var(--bg);border:1px solid var(--overlay-10);border-radius:4px;color:var(--text);font-size:11px"></label>';
       }).join('') +
     '</div>' +
     '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">' +
@@ -13343,13 +14001,13 @@ async function updateProjectMembers(projId) {
 
 function showProjectTaskModal(projId) {
   var html = '<div style="padding:24px"><h3 style="margin:0 0 16px">Assign Task</h3>' +
-    '<input id="new-task-title" placeholder="Task Title" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--text);font-size:13px">' +
-    '<textarea id="new-task-desc" placeholder="Description" rows="3" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--text);font-size:13px;resize:vertical"></textarea>' +
-    '<select id="new-task-assignee" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--text);font-size:13px">' +
+    '<input id="new-task-title" placeholder="Task Title" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px">' +
+    '<textarea id="new-task-desc" placeholder="Description" rows="3" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px;resize:vertical"></textarea>' +
+    '<select id="new-task-assignee" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px">' +
       '<option value="">Unassigned</option>' +
       agents.map(function(a){ return '<option value="'+a.id+'">'+esc(a.role+'-'+a.name)+'</option>'; }).join('') +
     '</select>' +
-    '<select id="new-task-priority" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--text);font-size:13px">' +
+    '<select id="new-task-priority" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px">' +
       '<option value="0">Normal Priority</option><option value="1">High Priority</option><option value="2">Urgent</option>' +
     '</select>' +
     '<div style="display:flex;gap:8px;justify-content:flex-end">' +
@@ -13389,12 +14047,12 @@ async function createProjectTask(projId) {
 
 function showProjectMilestoneModal(projId) {
   var html = '<div style="padding:24px"><h3 style="margin:0 0 16px">Create Milestone</h3>' +
-    '<input id="new-milestone-name" placeholder="Milestone Name" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--text);font-size:13px">' +
-    '<select id="new-milestone-agent" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--text);font-size:13px">' +
+    '<input id="new-milestone-name" placeholder="Milestone Name" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px">' +
+    '<select id="new-milestone-agent" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px">' +
       '<option value="">Select Responsible Agent</option>' +
       agents.map(function(a){ return '<option value="'+a.id+'">'+esc(a.role+'-'+a.name)+'</option>'; }).join('') +
     '</select>' +
-    '<input id="new-milestone-duedate" type="date" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--text);font-size:13px">' +
+    '<input id="new-milestone-duedate" type="date" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px">' +
     '<div style="display:flex;gap:8px;justify-content:flex-end">' +
       '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>' +
       '<button class="btn btn-primary" onclick="createProjectMilestone(\''+projId+'\')">Create</button>' +
@@ -13420,7 +14078,7 @@ function showMilestoneUpdateModal(projId, milestoneId, milestoneName, currentSta
   var newStatus = currentStatus === 'completed' ? 'in_progress' : currentStatus === 'in_progress' ? 'pending' : 'in_progress';
   var html = '<div style="padding:24px"><h3 style="margin:0 0 16px">Update Milestone</h3>' +
     '<div style="margin-bottom:16px"><div style="font-size:13px;font-weight:600;margin-bottom:8px">Current Status: '+currentStatus.toUpperCase()+'</div>' +
-    '<select id="milestone-status-select" style="width:100%;padding:10px;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--text);font-size:13px">' +
+    '<select id="milestone-status-select" style="width:100%;padding:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px">' +
       '<option value="pending" '+(currentStatus==='pending'?'selected':'')+'>Pending</option>' +
       '<option value="in_progress" '+(currentStatus==='in_progress'?'selected':'')+'>In Progress</option>' +
       '<option value="completed" '+(currentStatus==='completed'?'selected':'')+'>Completed</option>' +
@@ -13449,6 +14107,224 @@ var _audioPolling = false;
 var _ttsEnabled = {};  // per agent TTS auto-read toggle
 var _sttActive = {};   // per agent STT recording state
 
+// ── RAG-only toggle (chat header) ─────────────────────────────────
+// When ON, chat sends set `rag_only: true` and the backend restricts
+// this turn's tool offering to [knowledge_lookup] only.
+// Default: ON for advisor agents with a KB bound, OFF for others.
+window._ragOnly = window._ragOnly || {};
+
+function _ragOnlyDefaultFor(agentId) {
+  // Global agent list lives as bare `agents` (module-level) and a
+  // mirrored cache on window._cachedAgents. `window.agents` was never
+  // set — reading it always returned undefined and made the default
+  // fall through to false (RAG OFF). Try each source in priority:
+  var list = (typeof agents !== 'undefined' && Array.isArray(agents) ? agents : null)
+          || window._cachedAgents
+          || [];
+  var ag = list.find(function(a) { return a && a.id === agentId; });
+  if (!ag) return false;
+  // Profile can live under `profile` (new layout) or directly on `ag`
+  // (older to_dict flattened `agent_class` / `memory_mode` at root).
+  // Read both — rag_collection_ids always comes from profile.
+  var p = ag.profile || {};
+  var mode = p.rag_mode || ag.rag_mode || '';
+  if (mode === '' || mode === 'none') return false;
+  var collIds = p.rag_collection_ids || ag.rag_collection_ids || [];
+  var hasKb = Array.isArray(collIds) && collIds.length > 0;
+  var isAdvisor = (p.agent_class || ag.agent_class) === 'advisor';
+  return hasKb || isAdvisor;
+}
+
+function _applyRagButtonStyle(agentId) {
+  var btn = document.getElementById('rag-btn-' + agentId);
+  var icon = document.getElementById('rag-icon-' + agentId);
+  if (!btn || !icon) return;
+  var on = !!window._ragOnly[agentId];
+  var _t = (typeof window.t === 'function') ? window.t : function(k,f){return f||k;};
+  if (on) {
+    icon.style.color = 'var(--primary)';
+    btn.style.background = 'var(--primary-tint-15)';
+    btn.title = _t('chat.rag.on');
+  } else {
+    icon.style.color = 'var(--text3)';
+    btn.style.background = 'none';
+    btn.title = _t('chat.rag.off');
+  }
+}
+
+function _toggleRagOnly(agentId) {
+  window._ragOnly[agentId] = !window._ragOnly[agentId];
+  _applyRagButtonStyle(agentId);
+}
+
+// Called once the chat panel has rendered — sets the toggle to the
+// sensible default for this agent (ON for advisors with a bound KB).
+function _initRagToggle(agentId) {
+  if (window._ragOnly[agentId] === undefined) {
+    window._ragOnly[agentId] = _ragOnlyDefaultFor(agentId);
+  }
+  _applyRagButtonStyle(agentId);
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Internationalization (中 / EN)
+// ══════════════════════════════════════════════════════════════════
+// Design notes:
+//   * Chinese is the default (loaded unconditionally by <script> tag);
+//     English is loaded alongside.
+//   * Dictionary lookup: window.t('nav.agents', optional_fallback).
+//   * HTML static text uses <elem data-i18n="key">default text</elem>;
+//     on language change we scan those and rewrite textContent.
+//   * Missing key → fallback param → zh value → key string (never undefined).
+//   * Language pref persists in localStorage('tudou_lang'). An inline
+//     <script> in <head> preloads the attribute BEFORE first paint to
+//     avoid a flash of Chinese when the user has chosen English.
+//
+// Adding new strings:
+//   1. Add key to i18n/zh.js AND i18n/en.js.
+//   2. Use window.t('key') in JS, or data-i18n="key" on static HTML.
+//   3. tests/test_i18n_parity.py enforces key-set parity between files.
+
+window._currentLang = (function() {
+  try {
+    var v = localStorage.getItem('tudou_lang');
+    return (v === 'en') ? 'en' : 'zh';
+  } catch (e) { return 'zh'; }
+})();
+
+window.t = function(key, fallback) {
+  var dict = (window.TUDOU_I18N || {})[window._currentLang];
+  if (dict && Object.prototype.hasOwnProperty.call(dict, key)) {
+    return dict[key];
+  }
+  // Fall back to zh if current isn't zh — keeps UI readable when an
+  // en translation is missing (shows Chinese instead of the raw key).
+  if (window._currentLang !== 'zh') {
+    var zh = (window.TUDOU_I18N || {}).zh;
+    if (zh && Object.prototype.hasOwnProperty.call(zh, key)) {
+      return zh[key];
+    }
+  }
+  return (fallback != null) ? fallback : key;
+};
+
+// Rescan every element with data-i18n and rewrite its text content.
+// Also handles data-i18n-title (for tooltips) and data-i18n-placeholder.
+function _applyI18nToDom(root) {
+  root = root || document;
+  var nodes = root.querySelectorAll ? root.querySelectorAll('[data-i18n]') : [];
+  nodes.forEach(function(el) {
+    var key = el.getAttribute('data-i18n');
+    if (key) el.textContent = window.t(key);
+  });
+  var tipNodes = root.querySelectorAll ? root.querySelectorAll('[data-i18n-title]') : [];
+  tipNodes.forEach(function(el) {
+    var key = el.getAttribute('data-i18n-title');
+    if (key) el.setAttribute('title', window.t(key));
+  });
+  var phNodes = root.querySelectorAll ? root.querySelectorAll('[data-i18n-placeholder]') : [];
+  phNodes.forEach(function(el) {
+    var key = el.getAttribute('data-i18n-placeholder');
+    if (key) el.setAttribute('placeholder', window.t(key));
+  });
+}
+
+function _applyLangButtonStyle() {
+  var btn = document.getElementById('global-lang-btn');
+  var lab = document.getElementById('global-lang-label');
+  if (!btn) return;
+  if (lab) {
+    // Compact highlight: bold the ACTIVE side of "中 / EN"
+    lab.innerHTML = (window._currentLang === 'en')
+      ? '中 / <b>EN</b>'
+      : '<b>中</b> / EN';
+  }
+  btn.title = window.t('lang.tooltip', '切换中文 / English');
+}
+
+function _toggleLang() {
+  window._currentLang = (window._currentLang === 'en') ? 'zh' : 'en';
+  try { localStorage.setItem('tudou_lang', window._currentLang); } catch (e) {}
+  // Expose as a data-attr for any CSS that wants to react
+  document.documentElement.setAttribute('data-lang', window._currentLang);
+  _applyI18nToDom();
+  _applyLangButtonStyle();
+  // Theme button text depends on lang, so refresh it too.
+  if (typeof _applyThemeIcon === 'function') _applyThemeIcon();
+  // Main content area is rendered by showView() using hardcoded text in
+  // many places — re-render the current view so its output picks up the
+  // new language. data-i18n / t() calls inside the render path will
+  // read window._currentLang on the next invocation. Skip for 'agent'
+  // chat view (re-render would clobber the streaming session).
+  try {
+    if (typeof currentView === 'string'
+        && currentView && currentView !== 'agent'
+        && typeof showView === 'function') {
+      showView(currentView, null);
+    }
+  } catch (e) { /* best effort — i18n must not break nav */ }
+}
+
+// Initial boot — set data-lang attr so anything CSS-gated on it works
+document.documentElement.setAttribute('data-lang', window._currentLang);
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', function() {
+    _applyI18nToDom();
+    _applyLangButtonStyle();
+  });
+} else {
+  _applyI18nToDom();
+  _applyLangButtonStyle();
+}
+
+// ── Global theme toggle (light / dark) ─────────────────────────────
+// The heavy lifting was done in :root and [data-theme="light"] blocks
+// in portal.html — 230+ CSS references to var(--xxx) swap automatically.
+// This function just flips the attribute on <html> and persists to
+// localStorage. The inline <head> script reads the saved value on
+// page load (before first paint) to avoid light-flash-on-dark.
+function _currentTheme() {
+  var t = document.documentElement.getAttribute('data-theme');
+  return (t === 'light') ? 'light' : 'dark';
+}
+
+function _applyThemeIcon() {
+  var btn = document.getElementById('global-theme-btn');
+  var icon = document.getElementById('global-theme-icon');
+  var label = document.getElementById('global-theme-label');
+  if (!btn || !icon) return;
+  var t = _currentTheme();
+  // Label shows the CURRENT theme (so the user knows what they're on);
+  // tooltip explains clicking switches to the other.
+  // Pull text from the active i18n dictionary — same button serves
+  // Chinese and English, just re-reads the label on language change.
+  var _t = (typeof window.t === 'function') ? window.t : function(k, f) { return f || k; };
+  if (t === 'light') {
+    icon.textContent = 'light_mode';
+    if (label) label.textContent = _t('theme.light', '浅色主题');
+    btn.title = _t('theme.tooltip.toDark', '当前：浅色主题 — 点击切换到深色主题');
+  } else {
+    icon.textContent = 'dark_mode';
+    if (label) label.textContent = _t('theme.dark', '深色主题');
+    btn.title = _t('theme.tooltip.toLight', '当前：深色主题 — 点击切换到浅色主题');
+  }
+}
+
+function _toggleTheme() {
+  var next = (_currentTheme() === 'dark') ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  try { localStorage.setItem('tudou_theme', next); } catch (e) {}
+  _applyThemeIcon();
+}
+
+// Call once at boot so the button icon reflects whatever the inline
+// <head> preloader set (or the default).
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', _applyThemeIcon);
+} else {
+  _applyThemeIcon();
+}
+
 function _toggleTTS(agentId) {
   _ttsEnabled[agentId] = !_ttsEnabled[agentId];
   var btn = document.getElementById('tts-btn-' + agentId);
@@ -13457,7 +14333,7 @@ function _toggleTTS(agentId) {
   if (_ttsEnabled[agentId]) {
     icon.style.color = 'var(--primary)';
     icon.textContent = 'volume_up';
-    btn.style.background = 'rgba(203,201,255,0.15)';
+    btn.style.background = 'var(--primary-tint-15)';
     btn.title = '自动朗读已开启 — 点击关闭';
   } else {
     icon.style.color = 'var(--text3)';
@@ -13685,11 +14561,11 @@ function renderProjectsHub() {
   // 状态机任务已合并进任务中心内部（作为 3 个 sub-tab 的第 3 个），不再
   // 在此处单独占一个顶级 tab。
   var tabs = [
-    { id: 'projects', label: '项目列表', icon: 'folder_special' },
-    { id: 'meetings', label: '群聊会议', icon: 'groups' },
-    { id: 'task_center', label: '任务中心', icon: 'checklist' },
-    { id: 'orchestration', label: '编排可视化', icon: 'hub' },
-    { id: 'workflows', label: 'Workflow 模板', icon: 'account_tree' },
+    { id: 'projects',      label: t('tab.projectList',    '项目列表'),    icon: 'folder_special' },
+    { id: 'meetings',      label: t('tab.meetings',       '群聊会议'),    icon: 'groups' },
+    { id: 'task_center',   label: t('tab.taskCenter',     '任务中心'),    icon: 'checklist' },
+    { id: 'orchestration', label: t('tab.orchestration',  '编排可视化'),  icon: 'hub' },
+    { id: 'workflows',     label: t('tab.workflowTemplates', 'Workflow 模板'), icon: 'account_tree' },
   ];
   var r = _renderHubTabs('projects', tabs);
   c.innerHTML = r.html;
@@ -13724,7 +14600,7 @@ async function renderMeetingsTab() {
         '<div><h2 style="margin:0;font-size:22px;font-weight:800">群聊 / 会议</h2>' +
         '<p style="font-size:12px;color:var(--text3);margin-top:4px">多 Agent 临时协作会议 · 讨论 · 任务分派</p></div>' +
         '<div style="display:flex;gap:8px">' +
-          '<select id="meetings-filter-status" onchange="renderMeetingsTab()" style="background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:6px;color:var(--text);font-size:12px;padding:6px 10px">' +
+          '<select id="meetings-filter-status" onchange="renderMeetingsTab()" style="background:var(--surface);border:1px solid var(--overlay-10);border-radius:6px;color:var(--text);font-size:12px;padding:6px 10px">' +
             '<option value="">全部状态</option>' +
             '<option value="active">进行中</option>' +
             '<option value="scheduled">已安排</option>' +
@@ -13758,11 +14634,11 @@ async function renderMeetingsTab() {
         return '<div style="width:24px;height:24px;border-radius:50%;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;border:2px solid var(--bg);margin-left:-6px" title="'+(ag?esc(ag.name):pid)+'">'+esc(nm)+'</div>';
       }).join('');
       var moreCount = Math.max(0, (m.participants||[]).length - 5);
-      if (moreCount > 0) partAvatars += '<div style="width:24px;height:24px;border-radius:50%;background:rgba(255,255,255,0.1);color:var(--text3);display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:600;margin-left:-6px">+'+moreCount+'</div>';
-      return '<div onclick="openMeetingDetail(\''+m.id+'\')" style="background:var(--surface);border-radius:10px;padding:14px 16px;border:1px solid rgba(255,255,255,0.06);margin-bottom:10px;cursor:pointer;transition:border-color 0.2s" onmouseover="this.style.borderColor=\'var(--primary)\'" onmouseout="this.style.borderColor=\'rgba(255,255,255,0.06)\'">' +
+      if (moreCount > 0) partAvatars += '<div style="width:24px;height:24px;border-radius:50%;background:var(--overlay-10);color:var(--text3);display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:600;margin-left:-6px">+'+moreCount+'</div>';
+      return '<div onclick="openMeetingDetail(\''+m.id+'\')" style="background:var(--surface);border-radius:10px;padding:14px 16px;border:1px solid var(--overlay-6);margin-bottom:10px;cursor:pointer;transition:border-color 0.2s" onmouseover="this.style.borderColor=\'var(--primary)\'" onmouseout="this.style.borderColor=\'var(--overlay-6)\'">' +
         '<div style="display:flex;justify-content:space-between;align-items:center">' +
           '<div style="flex:1;min-width:0">' +
-            '<div style="display:flex;align-items:center;gap:8px"><span style="font-weight:700;font-size:15px">'+esc(m.title||'(untitled)')+'</span><span style="font-size:10px;padding:2px 8px;border-radius:10px;background:rgba(255,255,255,0.08);color:'+statusColor+';font-weight:600">'+statusLabel+'</span></div>' +
+            '<div style="display:flex;align-items:center;gap:8px"><span style="font-weight:700;font-size:15px">'+esc(m.title||'(untitled)')+'</span><span style="font-size:10px;padding:2px 8px;border-radius:10px;background:var(--overlay-8);color:'+statusColor+';font-weight:600">'+statusLabel+'</span></div>' +
             '<div style="font-size:11px;color:var(--text3);margin-top:6px;display:flex;align-items:center;gap:12px">' +
               '<span>'+ts+'</span>' +
               '<span>💬 '+m.message_count+'</span>' +
@@ -13784,19 +14660,19 @@ function showCreateMeetingModal() {
     return '<option value="'+p.id+'">'+esc(p.name)+'</option>';
   }).join('');
   var agentOpts = agents.map(function(a){
-    return '<label style="display:flex;align-items:center;gap:8px;padding:6px 10px;font-size:12px;cursor:pointer;border-radius:6px;transition:background 0.15s" onmouseover="this.style.background=\'rgba(255,255,255,0.04)\'" onmouseout="this.style.background=\'transparent\'">' +
+    return '<label style="display:flex;align-items:center;gap:8px;padding:6px 10px;font-size:12px;cursor:pointer;border-radius:6px;transition:background 0.15s" onmouseover="this.style.background=\'var(--overlay-4)\'" onmouseout="this.style.background=\'transparent\'">' +
       '<input type="checkbox" name="mtg-part" value="'+a.id+'">' +
       '<div style="width:24px;height:24px;border-radius:50%;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700">'+(a.name||'?')[0]+'</div>' +
       '<span>'+esc((a.role?a.role+' · ':'')+a.name)+'</span></label>';
   }).join('');
   var html = '<div style="padding:24px;max-width:500px"><h3 style="margin:0 0 16px">新建会议</h3>' +
-    '<input id="mtg-title" placeholder="会议标题" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--text);font-size:13px">' +
-    '<textarea id="mtg-agenda" placeholder="议程 / 背景（可选）" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--text);font-size:13px;min-height:60px;resize:vertical"></textarea>' +
-    '<select id="mtg-project" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--text);font-size:13px">' +
+    '<input id="mtg-title" placeholder="会议标题" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px">' +
+    '<textarea id="mtg-agenda" placeholder="议程 / 背景（可选）" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px;min-height:60px;resize:vertical"></textarea>' +
+    '<select id="mtg-project" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px">' +
       '<option value="">不关联项目 (非项目型)</option>'+projOpts +
     '</select>' +
     '<div style="font-size:12px;font-weight:600;color:var(--text2);margin:10px 0 6px">选择参会 Agent</div>' +
-    '<div style="max-height:200px;overflow-y:auto;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:4px;margin-bottom:14px">'+(agentOpts||'<div style="color:var(--text3);font-size:12px;padding:12px">No agents</div>')+'</div>' +
+    '<div style="max-height:200px;overflow-y:auto;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;padding:4px;margin-bottom:14px">'+(agentOpts||'<div style="color:var(--text3);font-size:12px;padding:12px">No agents</div>')+'</div>' +
     '<div style="display:flex;gap:8px;justify-content:flex-end">' +
       '<button class="btn btn-ghost" onclick="closeModal()">取消</button>' +
       '<button class="btn btn-primary" onclick="createMeeting()">创建</button>' +
@@ -13824,9 +14700,232 @@ async function createMeeting() {
 // Polling handle for auto-refresh while meeting is active
 var _mtgPollTimer = null;
 
+// Extracted builders — called by BOTH the initial full render in
+// openMeetingDetail AND the lightweight poll in _refreshMeetingMessages.
+// Sharing them means the poll can swap JUST the message/assignment
+// container innerHTML without ever touching the input, header,
+// participants column, or file list — so the user's draft, focus, and
+// IME composition state are preserved naturally (no "save draft then
+// restore" race). See _refreshMeetingMessages for the surgical update.
+
+function _mtgBuildMessagesHtml(m, mid) {
+  var refs = [];
+  var html = (m.messages || []).map(function(x, _i) {
+    var ts = x.created_at ? new Date(x.created_at * 1000).toLocaleTimeString() : '';
+    var anchor = 'mtg-msg-card-' + mid + '-' + _i;
+    refs.push({
+      anchor: anchor,
+      refs: x.refs || [],
+      blocks: x.blocks || [],
+      sender: x.sender || '',
+    });
+    var isUser = (x.role === 'user');
+    var isSystem = (x.role === 'system');
+    var ag = (window._cachedAgents || agents || []).find(function(a){ return a.id === x.sender; });
+    var senderName = isUser ? '主持人' : (ag ? ag.name : (x.sender_name || x.sender || '?'));
+    if (!isUser && ag && x.sender_name && x.sender_name.indexOf('-') > 0) senderName = ag.name;
+    if (isSystem) {
+      return '<div style="text-align:center;padding:4px 0;margin:4px 0">' +
+        '<span style="font-size:11px;color:var(--text3);background:color-mix(in srgb, var(--text) 3%, transparent);padding:3px 10px;border-radius:10px">' + esc(x.content || '') + '</span>' +
+      '</div>';
+    }
+    var avatarInitial = ag ? (ag.name || '?')[0] : (isUser ? '主' : (senderName || '?')[0]);
+    var nameColor = isUser ? 'var(--primary)' : '#22c55e';
+    var agRole = ag ? (ag.role || '') : '';
+    var nameDisplay = senderName + (agRole && !isUser ? ' · ' + agRole : '');
+    return '<div style="display:flex;gap:10px;padding:10px 0;align-items:flex-start">' +
+      '<div style="width:32px;height:32px;border-radius:50%;background:' + (isUser ? 'var(--primary)' : 'rgba(34,197,94,0.15)') + ';color:' + (isUser ? '#fff' : '#22c55e') + ';display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0;margin-top:2px">' + esc(avatarInitial) + '</div>' +
+      '<div style="flex:1;min-width:0">' +
+        '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:3px">' +
+          '<span style="font-size:13px;font-weight:700;color:' + nameColor + '">' + esc(nameDisplay) + '</span>' +
+          '<span style="font-size:10px;color:var(--text3)">' + ts + '</span>' +
+        '</div>' +
+        '<div style="font-size:13px;color:var(--text);white-space:pre-wrap;line-height:1.6">' + esc(x.content || '') + '</div>' +
+        '<div id="' + anchor + '" class="chat-msg-content" style="margin-top:4px"></div>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+  if (!html) {
+    html = '<div style="color:var(--text3);font-size:12px;text-align:center;padding:40px 0">会议尚未开始讨论<br><span style="font-size:11px">点击「开始会议」后发送第一条消息</span></div>';
+  }
+  return { html: html, refs: refs };
+}
+
+function _mtgBuildAssignmentsHtml(m, mid) {
+  var asgHtml = (m.assignments || []).map(function(a) {
+    var ag = (window._cachedAgents || agents || []).find(function(ag){ return ag.id === a.assignee_agent_id; });
+    var agName = ag ? ag.name : (a.assignee_agent_id || '待分配');
+    var stColor = a.status === 'done' ? '#22c55e' : a.status === 'in_progress' ? '#f59e0b' : a.status === 'cancelled' ? 'var(--text3)' : 'var(--primary)';
+    var stLabel = a.status === 'done' ? '已完成' : a.status === 'in_progress' ? '进行中' : a.status === 'cancelled' ? '已取消' : '待处理';
+    // Retry count badge (from MeetingAssignment.reexecute_count)
+    var retryBadge = '';
+    if (a.reexecute_count && a.reexecute_count > 0) {
+      retryBadge = '<span title="已重新执行次数" style="display:inline-block;padding:1px 6px;font-size:9px;background:rgba(234,179,8,0.15);color:#eab308;border-radius:8px;margin-left:6px">重试 ×' + a.reexecute_count + '</span>';
+    }
+    // Re-execute button — always available (admin may want to retry
+    // even a DONE that shouldn't have been DONE due to old contract bug).
+    var reexecBtn = '<button class="btn btn-ghost btn-sm" title="重新执行此任务（只跑未完成部分）" style="font-size:10px;padding:2px 6px;color:var(--primary)" onclick="_reexecuteAssignment(\'' + mid + '\',\'' + a.id + '\')"><span class="material-symbols-outlined" style="font-size:12px;vertical-align:middle">replay</span> 重新执行</button>';
+    return '<div style="padding:10px;background:var(--surface);border-radius:8px;margin-bottom:6px;border-left:3px solid ' + stColor + '">' +
+      '<div style="font-weight:600;font-size:12px;color:var(--text)">' + esc(a.title) + retryBadge + '</div>' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px">' +
+        '<div style="font-size:10px;color:var(--text3)">→ ' + esc(agName) + (a.due_hint ? ' · ' + esc(a.due_hint) : '') + '</div>' +
+        '<select onchange="updateMeetingAssignment(\'' + mid + '\',\'' + a.id + '\',this.value)" style="background:var(--bg);border:1px solid var(--overlay-10);border-radius:4px;color:var(--text);font-size:10px;padding:2px 4px">' +
+          ['open','in_progress','done','cancelled'].map(function(s){
+            var sl = s === 'done' ? '已完成' : s === 'in_progress' ? '进行中' : s === 'cancelled' ? '已取消' : '待处理';
+            return '<option value="' + s + '"' + (a.status === s ? ' selected' : '') + '>' + sl + '</option>';
+          }).join('') +
+        '</select>' +
+      '</div>' +
+      '<div style="margin-top:6px;display:flex;justify-content:flex-end">' + reexecBtn + '</div>' +
+    '</div>';
+  }).join('');
+  if (!asgHtml) {
+    asgHtml = '<div style="color:var(--text3);font-size:11px;text-align:center;padding:20px 0">讨论中产生的任务将显示在这里</div>';
+  }
+  return asgHtml;
+}
+
+// Typing-bubble renderer — shared by full render, surgical refresh,
+// AND the immediate-after-post hook so bubbles appear the instant the
+// moderator clicks Send (don't wait for the 3s poll).
+//
+// Target: #mtg-typing-area (dedicated sibling of #mtg-messages-body
+// inside #mtg-chat-scroll). Having its own container means:
+//   - the messages-body rewrite doesn't wipe bubbles
+//   - the bubble rewrite doesn't re-flow messages
+//
+// Also drops bubbles for agents who have already posted since their
+// "since" timestamp — same prune logic as before.
+function _mtgRenderTypingBubbles(mid, m) {
+  var area = document.getElementById('mtg-typing-area');
+  if (!area) return;
+
+  // ── Two independent bubble sources ──
+  //
+  // 1. Client-side "moderator sent, agents haven't replied yet"
+  //    (window._mtgTyping[mid].pending, populated by meetingPostMessage).
+  //    Pruned when we see a message from that agent newer than the
+  //    "since" timestamp set at post time.
+  //
+  // 2. Server-reported active_speakers — participants whose agents are
+  //    currently BUSY / WAITING_APPROVAL. Covers agent-to-agent handoff
+  //    mid-chain (e.g. 小安 @小土 in its reply body → 小土 re-queued
+  //    by backend, moderator never told the UI). Authoritative: if
+  //    server says active, bubble is shown; if server says not active,
+  //    bubble is NOT shown FROM THIS SOURCE (source 1 still applies).
+  //
+  // A bubble shows if EITHER source says so.
+  var active = (m && Array.isArray(m.active_speakers)) ? m.active_speakers : [];
+  var msgs = (m && m.messages) || [];
+  var typingMtg = (window._mtgTyping || {})[mid] || { pending: {} };
+  if (!typingMtg.pending || typeof typingMtg.pending !== 'object') {
+    typingMtg.pending = {};
+  }
+
+  // Prune source-1 entries whose agent has already posted.
+  Object.keys(typingMtg.pending).forEach(function(aid) {
+    var since = typingMtg.pending[aid];
+    var posted = msgs.some(function(mm) {
+      var ts = mm.timestamp || mm.created_at || 0;
+      return mm.sender === aid && ts > since;
+    });
+    if (posted) delete typingMtg.pending[aid];
+  });
+
+  // Union of source-1 (pending from moderator send) and source-2 (server-reported busy).
+  var shownSet = {};
+  Object.keys(typingMtg.pending).forEach(function(aid) { shownSet[aid] = true; });
+  active.forEach(function(aid) { shownSet[aid] = true; });
+  var remaining = Object.keys(shownSet);
+
+  // Persist source-1 state (even if empty — we may have pruned entries).
+  if (Object.keys(typingMtg.pending).length === 0) {
+    if (window._mtgTyping) delete window._mtgTyping[mid];
+  } else {
+    window._mtgTyping = window._mtgTyping || {};
+    window._mtgTyping[mid] = typingMtg;
+  }
+
+  if (remaining.length === 0) {
+    area.innerHTML = '';
+    return;
+  }
+  // Build fresh bubble set. Each bubble is display:flex (its own row)
+  // so multiple pending agents stack vertically instead of wrapping
+  // in a confused inline-flex soup inside a non-flex parent.
+  var agList = window._cachedAgents || (typeof agents !== 'undefined' ? agents : []);
+  var html = remaining.map(function(aid) {
+    var ag = agList.find(function(a){ return a.id === aid; });
+    var name = ag ? ag.name : aid;
+    var role = ag ? (ag.role || 'general') : '';
+    return (
+      '<div class="mtg-typing-bubble" data-agent-id="' + esc(aid) + '" ' +
+        'style="background:var(--surface);border:1px solid var(--overlay-5);' +
+        'border-radius:12px;border-bottom-left-radius:4px;padding:10px 14px;' +
+        'margin:6px 0;font-size:12px;color:var(--text3);display:flex;' +
+        'align-items:center;gap:8px;max-width:70%;width:fit-content">' +
+        '<span class="material-symbols-outlined" style="font-size:16px;color:var(--primary);' +
+          'animation:robotTyping 1s infinite">smart_toy</span>' +
+        '<span style="font-weight:700;color:var(--primary);font-size:11px">' +
+          esc(name) + (role ? ' · ' + esc(role) : '') + '</span>' +
+        '<span style="opacity:0.8">正在发言</span>' +
+        '<span class="thinking-dots" style="display:inline-flex;gap:2px">' +
+          '<span>●</span><span>●</span><span>●</span></span>' +
+      '</div>'
+    );
+  }).join('');
+  area.innerHTML = html;
+  // Live-activity suffix — decorates the bubbles with current tool/skill.
+  // Build a combined since-ts map for both sources: source-1 has real
+  // timestamps, source-2 (server active_speakers) falls back to "now"
+  // so the elapsed pill starts counting from when we first noticed.
+  if (typeof _decorateTypingBubbles === 'function') {
+    var decoMap = {};
+    Object.keys(typingMtg.pending).forEach(function(aid) {
+      decoMap[aid] = typingMtg.pending[aid];
+    });
+    var _nowTs = Date.now() / 1000;
+    active.forEach(function(aid) {
+      if (!(aid in decoMap)) decoMap[aid] = _nowTs;
+    });
+    _decorateTypingBubbles(area, decoMap);
+  }
+}
+
+// Post-render helper — attaches file cards and execution event blocks
+// for a given list of {anchor, refs, blocks, sender} records. Same
+// logic used by full render AND partial refresh so blocks don't
+// disappear on poll.
+function _mtgAttachMsgDecorations(refs, mid) {
+  try {
+    for (var i = 0; i < refs.length; i++) {
+      var rec = refs[i];
+      if (!rec) continue;
+      var host = document.getElementById(rec.anchor);
+      if (!host) continue;
+      if (rec.refs && rec.refs.length && typeof _appendFileCards === 'function') {
+        _appendFileCards(host, rec.refs);
+      }
+      if (rec.blocks && rec.blocks.length && typeof _appendMessageBlocks === 'function') {
+        _appendMessageBlocks(rec.sender || mid, host, rec.blocks);
+      }
+    }
+  } catch (_e) {
+    console.log('[meetingDetail] decoration attach failed', _e);
+  }
+}
+
 async function openMeetingDetail(mid) {
   // Clear any previous poll
   if (_mtgPollTimer) { clearInterval(_mtgPollTimer); _mtgPollTimer = null; }
+  // Reset the poll snapshot so the next _refreshMeetingMessages for
+  // THIS meeting sees its first snapshot as a diff (or not) vs the
+  // state after full render, rather than whatever was left from a
+  // previously-opened meeting.
+  _mtgLastSnapshot = {
+    mid: '', msgCount: -1, asgCount: -1,
+    msgStatusKey: '', asgStatusKey: '', meetingStatus: '',
+  };
 
   try {
     var m = await api('GET', '/api/portal/meetings/'+mid);
@@ -13837,6 +14936,7 @@ async function openMeetingDetail(mid) {
     var statusBtns = '';
     if (m.status === 'scheduled') statusBtns += '<button class="btn btn-primary btn-sm" onclick="meetingAction(\''+mid+'\',\'start\')" style="gap:4px"><span class="material-symbols-outlined" style="font-size:16px">play_arrow</span> 开始会议</button>';
     if (m.status === 'active') statusBtns += '<button class="btn btn-ghost btn-sm" onclick="meetingInterrupt(\''+mid+'\')" style="gap:4px;color:#f59e0b" title="停止当前 Agent 发言轮，等待下一指令"><span class="material-symbols-outlined" style="font-size:16px">pause_circle</span> 暂停发言</button>';
+    if (m.status === 'active') statusBtns += '<button class="btn btn-ghost btn-sm" onclick="meetingAbort(\''+mid+'\')" style="gap:4px;color:var(--error)" title="强制终止：停止讨论 + SIGTERM 任何正在运行的子进程（python 脚本、bash 循环等）"><span class="material-symbols-outlined" style="font-size:16px">stop_circle</span> 终止</button>';
     if (m.status === 'active') statusBtns += '<button class="btn btn-ghost btn-sm" onclick="meetingCloseWithSummary(\''+mid+'\')" style="gap:4px"><span class="material-symbols-outlined" style="font-size:16px">stop</span> 结束</button>';
     if (m.status !== 'cancelled' && m.status !== 'closed') statusBtns += '<button class="btn btn-ghost btn-sm" style="color:var(--error);gap:4px" onclick="meetingAction(\''+mid+'\',\'cancel\')"><span class="material-symbols-outlined" style="font-size:16px">close</span> 取消</button>';
 
@@ -13859,7 +14959,7 @@ async function openMeetingDetail(mid) {
       var removeBtn = _canEditParticipants
         ? '<span onclick="event.stopPropagation();meetingRemoveParticipant(\''+mid+'\',\''+pid+'\',\''+esc(name).replace(/\'/g,"\\'")+'\')" class="material-symbols-outlined mtg-rm-btn" title="移出会议" style="font-size:14px;color:var(--text3);cursor:pointer;opacity:0;transition:opacity 0.15s;flex-shrink:0">close</span>'
         : '';
-      return '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;transition:background 0.15s" onmouseover="this.style.background=\'rgba(255,255,255,0.04)\';var x=this.querySelector(\'.mtg-rm-btn\');if(x)x.style.opacity=1" onmouseout="this.style.background=\'transparent\';var x=this.querySelector(\'.mtg-rm-btn\');if(x)x.style.opacity=0">' +
+      return '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;transition:background 0.15s" onmouseover="this.style.background=\'var(--overlay-4)\';var x=this.querySelector(\'.mtg-rm-btn\');if(x)x.style.opacity=1" onmouseout="this.style.background=\'transparent\';var x=this.querySelector(\'.mtg-rm-btn\');if(x)x.style.opacity=0">' +
         '<div style="width:32px;height:32px;border-radius:50%;background:'+bgColor+';color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0">'+esc(initial)+'</div>' +
         '<div style="flex:1;min-width:0"><div style="font-size:12px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(name)+'</div>' +
         (role ? '<div style="font-size:10px;color:var(--text3)">'+esc(role)+'</div>' : '') +
@@ -13876,72 +14976,12 @@ async function openMeetingDetail(mid) {
     if (!(m.participants||[]).length) partHtml += '<div style="color:var(--text3);font-size:11px;padding:10px">暂无参会 Agent</div>';
 
     // -- Messages (chat thread) --
-    var _mtgMsgRefs = [];
-    var msgHtml = (m.messages||[]).map(function(x, _i){
-      var ts = x.created_at ? new Date(x.created_at*1000).toLocaleTimeString() : '';
-      var anchor = 'mtg-msg-card-' + mid + '-' + _i;
-      // Capture refs AND blocks so post-render can attach both.
-      _mtgMsgRefs.push({
-        anchor: anchor,
-        refs: x.refs || [],
-        blocks: x.blocks || [],
-        sender: x.sender || '',
-      });
-      var isUser = (x.role === 'user');
-      var isSystem = (x.role === 'system');
-
-      // Resolve display name: agent lookup > sender_name > sender
-      var ag = (window._cachedAgents||agents||[]).find(function(a){return a.id===x.sender;});
-      var senderName = isUser ? '主持人' : (ag ? ag.name : (x.sender_name || x.sender || '?'));
-      // Clean up sender_name that looks like "role-name" from backend
-      if (!isUser && ag && x.sender_name && x.sender_name.indexOf('-')>0) senderName = ag.name;
-
-      if (isSystem) {
-        // System messages (progress updates, file ops) — compact centered style
-        return '<div style="text-align:center;padding:4px 0;margin:4px 0">' +
-          '<span style="font-size:11px;color:var(--text3);background:rgba(255,255,255,0.03);padding:3px 10px;border-radius:10px">'+esc(x.content||'')+'</span>' +
-        '</div>';
-      }
-
-      var avatarInitial = ag ? (ag.name||'?')[0] : (isUser ? '主' : (senderName||'?')[0]);
-      var nameColor = isUser ? 'var(--primary)' : '#22c55e';
-      var agRole = ag ? (ag.role||'') : '';
-      var nameDisplay = senderName + (agRole && !isUser ? ' · '+agRole : '');
-
-      return '<div style="display:flex;gap:10px;padding:10px 0;align-items:flex-start">' +
-        '<div style="width:32px;height:32px;border-radius:50%;background:'+(isUser?'var(--primary)':'rgba(34,197,94,0.15)')+';color:'+(isUser?'#fff':'#22c55e')+';display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0;margin-top:2px">'+esc(avatarInitial)+'</div>' +
-        '<div style="flex:1;min-width:0">' +
-          '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:3px">' +
-            '<span style="font-size:13px;font-weight:700;color:'+nameColor+'">'+esc(nameDisplay)+'</span>' +
-            '<span style="font-size:10px;color:var(--text3)">'+ts+'</span>' +
-          '</div>' +
-          '<div style="font-size:13px;color:var(--text);white-space:pre-wrap;line-height:1.6">'+esc(x.content||'')+'</div>' +
-          '<div id="'+anchor+'" class="chat-msg-content" style="margin-top:4px"></div>' +
-        '</div>' +
-      '</div>';
-    }).join('');
-    if (!msgHtml) msgHtml = '<div style="color:var(--text3);font-size:12px;text-align:center;padding:40px 0">会议尚未开始讨论<br><span style="font-size:11px">点击「开始会议」后发送第一条消息</span></div>';
+    var _mtgMsgBuild = _mtgBuildMessagesHtml(m, mid);
+    var msgHtml = _mtgMsgBuild.html;
+    var _mtgMsgRefs = _mtgMsgBuild.refs;
 
     // -- Assignments panel --
-    var asgHtml = (m.assignments||[]).map(function(a){
-      var ag = (window._cachedAgents||agents||[]).find(function(ag){return ag.id===a.assignee_agent_id;});
-      var agName = ag ? ag.name : (a.assignee_agent_id || '待分配');
-      var stColor = a.status==='done'?'#22c55e':a.status==='in_progress'?'#f59e0b':a.status==='cancelled'?'var(--text3)':'var(--primary)';
-      var stLabel = a.status==='done'?'已完成':a.status==='in_progress'?'进行中':a.status==='cancelled'?'已取消':'待处理';
-      return '<div style="padding:10px;background:var(--surface);border-radius:8px;margin-bottom:6px;border-left:3px solid '+stColor+'">' +
-        '<div style="font-weight:600;font-size:12px;color:var(--text)">'+esc(a.title)+'</div>' +
-        '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px">' +
-          '<div style="font-size:10px;color:var(--text3)">→ '+esc(agName)+(a.due_hint?' · '+esc(a.due_hint):'')+'</div>' +
-          '<select onchange="updateMeetingAssignment(\''+mid+'\',\''+a.id+'\',this.value)" style="background:var(--bg);border:1px solid rgba(255,255,255,0.1);border-radius:4px;color:var(--text);font-size:10px;padding:2px 4px">' +
-            ['open','in_progress','done','cancelled'].map(function(s){
-              var sl = s==='done'?'已完成':s==='in_progress'?'进行中':s==='cancelled'?'已取消':'待处理';
-              return '<option value="'+s+'"'+(a.status===s?' selected':'')+'>'+sl+'</option>';
-            }).join('') +
-          '</select>' +
-        '</div>' +
-      '</div>';
-    }).join('');
-    if (!asgHtml) asgHtml = '<div style="color:var(--text3);font-size:11px;text-align:center;padding:20px 0">讨论中产生的任务将显示在这里</div>';
+    var asgHtml = _mtgBuildAssignmentsHtml(m, mid);
 
     // -- Files panel (workspace) --
     var filesHtml = '';
@@ -13963,7 +15003,7 @@ async function openMeetingDetail(mid) {
     c.innerHTML =
       '<div style="display:flex;flex-direction:column;height:calc(100vh - 60px)">' +
         // ---- Header ----
-        '<div style="padding:12px 18px;border-bottom:1px solid rgba(255,255,255,0.06);flex-shrink:0">' +
+        '<div style="padding:12px 18px;border-bottom:1px solid var(--overlay-6);flex-shrink:0">' +
           '<div style="display:flex;justify-content:space-between;align-items:center">' +
             '<div style="display:flex;align-items:center;gap:12px">' +
               '<button class="btn btn-ghost btn-sm" onclick="renderMeetingsTab()" style="padding:4px"><span class="material-symbols-outlined" style="font-size:18px">arrow_back</span></button>' +
@@ -13982,7 +15022,7 @@ async function openMeetingDetail(mid) {
         // ---- Three-column body ----
         '<div style="display:flex;flex:1;min-height:0;overflow:hidden">' +
           // == Left: Participants ==
-          '<div style="width:180px;flex-shrink:0;border-right:1px solid rgba(255,255,255,0.06);overflow-y:auto;padding:12px 8px">' +
+          '<div style="width:180px;flex-shrink:0;border-right:1px solid var(--overlay-6);overflow-y:auto;padding:12px 8px">' +
             '<div style="display:flex;justify-content:space-between;align-items:center;padding:0 10px 8px">' +
               '<div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase">参会者 ('+(m.participants||[]).length+')</div>' +
               (_canEditParticipants ? '<button class="btn btn-ghost btn-xs" onclick="meetingInviteParticipant(\''+mid+'\')" title="邀请 Agent 加入会议" style="padding:2px 6px;font-size:11px">+ 邀请</button>' : '') +
@@ -13994,19 +15034,26 @@ async function openMeetingDetail(mid) {
 
           // == Center: Chat / Discussion ==
           '<div style="flex:1;display:flex;flex-direction:column;min-width:0">' +
-            // Messages scrollable area
+            // Messages scrollable area. Inner #mtg-messages-body is the
+            // surgical-update target: the poll rewrites JUST that child's
+            // innerHTML so the scroll container (with its current scroll
+            // position) and the sibling input below stay untouched.
+            // #mtg-typing-area sits BELOW the messages so bubbles appear
+            // at the bottom (where the next reply will land), independent
+            // of the messages rewrite.
             '<div id="mtg-chat-scroll" style="flex:1;overflow-y:auto;padding:12px 18px">' +
-              msgHtml +
+              '<div id="mtg-messages-body">' + msgHtml + '</div>' +
+              '<div id="mtg-typing-area"></div>' +
             '</div>' +
             // Input area (only if meeting not closed/cancelled)
             (m.status !== 'closed' && m.status !== 'cancelled' ?
-              '<div style="padding:10px 18px;border-top:1px solid rgba(255,255,255,0.06);flex-shrink:0">' +
+              '<div style="padding:10px 18px;border-top:1px solid var(--overlay-6);flex-shrink:0">' +
                 '<div id="mtg-attach-preview-'+mid+'" style="display:none;flex-wrap:wrap;gap:6px;margin-bottom:6px"></div>' +
                 '<div style="display:flex;gap:8px;align-items:flex-end;position:relative">' +
                   '<div id="mtg-mention-dropdown" class="mention-dropdown"></div>' +
                   '<input type="file" id="mtg-file-input-'+mid+'" multiple accept="image/*,.pdf,.doc,.docx,.txt,.csv,.json,.yaml,.yml,.md" style="display:none" onchange="handleMtgAttach(\''+mid+'\',this)">' +
                   '<button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'mtg-file-input-'+mid+'\').click()" title="上传文件" style="flex-shrink:0;padding:6px"><span class="material-symbols-outlined" style="font-size:18px">attach_file</span></button>' +
-                  '<textarea id="mtg-msg-input" placeholder="'+(m.status==='active'?'发送消息 · @ 选择参会者（@所有人 = 全员回复；无 @ = 只发言不回复）':'会议未开始，请先点击「开始会议」')+'" style="flex:1;padding:10px 14px;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:10px;color:var(--text);font-size:13px;min-height:42px;max-height:120px;resize:none;line-height:1.4" oninput="_mtgInputChange(\''+mid+'\')" onkeydown="_mtgInputKeydown(event,\''+mid+'\')"'+(m.status!=='active'?' disabled':'')+'></textarea>' +
+                  '<textarea id="mtg-msg-input" placeholder="'+(m.status==='active'?'发送消息 · @ 选择参会者（@所有人 = 全员回复；无 @ = 只发言不回复）':'会议未开始，请先点击「开始会议」')+'" style="flex:1;padding:10px 14px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:10px;color:var(--text);font-size:13px;min-height:42px;max-height:120px;resize:none;line-height:1.4" oninput="_mtgInputChange(\''+mid+'\')" onkeydown="_mtgInputKeydown(event,\''+mid+'\')"'+(m.status!=='active'?' disabled':'')+'></textarea>' +
                   '<button class="btn btn-primary btn-sm" onclick="meetingPostMessage(\''+mid+'\')" style="flex-shrink:0;padding:8px 16px;border-radius:10px"'+(m.status!=='active'?' disabled':'')+'>发送</button>' +
                 '</div>' +
               '</div>'
@@ -14014,12 +15061,12 @@ async function openMeetingDetail(mid) {
           '</div>' +
 
           // == Right: Assignments / Tasks ==
-          '<div style="width:260px;flex-shrink:0;border-left:1px solid rgba(255,255,255,0.06);overflow-y:auto;padding:12px">' +
+          '<div style="width:260px;flex-shrink:0;border-left:1px solid var(--overlay-6);overflow-y:auto;padding:12px">' +
             '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
-              '<div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase">任务 ('+(m.assignments||[]).length+')</div>' +
+              '<div id="mtg-assignments-count" style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase">任务 ('+(m.assignments||[]).length+')</div>' +
               (m.status === 'active' ? '<button class="btn btn-ghost btn-xs" onclick="showMeetingAssignmentModal(\''+mid+'\')" style="font-size:11px">+ 新增</button>' : '') +
             '</div>' +
-            asgHtml +
+            '<div id="mtg-assignments-body">' + asgHtml + '</div>' +
           '</div>' +
         '</div>' +
       '</div>' +
@@ -14037,69 +15084,31 @@ async function openMeetingDetail(mid) {
     }
 
     // -- Post-render: typing bubbles for pending respondents --
-    // pending shape: {aid: sinceTimestamp}; per-agent timestamp so overlapping
-    // sends keep each bubble alive until THAT agent posts its own reply.
-    var chatScroll = document.getElementById('mtg-chat-scroll');
-    var typingMtg = (window._mtgTyping || {})[mid];
-    if (typingMtg && typingMtg.pending && typeof typingMtg.pending === 'object' && chatScroll) {
-      var mtgMsgs = m.messages || [];
-      Object.keys(typingMtg.pending).forEach(function(aid) {
-        var since = typingMtg.pending[aid];
-        var posted = mtgMsgs.some(function(mm) {
-          var ts = mm.timestamp || mm.created_at || 0;
-          return mm.sender === aid && ts > since;
-        });
-        if (posted) delete typingMtg.pending[aid];
-      });
-      var remaining = Object.keys(typingMtg.pending);
-      if (remaining.length === 0) {
-        delete window._mtgTyping[mid];
-      } else {
-        var agList = window._cachedAgents || (typeof agents !== 'undefined' ? agents : []);
-        remaining.forEach(function(aid) {
-          var ag = agList.find(function(a){ return a.id === aid; });
-          var name = ag ? ag.name : aid;
-          var role = ag ? (ag.role || 'general') : '';
-          var bubble = document.createElement('div');
-          bubble.className = 'mtg-typing-bubble';
-          // data-agent-id enables _decorateTypingBubbles to append
-          // a live activity suffix (current tool, tool count).
-          bubble.setAttribute('data-agent-id', aid);
-          bubble.style.cssText = 'align-self:flex-start;background:var(--surface);border:1px solid rgba(255,255,255,0.05);border-radius:12px;border-bottom-left-radius:4px;padding:10px 14px;margin:6px 0;font-size:12px;color:var(--text3);display:inline-flex;align-items:center;gap:8px;max-width:70%;flex-wrap:wrap';
-          bubble.innerHTML =
-            '<span class="material-symbols-outlined" style="font-size:16px;color:var(--primary);animation:robotTyping 1s infinite">smart_toy</span>' +
-            '<span style="font-weight:700;color:var(--primary);font-size:11px">'+esc(name)+(role?' · '+esc(role):'')+'</span>' +
-            '<span style="opacity:0.8">正在发言</span>' +
-            '<span class="thinking-dots" style="display:inline-flex;gap:2px"><span>●</span><span>●</span><span>●</span></span>';
-          chatScroll.appendChild(bubble);
-        });
-        // Live-activity decoration — fills each bubble with the
-        // current tool/skill snapshot based on per-agent event log.
-        _decorateTypingBubbles(chatScroll, typingMtg.pending);
-      }
-    }
+    _mtgRenderTypingBubbles(mid, m);
 
     // -- Post-render: scroll to bottom --
+    var chatScroll = document.getElementById('mtg-chat-scroll');
     if (chatScroll) chatScroll.scrollTop = chatScroll.scrollHeight;
 
     // -- Post-render: attach file cards + execution event blocks --
-    try {
-      for (var _ri = 0; _ri < _mtgMsgRefs.length; _ri++) {
-        var rec = _mtgMsgRefs[_ri];
-        if (!rec) continue;
-        var host = document.getElementById(rec.anchor);
-        if (!host) continue;
-        if (rec.refs && rec.refs.length && typeof _appendFileCards === 'function') {
-          _appendFileCards(host, rec.refs);
-        }
-        if (rec.blocks && rec.blocks.length && typeof _appendMessageBlocks === 'function') {
-          _appendMessageBlocks(rec.sender || mid, host, rec.blocks);
-        }
-      }
-    } catch(_e) { console.log('[meetingDetail] file card / block attach failed', _e); }
+    _mtgAttachMsgDecorations(_mtgMsgRefs, mid);
 
     // -- Post-render: load files list --
     if (m.workspace_dir) _loadMeetingFiles(mid);
+
+    // -- Seed the poll snapshot with the currently-rendered state so
+    //    the first poll tick doesn't re-run _mtgBuildMessagesHtml on
+    //    data that's already identical in the DOM. Only real deltas
+    //    trigger a surgical DOM update thereafter.
+    var _seedSnap = _mtgSnapshotKey(m);
+    _mtgLastSnapshot = {
+      mid: mid,
+      msgCount: (m.messages || []).length,
+      asgCount: (m.assignments || []).length,
+      msgStatusKey: _seedSnap.msgKey,
+      asgStatusKey: _seedSnap.asgKey,
+      meetingStatus: m.status,
+    };
 
     // -- Auto-refresh: poll every 3s while meeting is active --
     if (m.status === 'active') {
@@ -14113,8 +15122,39 @@ async function openMeetingDetail(mid) {
   }
 }
 
-// Light refresh: only update messages + assignments without full re-render
-var _mtgLastMsgCount = 0;
+// Light refresh — SURGICAL update of messages + assignments only.
+// Previously this called openMeetingDetail(mid) which rebuilt the
+// whole #content innerHTML, destroying and re-creating the message
+// input every 3s. Users lost IME composition state, cursor position,
+// and focus. Now we rewrite JUST the inner message/assignment
+// containers — the input element is never touched, so draft, focus,
+// selection, and CJK IME state all survive naturally.
+//
+// Per-meeting state (on the timer closure rather than module scope so
+// opening a different meeting resets the counters):
+var _mtgLastSnapshot = {
+  mid: '',
+  msgCount: -1,      // last observed m.messages.length
+  asgCount: -1,      // last observed m.assignments.length
+  msgStatusKey: '',  // fingerprint of "which messages have tool_calls/etc"
+  asgStatusKey: '',  // fingerprint of assignment statuses (done/in_progress)
+  meetingStatus: '', // m.status — transitions need header repaint
+};
+
+function _mtgSnapshotKey(m) {
+  // Cheap fingerprint — changes when message bodies or block counts
+  // change even if counts stay equal (e.g. an in-flight message
+  // grows new tool_call events). Avoids the "new count same" false
+  // negative where a message accretes blocks but count doesn't shift.
+  var msgKey = (m.messages || []).map(function(x) {
+    return (x.id || '') + ':' + ((x.blocks || []).length) + ':' + ((x.content || '').length);
+  }).join('|');
+  var asgKey = (m.assignments || []).map(function(a) {
+    return a.id + ':' + a.status;
+  }).join('|');
+  return { msgKey: msgKey, asgKey: asgKey };
+}
+
 async function _refreshMeetingMessages(mid) {
   // -- Guard: if the user has navigated away from the meeting detail view,
   //    stop polling. Otherwise the timer would keep firing and re-rendering
@@ -14126,18 +15166,77 @@ async function _refreshMeetingMessages(mid) {
   }
   try {
     var m = await api('GET', '/api/portal/meetings/'+mid);
-    var newCount = (m.messages||[]).length;
-    var newAsgCount = (m.assignments||[]).length;
     // Re-check after the await: user may have navigated away during the fetch
     if (!document.getElementById('mtg-chat-scroll')) {
       if (_mtgPollTimer) { clearInterval(_mtgPollTimer); _mtgPollTimer = null; }
       return;
     }
-    // Only re-render if something changed
-    if (newCount !== _mtgLastMsgCount || newAsgCount !== (m._prevAsgCount||0)) {
-      _mtgLastMsgCount = newCount;
-      openMeetingDetail(mid);  // draft preservation handled inside openMeetingDetail
+    window._currentMeeting = m;
+
+    var snap = _mtgSnapshotKey(m);
+    var changedMsgs = (_mtgLastSnapshot.mid !== mid) || (snap.msgKey !== _mtgLastSnapshot.msgStatusKey);
+    var changedAsgs = (_mtgLastSnapshot.mid !== mid) || (snap.asgKey !== _mtgLastSnapshot.asgStatusKey);
+    var changedStatus = (_mtgLastSnapshot.meetingStatus !== m.status);
+
+    // If meeting transitioned (active → closed, etc.), the input area
+    // / status banner / buttons need to appear or disappear. Fall back
+    // to the heavy render for those cases (rare) — but NOT on the
+    // common case of a new message landing.
+    if (changedStatus && _mtgLastSnapshot.mid === mid) {
+      _mtgLastSnapshot.meetingStatus = m.status;
+      openMeetingDetail(mid);
+      return;
     }
+
+    // Snapshot scroll state BEFORE touching DOM so we can decide
+    // whether to auto-stick-to-bottom (user was following) or
+    // preserve scrollTop (user was reading history).
+    var chatScroll = document.getElementById('mtg-chat-scroll');
+    var wasNearBottom = false;
+    if (chatScroll) {
+      var gap = chatScroll.scrollHeight - (chatScroll.scrollTop + chatScroll.clientHeight);
+      wasNearBottom = gap < 80;  // within 80px of bottom counts as "following"
+    }
+
+    if (changedMsgs) {
+      var build = _mtgBuildMessagesHtml(m, mid);
+      var body = document.getElementById('mtg-messages-body');
+      if (body) {
+        body.innerHTML = build.html;
+        _mtgAttachMsgDecorations(build.refs, mid);
+      }
+      // Scroll behavior: stick to bottom only if user was already there.
+      if (chatScroll && wasNearBottom) {
+        chatScroll.scrollTop = chatScroll.scrollHeight;
+      }
+    }
+
+    if (changedAsgs) {
+      var asgBody = document.getElementById('mtg-assignments-body');
+      if (asgBody) {
+        asgBody.innerHTML = _mtgBuildAssignmentsHtml(m, mid);
+      }
+      var asgCount = document.getElementById('mtg-assignments-count');
+      if (asgCount) {
+        asgCount.textContent = '任务 (' + ((m.assignments||[]).length) + ')';
+      }
+    }
+
+    // Refresh typing bubbles on every poll tick regardless of message
+    // delta — the bubble set is driven by window._mtgTyping (client-
+    // side pending map), not by server state. This prunes bubbles whose
+    // agent has since posted AND renders newly-pending bubbles from
+    // moderator sends that happened between ticks.
+    _mtgRenderTypingBubbles(mid, m);
+
+    _mtgLastSnapshot = {
+      mid: mid,
+      msgCount: (m.messages || []).length,
+      asgCount: (m.assignments || []).length,
+      msgStatusKey: snap.msgKey,
+      asgStatusKey: snap.asgKey,
+      meetingStatus: m.status,
+    };
   } catch(e) {
     // Silently ignore poll errors
   }
@@ -14156,7 +15255,7 @@ async function _loadMeetingFiles(mid) {
     }
     area.innerHTML = files.map(function(f){
       var sizeStr = f.size < 1024 ? f.size+'B' : f.size < 1048576 ? Math.round(f.size/1024)+'KB' : (f.size/1048576).toFixed(1)+'MB';
-      return '<div style="display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:4px;font-size:10px;cursor:pointer;transition:background 0.15s" onmouseover="this.style.background=\'rgba(255,255,255,0.04)\'" onmouseout="this.style.background=\'transparent\'" onclick="window.open(\'/api/portal/meetings/'+mid+'/files/'+encodeURIComponent(f.name)+'\')" title="点击下载">' +
+      return '<div style="display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:4px;font-size:10px;cursor:pointer;transition:background 0.15s" onmouseover="this.style.background=\'var(--overlay-4)\'" onmouseout="this.style.background=\'transparent\'" onclick="window.open(\'/api/portal/meetings/'+mid+'/files/'+encodeURIComponent(f.name)+'\')" title="点击下载">' +
         '<span class="material-symbols-outlined" style="font-size:14px;color:var(--primary)">description</span>' +
         '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)">'+esc(f.name)+'</span>' +
         '<span style="color:var(--text3)">'+sizeStr+'</span>' +
@@ -14180,6 +15279,196 @@ async function meetingInterrupt(mid) {
     await api('POST', '/api/portal/meetings/'+mid+'/interrupt', {});
     openMeetingDetail(mid);
   } catch(e) { alert('Error: '+e.message); }
+}
+
+async function meetingAbort(mid) {
+  // Hard abort: confirm, then stop discussion loop + SIGTERM any
+  // subprocesses spawned by agents in this meeting (python scripts,
+  // bash loops, etc.).
+  var ok = await _destructiveConfirm({
+    title: window.t('abort.meetingTitle', '终止会议讨论？'),
+    message: window.t('abort.meetingMessage',
+      '会停止讨论循环并 kill 任何正在运行的子进程。'),
+    confirmLabel: '⏹ ' + window.t('abort.confirm', '终止'),
+    cancelLabel: window.t('action.cancel', '取消'),
+    tone: 'danger',
+    icon: 'stop_circle',
+  });
+  if (!ok) return;
+  try {
+    var r = await api('POST', '/api/portal/meetings/'+mid+'/abort', {});
+    var killed = (r && r.abort && (r.abort.killed_pids || []).length) || 0;
+    if (killed > 0) {
+      // Only toast when we actually killed something, so quiet aborts stay quiet
+      console.log('[meeting abort] killed ' + killed + ' subprocess(es)');
+    }
+    openMeetingDetail(mid);
+  } catch(e) { alert('终止失败: '+(e.message||e)); }
+}
+
+async function projectAbort(projId) {
+  var ok = await _destructiveConfirm({
+    title: window.t('abort.projectTitle', '终止项目中的 Agent 运行？'),
+    message: window.t('abort.projectMessage',
+      '会停止响应循环并 kill 任何正在运行的子进程。'),
+    confirmLabel: '⏹ ' + window.t('abort.confirm', '终止'),
+    cancelLabel: window.t('action.cancel', '取消'),
+    tone: 'danger',
+    icon: 'stop_circle',
+  });
+  if (!ok) return;
+  try {
+    var r = await api('POST', '/api/portal/projects/'+projId+'/abort', {});
+    var killed = (r && r.abort && (r.abort.killed_pids || []).length) || 0;
+    if (killed > 0) {
+      console.log('[project abort] killed ' + killed + ' subprocess(es)');
+    }
+    // Refresh the project view
+    if (typeof renderProjectDetail === 'function') {
+      renderProjectDetail(projId);
+    }
+  } catch(e) { alert('终止失败: '+(e.message||e)); }
+}
+
+// Append a system-style card into the chat stream so users get a
+// visible acknowledgement of actions the agent/backend silently did
+// (abort request sent, abort confirmed, etc.). Unlike addChatBubble
+// this stays on its own line, centered, gray.
+function _appendChatSystemCard(agentId, text, opts) {
+  opts = opts || {};
+  var panel = document.getElementById('chat-msgs-' + agentId);
+  if (!panel) return null;
+  var wrap = document.createElement('div');
+  wrap.style.cssText = 'display:flex;justify-content:center;padding:6px 0';
+  var card = document.createElement('div');
+  var tone = opts.tone || 'info';
+  var color = tone === 'error' ? 'var(--error)'
+            : tone === 'success' ? 'var(--success)'
+            : 'var(--text3)';
+  var bg    = tone === 'error' ? 'rgba(248,81,73,0.08)'
+            : tone === 'success' ? 'rgba(76,175,80,0.08)'
+            : 'var(--overlay-4)';
+  card.style.cssText = 'font-size:11px;color:' + color
+    + ';background:' + bg
+    + ';padding:4px 12px;border-radius:12px;border:1px solid ' + color;
+  card.textContent = text;
+  wrap.appendChild(card);
+  panel.appendChild(wrap);
+  panel.scrollTop = panel.scrollHeight;
+  return card;
+}
+
+// Custom confirm modal with explicit button labels — the native browser
+// confirm() ships "确定/取消" which confuses users for destructive ops
+// (is "确定" confirming the termination, or confirming cancellation?).
+// Showing the ACTION name on the primary button removes that ambiguity.
+function _destructiveConfirm(opts) {
+  opts = opts || {};
+  return new Promise(function(resolve) {
+    var overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);'
+      + 'z-index:10050;display:flex;align-items:center;justify-content:center;'
+      + 'backdrop-filter:blur(2px)';
+    var box = document.createElement('div');
+    box.style.cssText = 'background:var(--surface);border-radius:12px;'
+      + 'padding:24px;min-width:360px;max-width:480px;'
+      + 'border:1px solid var(--border-light);'
+      + 'box-shadow:0 20px 60px rgba(0,0,0,0.3)';
+    box.innerHTML = ''
+      + '<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">'
+      +   '<span class="material-symbols-outlined" style="font-size:24px;color:' + (opts.tone === 'danger' ? 'var(--error)' : 'var(--warning)') + '">' + (opts.icon || 'warning') + '</span>'
+      +   '<div style="font-size:15px;font-weight:700;color:var(--text)">' + esc(opts.title || '') + '</div>'
+      + '</div>'
+      + '<div style="font-size:13px;color:var(--text2);margin-bottom:20px;line-height:1.5">' + esc(opts.message || '') + '</div>'
+      + '<div style="display:flex;gap:8px;justify-content:flex-end">'
+      +   '<button id="_dc_cancel" class="btn btn-ghost btn-sm" style="padding:8px 16px">' + esc(opts.cancelLabel || '取消') + '</button>'
+      +   '<button id="_dc_confirm" class="btn btn-sm" style="padding:8px 16px;background:' + (opts.tone === 'danger' ? 'var(--error)' : 'var(--primary)') + ';color:' + (opts.tone === 'danger' ? '#fff' : 'var(--primary-text)') + ';border:none;font-weight:600">' + esc(opts.confirmLabel || '确定') + '</button>'
+      + '</div>';
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    function cleanup(result) {
+      try { document.body.removeChild(overlay); } catch(e){}
+      resolve(result);
+    }
+    box.querySelector('#_dc_cancel').onclick = function() { cleanup(false); };
+    box.querySelector('#_dc_confirm').onclick = function() { cleanup(true); };
+    // Click outside → cancel. ESC → cancel.
+    overlay.onclick = function(e) { if (e.target === overlay) cleanup(false); };
+    var escHandler = function(e) {
+      if (e.key === 'Escape') {
+        document.removeEventListener('keydown', escHandler);
+        cleanup(false);
+      }
+    };
+    document.addEventListener('keydown', escHandler);
+    // Focus the cancel button by default — prevents accidental Enter
+    // from destroying work.
+    setTimeout(function() {
+      try { box.querySelector('#_dc_cancel').focus(); } catch(e){}
+    }, 50);
+  });
+}
+
+async function agentAbort(agentId) {
+  var ok = await _destructiveConfirm({
+    title: window.t('abort.title', '终止当前对话？'),
+    message: window.t('abort.message',
+      '会停止 LLM 循环并 kill 任何正在运行的子进程。当前对话不会保存进度。'),
+    confirmLabel: '⏹ ' + window.t('abort.confirm', '终止'),
+    cancelLabel: window.t('action.cancel', '取消'),
+    tone: 'danger',
+    icon: 'stop_circle',
+  });
+  if (!ok) return;
+  // 1. Immediate visual feedback — user knows the click registered.
+  var card = _appendChatSystemCard(agentId,
+    '⏹ 正在请求终止…', {tone: 'info'});
+  // 2. Kill the client-side SSE stream + progress bar immediately.
+  //    This way the UI unblocks even before the backend confirms.
+  try {
+    var stream = _activeTaskStreams[agentId];
+    if (stream) {
+      if (stream.abortCtrl) { try { stream.abortCtrl.abort(); } catch(e){} }
+      // Also POST the per-task abort so chat_task.aborted gets flipped
+      // (backend /agent/abort only flips abort_registry).
+      if (stream.taskId) {
+        fetch('/api/portal/chat-task/' + stream.taskId + '/abort', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          credentials: 'same-origin',
+          body: '{}',
+        }).catch(function(){ /* best-effort */ });
+      }
+      delete _activeTaskStreams[agentId];
+    }
+  } catch(e) { /* best-effort */ }
+  try {
+    _updateProgress(agentId, 0, 'Aborted');
+    var pb = document.getElementById('chat-progress-' + agentId);
+    if (pb) { pb.style.transition = 'opacity 0.6s'; pb.style.opacity = '0'; }
+    setTimeout(function(){ _removeProgressBar(agentId); }, 800);
+  } catch(e) { /* best-effort */ }
+  // 3. Call the agent-level abort (kills subprocesses + flips registry).
+  try {
+    var r = await api('POST', '/api/portal/agent/'+agentId+'/abort', {});
+    var killed = (r && r.abort && (r.abort.killed_pids || []).length) || 0;
+    if (card) {
+      card.textContent = killed > 0
+        ? '⏹ 已终止（kill 了 ' + killed + ' 个子进程）'
+        : '⏹ 已终止';
+      card.style.color = 'var(--success)';
+      card.style.borderColor = 'var(--success)';
+      card.style.background = 'rgba(76,175,80,0.08)';
+    }
+  } catch(e) {
+    if (card) {
+      card.textContent = '⏹ 终止请求失败：' + (e && e.message || e);
+      card.style.color = 'var(--error)';
+      card.style.borderColor = 'var(--error)';
+      card.style.background = 'rgba(248,81,73,0.08)';
+    }
+  }
 }
 
 // Inline invite — renders a dropdown + confirm button in the participants column.
@@ -14267,7 +15556,7 @@ function _renderMtgAttachPreview(mid) {
     var thumb = a.preview_url
       ? '<img src="'+a.preview_url+'" style="width:28px;height:28px;object-fit:cover;border-radius:3px">'
       : '<span class="material-symbols-outlined" style="font-size:16px;color:var(--text3)">draft</span>';
-    return '<div style="display:inline-flex;align-items:center;gap:4px;background:var(--surface);border:1px solid rgba(255,255,255,0.08);border-radius:4px;padding:2px 6px;font-size:10px;color:var(--text)">' +
+    return '<div style="display:inline-flex;align-items:center;gap:4px;background:var(--surface);border:1px solid var(--overlay-8);border-radius:4px;padding:2px 6px;font-size:10px;color:var(--text)">' +
       thumb + '<span style="max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(a.name)+'</span>' +
       '<button onclick="_mtgAttachList(\''+mid+'\').splice('+idx+',1);_renderMtgAttachPreview(\''+mid+'\')" style="background:none;border:none;color:var(--text3);cursor:pointer;padding:0"><span class="material-symbols-outlined" style="font-size:12px">close</span></button>' +
     '</div>';
@@ -14374,7 +15663,13 @@ async function meetingPostMessage(mid) {
       });
       window._mtgTyping[mid] = slot;
     }
-    _mtgLastMsgCount = 0; // force refresh, which re-renders typing bubbles
+    // Render bubbles NOW so the user sees immediate feedback — don't
+    // wait for the 3s poll tick. The surgical poll will keep them
+    // updated thereafter.
+    _mtgRenderTypingBubbles(mid, { messages: (window._currentMeeting && window._currentMeeting.messages) || [] });
+    // Scroll to bottom so the new bubbles are visible.
+    var _sc = document.getElementById('mtg-chat-scroll');
+    if (_sc) _sc.scrollTop = _sc.scrollHeight;
   } catch(e) {
     alert('Error: '+e.message);
     if (el) { el.disabled = false; el.value = v; }
@@ -14388,10 +15683,10 @@ function showMeetingAssignmentModal(mid) {
   }).join('');
   var html = '<div style="padding:24px;max-width:480px"><h3 style="margin:0 0 16px">新建任务</h3>' +
     '<p style="font-size:12px;color:var(--text3);margin:-8px 0 14px">从讨论中明确的行动项</p>' +
-    '<input id="asg-title" placeholder="任务标题" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--text);font-size:13px">' +
-    '<textarea id="asg-desc" placeholder="描述 / 背景 (可选)" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--text);font-size:13px;min-height:60px;resize:vertical"></textarea>' +
-    '<select id="asg-assignee" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--text);font-size:13px">'+agentOpts+'</select>' +
-    '<input id="asg-due" placeholder="截止提示 (e.g. 明天 17:00)" style="width:100%;padding:10px;margin-bottom:14px;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--text);font-size:13px">' +
+    '<input id="asg-title" placeholder="任务标题" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px">' +
+    '<textarea id="asg-desc" placeholder="描述 / 背景 (可选)" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px;min-height:60px;resize:vertical"></textarea>' +
+    '<select id="asg-assignee" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px">'+agentOpts+'</select>' +
+    '<input id="asg-due" placeholder="截止提示 (e.g. 明天 17:00)" style="width:100%;padding:10px;margin-bottom:14px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px">' +
     '<div style="display:flex;gap:8px;justify-content:flex-end">' +
       '<button class="btn btn-ghost" onclick="closeModal()">取消</button>' +
       '<button class="btn btn-primary" onclick="createMeetingAssignment(\''+mid+'\')">创建</button>' +
@@ -14420,6 +15715,21 @@ async function updateMeetingAssignment(mid, aid, status) {
     await api('POST', '/api/portal/meetings/'+mid+'/assignments/'+aid+'/update', {status: status});
     openMeetingDetail(mid);
   } catch(e) { alert('Error: '+e.message); }
+}
+
+async function _reexecuteAssignment(mid, aid) {
+  // Re-execute uses the persisted plan + workspace — won't redo finished
+  // steps. Confirm so accidental clicks don't kick off a long run.
+  if (!confirm('重新执行此任务？\n系统会读取已完成的步骤和产物，只跑未完成部分。')) return;
+  try {
+    var r = await api('POST', '/api/portal/meetings/'+mid+'/assignments/'+aid+'/reexecute', {});
+    if (r && r.ok) {
+      // Refresh so the user sees status → 进行中 + 重试 ×N badge
+      openMeetingDetail(mid);
+    } else {
+      alert('重新执行失败: ' + ((r && r.error) || 'unknown'));
+    }
+  } catch(e) { alert('重新执行失败: ' + (e.message || e)); }
 }
 
 // ============ @mention autocomplete for meetings ============
@@ -14630,16 +15940,16 @@ async function loadTaskCenter() {
         targetLine =
           '<div style="font-size:11px;color:var(--text2);margin-top:4px">👤 Agent: <strong>'+esc(agName)+'</strong></div>';
       }
-      return '<div style="background:var(--surface);border-radius:10px;padding:12px 14px;border:1px solid rgba(255,255,255,0.06);margin-bottom:8px">' +
+      return '<div style="background:var(--surface);border-radius:10px;padding:12px 14px;border:1px solid var(--overlay-6);margin-bottom:8px">' +
         '<div style="display:flex;align-items:center;gap:8px">' +
           '<span style="font-size:14px;line-height:1">'+statusIcon+'</span>' +
           '<span style="font-weight:700;font-size:13px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(job.name||'(unnamed)')+'</span>' +
-          '<span style="font-size:10px;background:rgba(255,255,255,0.06);padding:2px 8px;border-radius:10px;color:var(--text3)">'+esc(job.job_type||'recurring')+'</span>' +
+          '<span style="font-size:10px;background:var(--overlay-6);padding:2px 8px;border-radius:10px;color:var(--text3)">'+esc(job.job_type||'recurring')+'</span>' +
         '</div>' +
         targetLine +
         '<div style="font-size:10px;color:var(--text3);margin-top:6px;font-family:monospace">⏰ '+esc(job.cron_expr||'one-time')+'</div>' +
         '<div style="font-size:10px;color:var(--text3);margin-top:2px">下次: '+esc(nextRun)+' · 上次: '+esc(lastRun)+' · 执行 '+(job.run_count||0)+' 次</div>' +
-        '<div style="display:flex;gap:6px;margin-top:8px;border-top:1px solid rgba(255,255,255,0.05);padding-top:8px">' +
+        '<div style="display:flex;gap:6px;margin-top:8px;border-top:1px solid var(--overlay-5);padding-top:8px">' +
           '<button class="btn btn-primary btn-xs" onclick="triggerJob(\''+job.id+'\')">▶ 立即运行</button>' +
           '<button class="btn btn-ghost btn-xs" onclick="toggleJob(\''+job.id+'\','+(!enabled)+')">'+(enabled?'暂停':'恢复')+'</button>' +
           '<button class="btn btn-ghost btn-xs" onclick="viewJobHistory(\''+job.id+'\')">历史</button>' +
@@ -14655,7 +15965,7 @@ async function loadTaskCenter() {
 
     var stRows = standaloneTasks.map(function(t){
       var icon = t.status==='done'?'✅':t.status==='in_progress'?'⏳':t.status==='blocked'?'🚫':t.status==='cancelled'?'❌':'📋';
-      var statusSelect = '<select onchange="updateStandaloneTask(\''+t.id+'\',{status:this.value})" style="background:var(--surface2);border:1px solid rgba(255,255,255,0.1);border-radius:4px;color:var(--text);font-size:10px;padding:2px 6px">' +
+      var statusSelect = '<select onchange="updateStandaloneTask(\''+t.id+'\',{status:this.value})" style="background:var(--surface2);border:1px solid var(--overlay-10);border-radius:4px;color:var(--text);font-size:10px;padding:2px 6px">' +
         ['todo','in_progress','done','blocked','cancelled'].map(function(s){return '<option value="'+s+'"'+(t.status===s?' selected':'')+'>'+s+'</option>';}).join('') +
       '</select>';
       var mtgBadge = '';
@@ -14666,7 +15976,7 @@ async function loadTaskCenter() {
           'title="点击打开会议">💬 '+esc(mtgName)+'</span>';
       }
       var assigneeName = t.assigned_to ? (agentNameById[t.assigned_to] || t.assigned_to) : '—';
-      return '<div style="background:var(--surface);border-radius:8px;padding:10px 12px;border:1px solid rgba(255,255,255,0.05);margin-bottom:6px">' +
+      return '<div style="background:var(--surface);border-radius:8px;padding:10px 12px;border:1px solid var(--overlay-5);margin-bottom:6px">' +
         '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px">' +
           '<div style="flex:1;min-width:0"><span style="font-weight:600;font-size:13px">'+icon+' '+esc(t.title||'')+'</span>' +
           (t.description?'<div style="font-size:10px;color:var(--text3);margin-top:2px">'+esc(t.description.slice(0,120))+'</div>':'') +
@@ -14695,7 +16005,7 @@ async function loadTaskCenter() {
         };
         var v = cfg[status] || ['var(--text3)', status];
         return '<span style="display:inline-block;padding:2px 8px;border-radius:10px;' +
-          'background:rgba(255,255,255,0.08);color:'+v[0]+';font-size:10px;font-weight:600">' +
+          'background:var(--overlay-8);color:'+v[0]+';font-size:10px;font-weight:600">' +
           esc(v[1])+'</span>';
       };
       var v2Rows = v2Tasks.map(function(t) {
@@ -14728,9 +16038,9 @@ async function loadTaskCenter() {
         var actionBtn = btns.join('');
         return '<div onclick="v2OpenTaskDetail(\''+esc(t.id)+'\')" ' +
           'style="background:var(--surface);border-radius:8px;padding:10px 12px;' +
-          'border:1px solid rgba(255,255,255,0.05);margin-bottom:6px;cursor:pointer" ' +
+          'border:1px solid var(--overlay-5);margin-bottom:6px;cursor:pointer" ' +
           'onmouseover="this.style.borderColor=\'var(--primary)\'" ' +
-          'onmouseout="this.style.borderColor=\'rgba(255,255,255,0.05)\'">' +
+          'onmouseout="this.style.borderColor=\'var(--overlay-5)\'">' +
           '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px">' +
             '<div style="flex:1;min-width:0">' +
               '<span style="font-weight:600;font-size:13px">🚀 '+esc(t.intent||'(no intent)')+'</span>' +
@@ -14778,13 +16088,13 @@ function showCreateStandaloneTaskModal() {
     return '<option value="'+a.id+'">'+esc((a.role||'')+'-'+a.name)+'</option>';
   }).join('');
   var html = '<div style="padding:24px;max-width:480px"><h3 style="margin:0 0 16px">新建独立任务</h3>' +
-    '<input id="st-title" placeholder="任务标题" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--text);font-size:13px">' +
-    '<textarea id="st-desc" placeholder="描述 (可选)" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--text);font-size:13px;min-height:60px;resize:vertical"></textarea>' +
-    '<select id="st-assignee" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--text);font-size:13px">'+agentOpts+'</select>' +
-    '<select id="st-priority" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--text);font-size:13px">' +
+    '<input id="st-title" placeholder="任务标题" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px">' +
+    '<textarea id="st-desc" placeholder="描述 (可选)" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px;min-height:60px;resize:vertical"></textarea>' +
+    '<select id="st-assignee" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px">'+agentOpts+'</select>' +
+    '<select id="st-priority" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px">' +
       '<option value="normal">Normal</option><option value="low">Low</option><option value="high">High</option><option value="urgent">Urgent</option>' +
     '</select>' +
-    '<input id="st-due" placeholder="截止提示 (e.g. \"明天下班前\")" style="width:100%;padding:10px;margin-bottom:14px;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--text);font-size:13px">' +
+    '<input id="st-due" placeholder="截止提示 (e.g. \"明天下班前\")" style="width:100%;padding:10px;margin-bottom:14px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px">' +
     '<div style="display:flex;gap:8px;justify-content:flex-end">' +
       '<button class="btn btn-ghost" onclick="closeModal()">取消</button>' +
       '<button class="btn btn-primary" onclick="createStandaloneTask()">创建</button>' +
@@ -15002,10 +16312,10 @@ var _kmTab = 'shared';
 function renderKnowledgeMemoryHub() {
   var c = document.getElementById('content');
   var tabs = [
-    { id: 'shared',  label: '共享知识库',       icon: 'public' },
-    { id: 'private', label: '专业领域知识库',   icon: 'school' },
-    { id: 'rag',     label: 'RAG 提供方',       icon: 'cloud' },
-    { id: 'memory',  label: 'Agent 私有记忆',   icon: 'psychology' },
+    { id: 'shared',  label: window.t('tab.km.shared',  '共享知识库'),     icon: 'public' },
+    { id: 'private', label: window.t('tab.km.private', '专业领域知识库'), icon: 'school' },
+    { id: 'rag',     label: window.t('tab.km.rag',     'RAG 提供方'),     icon: 'cloud' },
+    { id: 'memory',  label: window.t('tab.km.memory',  'Agent 私有记忆'), icon: 'psychology' },
   ];
   var tabsHtml = tabs.map(function(t) {
     var active = _kmTab === t.id;
@@ -15033,7 +16343,7 @@ async function _renderKmShared() {
     else entries = [];
 
     var cardsHtml = entries.map(function(e) {
-      var tags = (e.tags||[]).map(function(t){return '<span style="padding:1px 6px;border-radius:4px;font-size:10px;background:rgba(203,201,255,0.1);color:var(--primary)">'+esc(t)+'</span>';}).join(' ');
+      var tags = (e.tags||[]).map(function(t){return '<span style="padding:1px 6px;border-radius:4px;font-size:10px;background:var(--primary-tint-10);color:var(--primary)">'+esc(t)+'</span>';}).join(' ');
       var preview = (e.content||'').substring(0,120).replace(/\n/g,' ');
       return '<div style="background:var(--surface);border-radius:10px;padding:14px;border:1px solid var(--border-light)">'
         + '<div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:6px">'
@@ -15159,7 +16469,7 @@ function _kmShowImport(collection, providerId) {
     + '<div style="font-size:12px;color:var(--text3);margin-bottom:14px">上传文件或粘贴文本，系统自动解析并按段落分块导入向量库。目标: <b>'+esc(collection)+'</b></div>'
 
     // File upload area
-    + '<div id="km-imp-file-zone" style="border:2px dashed var(--border);border-radius:10px;padding:24px;text-align:center;cursor:pointer;margin-bottom:14px;transition:all 0.2s;background:var(--surface)" onclick="document.getElementById(\'km-imp-file-input\').click()" ondragover="event.preventDefault();this.style.borderColor=\'var(--primary)\';this.style.background=\'rgba(203,201,255,0.06)\'" ondragleave="this.style.borderColor=\'var(--border)\';this.style.background=\'var(--surface)\'" ondrop="event.preventDefault();this.style.borderColor=\'var(--border)\';this.style.background=\'var(--surface)\';_kmHandleFileDrop(event)">'
+    + '<div id="km-imp-file-zone" style="border:2px dashed var(--border);border-radius:10px;padding:24px;text-align:center;cursor:pointer;margin-bottom:14px;transition:all 0.2s;background:var(--surface)" onclick="document.getElementById(\'km-imp-file-input\').click()" ondragover="event.preventDefault();this.style.borderColor=\'var(--primary)\';this.style.background=\'var(--primary-tint-6)\'" ondragleave="this.style.borderColor=\'var(--border)\';this.style.background=\'var(--surface)\'" ondrop="event.preventDefault();this.style.borderColor=\'var(--border)\';this.style.background=\'var(--surface)\';_kmHandleFileDrop(event)">'
       + '<input type="file" id="km-imp-file-input" accept=".pdf,.docx,.doc,.html,.htm,.txt,.md,.csv,.tsv,.json,.log" style="display:none" onchange="_kmHandleFileSelect(this)">'
       + '<span class="material-symbols-outlined" style="font-size:36px;color:var(--text3);display:block;margin-bottom:8px">upload_file</span>'
       + '<div style="font-size:13px;color:var(--text2);font-weight:600">点击或拖拽文件到此处</div>'
@@ -15225,7 +16535,7 @@ async function _kmParseFile(file) {
   // Show loading state
   if (statusEl) {
     statusEl.style.display = 'block';
-    statusEl.style.background = 'rgba(203,201,255,0.08)';
+    statusEl.style.background = 'var(--primary-tint-8)';
     statusEl.style.color = 'var(--primary)';
     statusEl.textContent = '正在解析文件: ' + file.name + ' (' + _kmFmtSize(file.size) + ')...';
   }
@@ -15308,7 +16618,7 @@ async function _kmDoImport(collection, providerId) {
   var statusEl = document.getElementById('km-imp-status');
   var submitBtn = document.getElementById('km-imp-submit-btn');
   if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = '导入中...'; }
-  if (statusEl) { statusEl.style.display = 'block'; statusEl.style.background = 'rgba(203,201,255,0.08)'; statusEl.style.color = 'var(--primary)'; statusEl.textContent = '正在导入并分块...'; }
+  if (statusEl) { statusEl.style.display = 'block'; statusEl.style.background = 'var(--primary-tint-8)'; statusEl.style.color = 'var(--primary)'; statusEl.textContent = '正在导入并分块...'; }
   try {
     var res = await api('POST', '/api/portal/rag/import', {
       collection:collection, provider_id:providerId,
@@ -15466,13 +16776,20 @@ async function _kmDeleteDomainKb(kbId, name) {
 }
 
 function _kmShowDomainImport(kbId, kbName) {
-  // Reuse the file upload import modal but target domain KB API
+  // Reuse the file upload import modal but target domain KB API.
+  // Two tabs: "单文件/文本" (existing) and "文件夹批量" (new).
   var html = '<div class="modal-overlay" id="km-import-modal" onclick="if(event.target===this)this.remove()">'
-    + '<div class="modal" style="max-width:640px">'
+    + '<div class="modal" style="max-width:680px">'
     + '<h3>导入知识到: '+esc(kbName)+'</h3>'
+    // Tab header
+    + '<div style="display:flex;gap:4px;border-bottom:1px solid var(--border);margin-bottom:14px">'
+      + '<button class="km-imp-tab" id="km-imp-tab-file" data-tab="file" onclick="_kmSwitchImpTab(\'file\')" style="padding:8px 14px;background:none;border:none;border-bottom:2px solid var(--primary);font-size:13px;font-weight:600;color:var(--primary);cursor:pointer">📄 单文件 / 文本</button>'
+      + '<button class="km-imp-tab" id="km-imp-tab-folder" data-tab="folder" onclick="_kmSwitchImpTab(\'folder\')" style="padding:8px 14px;background:none;border:none;border-bottom:2px solid transparent;font-size:13px;color:var(--text3);cursor:pointer">📁 文件夹批量</button>'
+    + '</div>'
+    // ── TAB 1: File/Text (existing) ──
+    + '<div id="km-imp-pane-file">'
     + '<div style="font-size:12px;color:var(--text3);margin-bottom:14px">上传文件或粘贴文本，系统自动解析并分块导入。</div>'
-    // File upload area
-    + '<div id="km-imp-file-zone" style="border:2px dashed var(--border);border-radius:10px;padding:24px;text-align:center;cursor:pointer;margin-bottom:14px;transition:all 0.2s;background:var(--surface)" onclick="document.getElementById(\'km-imp-file-input\').click()" ondragover="event.preventDefault();this.style.borderColor=\'var(--primary)\';this.style.background=\'rgba(203,201,255,0.06)\'" ondragleave="this.style.borderColor=\'var(--border)\';this.style.background=\'var(--surface)\'" ondrop="event.preventDefault();this.style.borderColor=\'var(--border)\';this.style.background=\'var(--surface)\';_kmHandleFileDrop(event)">'
+    + '<div id="km-imp-file-zone" style="border:2px dashed var(--border);border-radius:10px;padding:24px;text-align:center;cursor:pointer;margin-bottom:14px;transition:all 0.2s;background:var(--surface)" onclick="document.getElementById(\'km-imp-file-input\').click()" ondragover="event.preventDefault();this.style.borderColor=\'var(--primary)\';this.style.background=\'var(--primary-tint-6)\'" ondragleave="this.style.borderColor=\'var(--border)\';this.style.background=\'var(--surface)\'" ondrop="event.preventDefault();this.style.borderColor=\'var(--border)\';this.style.background=\'var(--surface)\';_kmHandleFileDrop(event)">'
       + '<input type="file" id="km-imp-file-input" accept=".pdf,.docx,.doc,.html,.htm,.txt,.md,.csv,.tsv,.json,.log" style="display:none" onchange="_kmHandleFileSelect(this)">'
       + '<span class="material-symbols-outlined" style="font-size:36px;color:var(--text3);display:block;margin-bottom:8px">upload_file</span>'
       + '<div style="font-size:13px;color:var(--text2);font-weight:600">点击或拖拽文件到此处</div>'
@@ -15494,20 +16811,269 @@ function _kmShowDomainImport(kbId, kbName) {
       + '<div class="form-group"><label>标签</label><input id="km-imp-tags" placeholder="法律,劳动法"></div>'
       + '<div class="form-group"><label>分块大小</label><input id="km-imp-chunk" type="number" value="1000" min="200" max="5000"></div>'
     + '</div>'
+    + '</div>' // end pane-file
+    // ── TAB 2: Folder (browser-side picker) ──
+    + '<div id="km-imp-pane-folder" style="display:none">'
+    + '<div style="font-size:12px;color:var(--text3);margin-bottom:14px">浏览本地文件夹 → 自动枚举所有支持的文件 → 分批上传并入库。文件夹不必在服务器上。</div>'
+    + '<div id="km-imp-folder-zone" style="border:2px dashed var(--border);border-radius:10px;padding:24px;text-align:center;cursor:pointer;margin-bottom:14px;background:var(--surface)" onclick="document.getElementById(\'km-imp-folder-input\').click()">'
+      // webkitdirectory makes the file input a folder picker in Chromium/Edge/Safari.
+      + '<input type="file" id="km-imp-folder-input" webkitdirectory directory multiple style="display:none" onchange="_kmOnFolderPicked(this)">'
+      + '<span class="material-symbols-outlined" style="font-size:36px;color:var(--text3);display:block;margin-bottom:8px">folder_open</span>'
+      + '<div style="font-size:13px;color:var(--text2);font-weight:600">点击选择文件夹</div>'
+      + '<div style="font-size:11px;color:var(--text3);margin-top:4px">浏览器会读取整个文件夹（含子目录）的全部文件</div>'
+    + '</div>'
+    + '<div id="km-imp-folder-summary" style="display:none;padding:10px 14px;background:rgba(63,185,80,0.08);border:1px solid rgba(63,185,80,0.2);border-radius:8px;margin-bottom:14px;font-size:12px">'
+      + '<div style="display:flex;align-items:center;gap:8px"><span class="material-symbols-outlined" style="font-size:18px;color:#3fb950">folder</span>'
+        + '<span id="km-imp-folder-name" style="font-weight:600;color:var(--text)"></span>'
+        + '<span id="km-imp-folder-count" style="color:var(--text3)"></span>'
+        + '<span id="km-imp-folder-size" style="color:var(--text3);font-size:11px"></span>'
+        + '<button onclick="_kmClearFolder()" style="margin-left:auto;background:none;border:none;cursor:pointer;color:var(--text3);font-size:11px">✕</button>'
+      + '</div>'
+      + '<div id="km-imp-folder-preview" style="margin-top:6px;font-size:11px;color:var(--text3);max-height:90px;overflow-y:auto;line-height:1.6"></div>'
+    + '</div>'
+    + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">'
+      + '<div class="form-group"><label>扩展名白名单 (逗号分隔；留空=全部支持的)</label>'
+        + '<input id="km-imp-folder-exts" placeholder="pdf,docx,md,txt,html" style="font-family:monospace;font-size:12px"></div>'
+      + '<div class="form-group"><label>单文件大小上限 (MB)</label><input id="km-imp-folder-maxsize" type="number" value="20" min="1" max="500"></div>'
+    + '</div>'
+    + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">'
+      + '<div class="form-group"><label>标签</label><input id="km-imp-folder-tags" placeholder="法律,合规"></div>'
+      + '<div class="form-group"><label>分块大小</label><input id="km-imp-folder-chunk" type="number" value="1000" min="200" max="5000"></div>'
+    + '</div>'
+    + '<div id="km-imp-folder-progress" style="display:none;padding:8px 12px;background:var(--primary-tint-8);border-radius:6px;font-size:12px;margin-bottom:10px">'
+      + '<div id="km-imp-folder-progress-msg">Uploading…</div>'
+      + '<div style="background:var(--surface);height:6px;border-radius:3px;overflow:hidden;margin-top:4px"><div id="km-imp-folder-progress-bar" style="height:100%;background:var(--primary);width:0%;transition:width 0.2s"></div></div>'
+    + '</div>'
+    + '</div>' // end pane-folder
     + '<div id="km-imp-status" style="display:none;padding:8px 12px;margin-bottom:10px;border-radius:6px;font-size:12px"></div>'
-    + '<div class="form-actions"><button class="btn btn-ghost" onclick="document.getElementById(\'km-import-modal\').remove()">取消</button>'
-    + '<button class="btn btn-primary" id="km-imp-submit-btn" onclick="_kmDoDomainImport(\''+esc(kbId)+'\')">导入</button></div>'
+    + '<div class="form-actions">'
+      + '<button class="btn btn-ghost" onclick="document.getElementById(\'km-import-modal\').remove()">取消</button>'
+      + '<button class="btn btn-primary" id="km-imp-submit-btn" onclick="_kmDoDomainImport(\''+esc(kbId)+'\')">导入</button>'
+    + '</div>'
     + '</div></div>';
   document.body.insertAdjacentHTML('beforeend', html);
+  // Bookkeep which tab is active.
+  window._kmImpActiveTab = 'file';
+}
+
+// ── Folder picker state + handlers (browser-side enumeration) ──
+
+// Default extensions we try to parse. Must match backend _KNOWN_KB_EXTENSIONS.
+var _KM_FOLDER_DEFAULT_EXTS = [
+  'txt','md','markdown','rst','log',
+  'csv','tsv','json','yaml','yml',
+  'html','htm','pdf','docx',
+  'py','js','ts','go','rs','java','c','cpp','h',
+];
+
+// Global buffer of picked files (FileList → Array<File>).
+window._kmFolderFiles = null;
+window._kmFolderRoot = '';
+
+function _kmOnFolderPicked(input) {
+  var files = Array.from(input.files || []);
+  if (!files.length) { _kmClearFolder(); return; }
+  // Derive folder name from the first file's webkitRelativePath.
+  var firstRel = (files[0].webkitRelativePath || files[0].name || '').split('/');
+  var folderName = firstRel[0] || '(folder)';
+  // Pre-filter by default extensions for the preview count. Backend will
+  // re-filter based on the UI extensions input.
+  var sizeTotal = 0;
+  files.forEach(function(f){ sizeTotal += f.size; });
+  window._kmFolderFiles = files;
+  window._kmFolderRoot = folderName;
+  document.getElementById('km-imp-folder-name').textContent = folderName;
+  document.getElementById('km-imp-folder-count').textContent = files.length + ' 个文件';
+  document.getElementById('km-imp-folder-size').textContent = '· ' + _kmFmtBytes(sizeTotal);
+  var preview = files.slice(0, 12).map(function(f){
+    return '  ' + (f.webkitRelativePath || f.name) + '  <span style="color:var(--text3);font-size:10px">(' + _kmFmtBytes(f.size) + ')</span>';
+  }).join('<br>');
+  if (files.length > 12) preview += '<br>  <em>… +' + (files.length - 12) + ' 个</em>';
+  document.getElementById('km-imp-folder-preview').innerHTML = preview;
+  document.getElementById('km-imp-folder-summary').style.display = '';
+}
+
+function _kmClearFolder() {
+  window._kmFolderFiles = null;
+  window._kmFolderRoot = '';
+  var inp = document.getElementById('km-imp-folder-input');
+  if (inp) inp.value = '';
+  var s = document.getElementById('km-imp-folder-summary');
+  if (s) s.style.display = 'none';
+}
+
+function _kmFmtBytes(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function _kmReadFileAsBase64(file) {
+  return new Promise(function(resolve, reject) {
+    var r = new FileReader();
+    r.onload = function() {
+      // readAsDataURL → "data:...;base64,XXXX"
+      var dataUrl = r.result || '';
+      var comma = dataUrl.indexOf(',');
+      resolve(comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl);
+    };
+    r.onerror = function() { reject(r.error || new Error('read failed')); };
+    r.readAsDataURL(file);
+  });
+}
+
+function _kmSwitchImpTab(tab) {
+  window._kmImpActiveTab = tab;
+  var tabFile = document.getElementById('km-imp-tab-file');
+  var tabFolder = document.getElementById('km-imp-tab-folder');
+  var paneFile = document.getElementById('km-imp-pane-file');
+  var paneFolder = document.getElementById('km-imp-pane-folder');
+  var submit = document.getElementById('km-imp-submit-btn');
+  if (!paneFile || !paneFolder) return;
+  if (tab === 'folder') {
+    paneFile.style.display = 'none';
+    paneFolder.style.display = '';
+    if (tabFolder) { tabFolder.style.color = 'var(--primary)';
+                     tabFolder.style.borderBottomColor = 'var(--primary)';
+                     tabFolder.style.fontWeight = '600'; }
+    if (tabFile) { tabFile.style.color = 'var(--text3)';
+                   tabFile.style.borderBottomColor = 'transparent';
+                   tabFile.style.fontWeight = 'normal'; }
+    if (submit) submit.textContent = '导入文件夹';
+  } else {
+    paneFile.style.display = '';
+    paneFolder.style.display = 'none';
+    if (tabFile) { tabFile.style.color = 'var(--primary)';
+                   tabFile.style.borderBottomColor = 'var(--primary)';
+                   tabFile.style.fontWeight = '600'; }
+    if (tabFolder) { tabFolder.style.color = 'var(--text3)';
+                     tabFolder.style.borderBottomColor = 'transparent';
+                     tabFolder.style.fontWeight = 'normal'; }
+    if (submit) submit.textContent = '导入';
+  }
 }
 
 async function _kmDoDomainImport(kbId) {
+  var submitBtn = document.getElementById('km-imp-submit-btn');
+  var tab = window._kmImpActiveTab || 'file';
+
+  if (tab === 'folder') {
+    // ── Browser-side folder import path ──
+    var files = window._kmFolderFiles || [];
+    if (!files.length) { alert('请先点击"点击选择文件夹"选定本地文件夹'); return; }
+
+    var extsRaw = ((document.getElementById('km-imp-folder-exts')||{}).value||'').trim();
+    var extsFilter = extsRaw
+      ? extsRaw.split(',').map(function(s){ return s.trim().replace(/^\./,'').toLowerCase(); }).filter(Boolean)
+      : _KM_FOLDER_DEFAULT_EXTS;
+    var extsSet = new Set(extsFilter);
+    var tags = ((document.getElementById('km-imp-folder-tags')||{}).value||'')
+      .split(',').map(function(t){ return t.trim(); }).filter(Boolean);
+    var chunk = parseInt((document.getElementById('km-imp-folder-chunk')||{}).value) || 1000;
+    var maxSizeMb = parseFloat((document.getElementById('km-imp-folder-maxsize')||{}).value) || 20;
+    var maxBytes = maxSizeMb * 1024 * 1024;
+
+    // Pre-filter client-side so we don't waste bandwidth on rejects.
+    var accepted = [];
+    var skippedClient = [];
+    files.forEach(function(f) {
+      var name = f.webkitRelativePath || f.name || '';
+      var dot = name.lastIndexOf('.');
+      var ext = dot >= 0 ? name.slice(dot + 1).toLowerCase() : '';
+      if (!extsSet.has(ext)) {
+        skippedClient.push({ name: name, reason: 'extension_' + ext + '_not_allowed' });
+        return;
+      }
+      if (f.size > maxBytes) {
+        skippedClient.push({ name: name, reason: 'too_large' });
+        return;
+      }
+      if (f.size === 0) {
+        skippedClient.push({ name: name, reason: 'empty' });
+        return;
+      }
+      accepted.push(f);
+    });
+
+    if (!accepted.length) {
+      alert('没有可导入的文件 — 全部被扩展名/大小过滤掉了。\n跳过: ' + skippedClient.length + ' 个');
+      return;
+    }
+
+    // Progress UI.
+    var progEl = document.getElementById('km-imp-folder-progress');
+    var progMsg = document.getElementById('km-imp-folder-progress-msg');
+    var progBar = document.getElementById('km-imp-folder-progress-bar');
+    if (progEl) progEl.style.display = '';
+    if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = '上传中...'; }
+
+    var BATCH = 10;    // files per HTTP request — balances latency vs body size
+    var totalImported = 0, totalChunks = 0, totalScanned = 0, totalDeduped = 0;
+    var totalSkipped = skippedClient.slice();
+    var allByFile = [];
+
+    try {
+      for (var i = 0; i < accepted.length; i += BATCH) {
+        var slice = accepted.slice(i, i + BATCH);
+        // Read batch as base64 in parallel.
+        var payload = await Promise.all(slice.map(async function(f) {
+          var b64 = await _kmReadFileAsBase64(f);
+          return {
+            name: f.webkitRelativePath || f.name,
+            data_base64: b64,
+          };
+        }));
+        if (progMsg) progMsg.textContent =
+          '上传 batch ' + (Math.floor(i / BATCH) + 1) +
+          '/' + Math.ceil(accepted.length / BATCH) +
+          ' (' + Math.min(i + BATCH, accepted.length) + '/' + accepted.length + ' files)';
+        if (progBar) progBar.style.width = Math.round((i / accepted.length) * 100) + '%';
+        var res = await api('POST', '/api/portal/domain-kb/import-files', {
+          kb_id: kbId,
+          files: payload,
+          tags: tags,
+          chunk_size: chunk,
+          max_file_size_mb: maxSizeMb,
+        });
+        if (res) {
+          totalScanned += (res.files_scanned || 0);
+          totalImported += (res.files_imported || 0);
+          totalChunks += (res.chunks_total || 0);
+          totalDeduped += (res.chunks_deduped || 0);
+          if (res.skipped) totalSkipped = totalSkipped.concat(res.skipped);
+          if (res.by_file) allByFile = allByFile.concat(res.by_file);
+        }
+      }
+      if (progBar) progBar.style.width = '100%';
+      var msg = '📁 文件夹导入完成\n'
+              + '  已选: ' + accepted.length + ' / 总计 ' + files.length + ' 个文件\n'
+              + '  已扫描: ' + totalScanned + '，导入: ' + totalImported + ' 个\n'
+              + '  分块: ' + totalChunks + (totalDeduped ? ' (去重 ' + totalDeduped + ' 个重复分块)' : '') + '\n'
+              + '  跳过: ' + totalSkipped.length + ' 个';
+      if (totalSkipped.length) {
+        msg += '\n\n跳过原因 (前 5 条):';
+        totalSkipped.slice(0, 5).forEach(function(s) {
+          var shortName = (s.name || s.path || '').split('/').pop();
+          msg += '\n  - ' + shortName + ': ' + s.reason;
+        });
+      }
+      alert(msg);
+      var m = document.getElementById('km-import-modal'); if (m) m.remove();
+      _renderKmPrivate();
+    } catch (e) {
+      alert('文件夹导入失败: ' + (e.message || e));
+      if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = '导入文件夹'; }
+      if (progEl) progEl.style.display = 'none';
+    }
+    return;
+  }
+
+  // ── Single file / text path (legacy) ──
   var title = (document.getElementById('km-imp-title')||{}).value||'Imported';
   var content = (document.getElementById('km-imp-content')||{}).value||'';
   var tags = ((document.getElementById('km-imp-tags')||{}).value||'').split(',').map(function(t){return t.trim()}).filter(Boolean);
   var chunk = parseInt((document.getElementById('km-imp-chunk')||{}).value)||1000;
   if (!content.trim()) { alert('内容不能为空'); return; }
-  var submitBtn = document.getElementById('km-imp-submit-btn');
   if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = '导入中...'; }
   try {
     var res = await api('POST', '/api/portal/domain-kb/import', {
@@ -15903,10 +17469,10 @@ async function compactAgentMemoryFromModal(aid) {
 function renderRolesSkillsHub() {
   var c = document.getElementById('content');
   var tabs = [
-    { id: 'templates', label: '角色 / 专业领域', icon: 'library_books' },
-    { id: 'skill-store', label: '技能商店 Store', icon: 'storefront' },
-    { id: 'pending-skills', label: '技能锻造 SkillForge', icon: 'auto_fix_high' },
-    { id: 'self-improvement', label: '学习闭环 / 经验沉淀', icon: 'psychology' },
+    { id: 'templates',        label: window.t('tab.rs.templates',       '角色 / 专业领域'),       icon: 'library_books' },
+    { id: 'skill-store',      label: window.t('tab.rs.skillStore',      '技能商店 Store'),        icon: 'storefront' },
+    { id: 'pending-skills',   label: window.t('tab.rs.skillForge',      '技能锻造 SkillForge'),   icon: 'auto_fix_high' },
+    { id: 'self-improvement', label: window.t('tab.rs.selfImprove',     '学习闭环 / 经验沉淀'),    icon: 'psychology' },
   ];
   // V2 mode: expose task templates + tier bindings under roles-skills
   // rather than creating whole new top-level nav items.
@@ -16049,6 +17615,7 @@ async function loadSkillStore() {
         + '</div>'
         + (e.languages && e.languages.length ? '<div style="font-size:10px;color:var(--text3);margin-top:3px">languages: '+esc(e.languages.join(', '))+'</div>' : '')
         + (tagList ? '<div style="margin-top:6px">'+tagList+'</div>' : '')
+        + _renderSkillApplicabilityBlock(e, '')  // no agent context on the standalone store page
         + '  </div>'
         + '  <div style="display:flex;gap:6px;flex-shrink:0">'+actions+'</div>'
         + '</div></div>';
@@ -16578,9 +18145,9 @@ function renderToolsApprovalsHub() {
   var c = document.getElementById('content');
   var actionsEl = document.getElementById('topbar-actions');
   var tabs = [
-    { id: 'approvals', label: '待审批 / 历史', icon: 'shield' },
-    { id: 'denylist',  label: '工具禁用清单', icon: 'block' },
-    { id: 'mcpconfig', label: 'MCP 服务器', icon: 'hub' },
+    { id: 'approvals', label: window.t('tab.tools.approvals', '待审批 / 历史'), icon: 'shield' },
+    { id: 'denylist',  label: window.t('tab.tools.denylist',  '工具禁用清单'),  icon: 'block' },
+    { id: 'mcpconfig', label: window.t('tab.tools.mcpServers', 'MCP 服务器'),    icon: 'hub' },
   ];
   var r = _renderHubTabs('tools', tabs);
   c.innerHTML = r.html;
@@ -16779,14 +18346,22 @@ function renderIntegrationsHub() {
 function renderSettingsHub() {
   var c = document.getElementById('content');
   var tabs = [
-    { id: 'config', label: '全局配置', icon: 'settings' },
-    { id: 'providers', label: 'LLM 提供商', icon: 'dns' },
-    { id: 'llm_tiers', label: 'LLM 档位', icon: 'tune' },
-    { id: 'nodeconfig', label: '节点配置', icon: 'tune' },
-    { id: 'nodes', label: '节点列表', icon: 'device_hub' },
-    { id: 'tokens', label: 'API Tokens', icon: 'key' },
-    { id: 'audit', label: '审计日志', icon: 'assignment' },
+    { id: 'config',      label: window.t('tab.settings.globalConfig', '全局配置'),    icon: 'settings' },
+    { id: 'providers',   label: window.t('tab.settings.providers',    'LLM 提供商'),  icon: 'dns' },
+    { id: 'llm_tiers',   label: window.t('tab.settings.llmTiers',     'LLM 档位'),    icon: 'tune' },
+    { id: 'nodeconfig',  label: window.t('tab.settings.nodeConfig',   '节点配置'),    icon: 'tune' },
+    { id: 'nodes',       label: window.t('tab.settings.nodes',        '节点列表'),    icon: 'device_hub' },
+    { id: 'tokens',      label: window.t('tab.settings.apiTokens',    'API Tokens'),   icon: 'key' },
+    { id: 'audit',       label: window.t('tab.settings.auditLog',     '审计日志'),    icon: 'assignment' },
+    // SuperAdmin-only tab — filtered out below when the caller isn't super.
+    { id: 'permissions', label: window.t('tab.settings.permissions',  '用户管理'),    icon: 'shield_person' },
   ];
+  // Hide the Permissions tab for non-super admins. Backend also gates
+  // every endpoint with require(MANAGE_ADMINS), so removing the tab
+  // is belt + suspenders (UX parity with what works, not security).
+  if (!_isSuperAdmin()) {
+    tabs = tabs.filter(function(t) { return t.id !== 'permissions'; });
+  }
   var r = _renderHubTabs('settings', tabs);
   c.innerHTML = r.html;
   var actionsEl = document.getElementById('topbar-actions');
@@ -16802,12 +18377,325 @@ function renderSettingsHub() {
     else if (r.current === 'roles_v2') renderRolePresetsV2();
     else if (r.current === 'nodeconfig') renderNodeConfig();
     else if (r.current === 'nodes') {
-      actionsEl.innerHTML = '<button class="btn btn-primary btn-sm" onclick="showModal(\'add-node\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> Connect Node</button>';
+      // Topbar-actions "+ Connect Node" button removed per design pass.
+      actionsEl.innerHTML = '';
       renderNodes();
     } else if (r.current === 'tokens') renderTokens();
     else if (r.current === 'audit') renderAudit();
+    else if (r.current === 'permissions') renderPermissionsPanel();
   } catch(e) { sc.innerHTML = '<div style="color:var(--error);padding:20px">'+e.message+'</div>'; }
   finally { sc.id = 'hub-settings-content'; _orig.id = 'content'; }
+}
+
+// ============ Role helper ============
+// window._currentRole is set at boot by the /admin/me request.
+// Helpers below check it for UI gating. The BACKEND still re-validates
+// every call via app.permissions.require() — hiding a button isn't
+// security, it's cleanup.
+function _currentUserRole() {
+  return (window._currentRole || '').trim();
+}
+function _isSuperAdmin() { return _currentUserRole() === 'superAdmin'; }
+function _isAdmin()      { return _currentUserRole() === 'admin'; }
+function _isUser()       { return _currentUserRole() === 'user'; }
+
+// ============ Permissions Panel (superAdmin only) ============
+async function renderPermissionsPanel() {
+  var c = document.getElementById('content');
+  c.innerHTML = '<div style="padding:4px 0;color:var(--text3)">'
+    + window.t('common.loading', '加载中…') + '</div>';
+  if (!_isSuperAdmin()) {
+    c.innerHTML = '<div style="padding:40px;color:var(--error);text-align:center">'
+      + '<span class="material-symbols-outlined" style="font-size:48px;display:block;margin-bottom:12px">shield_lock</span>'
+      + window.t('perm.onlySuper', '此页面仅 superAdmin 可访问') + '</div>';
+    return;
+  }
+  try {
+    var r = await api('POST', '/api/portal/admins/list', {});
+    var admins = (r && r.admins) || [];
+    var agentsResp = await api('GET', '/api/portal/agents?include_subagents=true');
+    var allAgents = (agentsResp && agentsResp.agents) || [];
+    var nodesResp = await api('GET', '/api/portal/nodes').catch(function(){return null;});
+    var allNodes = (nodesResp && nodesResp.nodes) || [];
+
+    c.innerHTML = ''
+      + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:20px">'
+      +   '<div>'
+      +     '<h3 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:20px;font-weight:700;margin:0 0 4px">'
+      +       window.t('perm.title', '用户管理') + '</h3>'
+      +     '<p style="font-size:12px;color:var(--text3);margin:0">'
+      +       window.t('perm.subtitle',
+          'superAdmin 管全部；admin 只能管理被授权节点上的 agent 与该节点的配置；user 只能使用 agent。')
+      +     '</p>'
+      +   '</div>'
+      +   '<button class="btn btn-primary btn-sm" onclick="_permShowCreateUserModal()">'
+      +     '<span class="material-symbols-outlined" style="font-size:16px">person_add</span> '
+      +     window.t('perm.newUser', '新建用户') + '</button>'
+      + '</div>'
+      + '<div style="display:grid;grid-template-columns:320px 1fr;gap:20px">'
+      +   '<div id="perm-user-list" style="background:var(--surface);border:1px solid var(--border-light);border-radius:12px;padding:8px"></div>'
+      +   '<div id="perm-detail" style="background:var(--surface);border:1px solid var(--border-light);border-radius:12px;padding:20px">'
+      +     '<div style="color:var(--text3)">'
+      +       window.t('perm.pickUser', '← 选择左侧的账号以编辑权限')
+      +     '</div>'
+      +   '</div>'
+      + '</div>';
+
+    _permRenderList(admins, allAgents, allNodes);
+  } catch (e) {
+    c.innerHTML = '<div style="color:var(--error);padding:20px">'+esc(String(e))+'</div>';
+  }
+}
+
+function _permRenderList(admins, allAgents, allNodes) {
+  var list = document.getElementById('perm-user-list');
+  if (!list) return;
+  if (!admins.length) {
+    list.innerHTML = '<div style="padding:16px;color:var(--text3);text-align:center">'
+      + window.t('common.noData', '暂无数据') + '</div>';
+    return;
+  }
+  var roleChip = function(role) {
+    var bg, fg, label;
+    if (role === 'superAdmin') {
+      bg = 'var(--primary-tint-15)'; fg = 'var(--primary)';
+      label = 'superAdmin';
+    } else if (role === 'admin') {
+      bg = 'color-mix(in srgb, var(--secondary) 20%, transparent)';
+      fg = 'var(--secondary)';
+      label = 'admin';
+    } else {
+      bg = 'var(--overlay-8)'; fg = 'var(--text2)';
+      label = 'user';
+    }
+    return '<span style="font-size:10px;padding:2px 6px;border-radius:4px;background:'
+      + bg + ';color:' + fg + ';font-weight:600">' + label + '</span>';
+  };
+  list.innerHTML = admins.map(function(a) {
+    return '<div onclick="_permSelectUser(\'' + esc(a.user_id) + '\')" '
+      + 'style="padding:10px 12px;border-radius:8px;cursor:pointer;display:flex;'
+      + 'align-items:center;gap:8px;margin-bottom:4px" '
+      + 'onmouseenter="this.style.background=\'var(--surface2)\'" '
+      + 'onmouseleave="this.style.background=\'none\'">'
+      + '<span class="material-symbols-outlined" style="font-size:20px;color:var(--text3)">account_circle</span>'
+      + '<div style="flex:1;min-width:0">'
+      +   '<div style="font-size:13px;font-weight:600">' + esc(a.display_name || a.username) + '</div>'
+      +   '<div style="font-size:10px;color:var(--text3);margin-top:1px">' + esc(a.username) + '</div>'
+      + '</div>'
+      + roleChip(a.role)
+      + '</div>';
+  }).join('');
+  // Stash for the selector
+  window._permAdmins = admins;
+  window._permAgents = allAgents;
+  window._permNodes = allNodes;
+}
+
+function _permSelectUser(uid) {
+  var detail = document.getElementById('perm-detail');
+  if (!detail) return;
+  var a = (window._permAdmins || []).find(function(x) { return x.user_id === uid; });
+  if (!a) return;
+  var nodes = window._permNodes || [];
+  var delegatedNodes = new Set(a.node_ids || []);
+  var isSuper = a.role === 'superAdmin';
+  var isUser  = a.role === 'user';
+  var isAdmin = a.role === 'admin';
+
+  // Header (common to all three roles)
+  var header = ''
+    + '<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">'
+    +   '<span class="material-symbols-outlined" style="font-size:24px;color:var(--primary)">manage_accounts</span>'
+    +   '<div style="flex:1">'
+    +     '<div style="font-size:16px;font-weight:700">' + esc(a.display_name || a.username) + '</div>'
+    +     '<div style="font-size:11px;color:var(--text3)">@' + esc(a.username) + ' · ' + esc(a.role)
+    +       (a.active ? '' : ' · <span style="color:var(--error)">disabled</span>') + '</div>'
+    +   '</div>'
+    + '</div>';
+
+  // Role-specific body
+  var body = '';
+  if (isSuper) {
+    body = '<div style="padding:10px 12px;background:var(--primary-tint-8);border-radius:8px;font-size:12px;color:var(--primary);margin-bottom:16px">'
+      + '<b>superAdmin</b> ' + window.t('perm.superNote', '拥有全部权限，无需授权。')
+      + '</div>';
+  } else if (isUser) {
+    body = '<div style="padding:10px 12px;background:var(--overlay-8);border-radius:8px;font-size:12px;color:var(--text2);margin-bottom:16px">'
+      + window.t('perm.userNote', 'user 只能使用 agent，不能管理。无需授权节点。')
+      + '</div>';
+  } else if (isAdmin) {
+    // Admin: node delegation only (admin's agent access derives from node ownership)
+    var nodeRows = nodes.length === 0
+      ? '<div style="padding:8px;color:var(--text3);font-size:12px">' + window.t('common.noData', '暂无数据') + '</div>'
+      : nodes.map(function(n) {
+          var nid = n.node_id || n.id;
+          var checked = delegatedNodes.has(nid) ? 'checked' : '';
+          return '<label style="display:flex;align-items:center;gap:8px;padding:4px 6px;cursor:pointer;font-size:12px">'
+            + '<input type="checkbox" class="perm-node-cb" value="' + esc(nid) + '" ' + checked + '>'
+            + '<span style="flex:1">' + esc(n.name || nid) + '</span>'
+            + '<span style="font-size:10px;color:var(--text3)">' + esc(n.url || '') + '</span>'
+            + '</label>';
+        }).join('');
+    body = ''
+      + '<div style="margin-bottom:20px">'
+      +   '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text3);margin-bottom:4px">'
+      +     window.t('perm.delegatedNodes', '可管理的 Node') + ' (' + delegatedNodes.size + '/' + nodes.length + ')'
+      +   '</div>'
+      +   '<div style="font-size:11px;color:var(--text3);margin-bottom:8px">'
+      +     window.t('perm.nodeScopeHint', 'admin 对被授权节点上的 agent 和该节点的配置拥有完整管理权限。')
+      +   '</div>'
+      +   '<div style="max-height:320px;overflow-y:auto;border:1px solid var(--border-light);border-radius:8px;padding:4px">'
+      +     nodeRows
+      +   '</div>'
+      + '</div>';
+  }
+
+  // Actions row (common: reset pw + disable/enable + delete; save only for admin)
+  var actions = '<div style="display:flex;gap:8px">'
+    + (isAdmin
+        ? '<button class="btn btn-primary btn-sm" onclick="_permSaveDelegation(\'' + esc(uid) + '\')">'
+          + '<span class="material-symbols-outlined" style="font-size:16px">save</span> '
+          + window.t('action.save', '保存') + '</button>'
+        : '')
+    + '<button class="btn btn-ghost btn-sm" onclick="_permResetPassword(\'' + esc(uid) + '\')">'
+    +   '<span class="material-symbols-outlined" style="font-size:16px">lock_reset</span> '
+    +   window.t('perm.resetPassword', '重置密码') + '</button>'
+    + (isSuper ? '' :
+        '<button class="btn btn-ghost btn-sm" style="color:var(--error);margin-left:auto" onclick="_permToggleActive(\'' + esc(uid) + '\',' + (!a.active) + ')">'
+        + '<span class="material-symbols-outlined" style="font-size:16px">' + (a.active ? 'block' : 'check_circle') + '</span> '
+        + (a.active ? window.t('perm.disable', '禁用账号') : window.t('perm.enable', '启用账号')) + '</button>')
+    + (isSuper ? '' :
+        '<button class="btn btn-ghost btn-sm" style="color:var(--error)" onclick="_permDeleteUser(\'' + esc(uid) + '\',\'' + esc(a.username) + '\')">'
+        + '<span class="material-symbols-outlined" style="font-size:16px">delete</span> '
+        + window.t('action.delete', '删除') + '</button>')
+    + '</div>';
+
+  detail.innerHTML = header + body + actions;
+}
+
+async function _permSaveDelegation(uid) {
+  try {
+    // Node-scoped admin model: admin's agent management derives from
+    // node ownership. We only save node_ids here; agent_ids is legacy
+    // and intentionally ignored.
+    var nodeIds = Array.from(document.querySelectorAll('.perm-node-cb:checked')).map(function(x){return x.value;});
+    await api('POST', '/api/portal/admins/bind-nodes', {user_id: uid, node_ids: nodeIds});
+    showToast(window.t('perm.saved', '权限已更新'), 'success');
+    // Refresh the whole panel so lists reflect the saved state.
+    renderPermissionsPanel();
+  } catch (e) {
+    alert(window.t('perm.saveFailed', '保存失败') + ': ' + (e && e.message || e));
+  }
+}
+
+// Create-user modal: opened from the "+ 新建用户" button at the top of
+// the Permissions panel. Supports all three roles (superAdmin / admin /
+// user). Admin-role accounts get delegated nodes afterwards via the
+// detail panel (not in this modal — keeps creation simple).
+function _permShowCreateUserModal() {
+  var html =
+    '<div style="max-width:440px">' +
+      '<h3 style="margin:0 0 16px">' + window.t('perm.newUser', '新建用户') + '</h3>' +
+      '<div class="form-group">' +
+        '<label>' + window.t('login.username', '用户名') + '</label>' +
+        '<input id="perm-new-username" placeholder="' + window.t('login.usernamePh', '输入管理员用户名') + '" />' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label>' + window.t('agent.name', 'Name') + '</label>' +
+        '<input id="perm-new-display" placeholder="" />' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label>' + window.t('login.password', '密码') + '</label>' +
+        '<input id="perm-new-password" type="password" placeholder="min 6 chars" />' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label>' + window.t('perm.role', '角色') + '</label>' +
+        '<select id="perm-new-role" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">' +
+          '<option value="user">user ' + window.t('perm.roleUserHint', '（只能使用 agent）') + '</option>' +
+          '<option value="admin">admin ' + window.t('perm.roleAdminHint', '（管理被授权节点上的 agent 与配置）') + '</option>' +
+          '<option value="superAdmin">superAdmin ' + window.t('perm.roleSuperHint', '（管理一切）') + '</option>' +
+        '</select>' +
+      '</div>' +
+      '<div class="form-actions" style="margin-top:16px">' +
+        '<button class="btn btn-ghost" onclick="closeModal()">' + window.t('action.cancel', '取消') + '</button>' +
+        '<button class="btn btn-primary" onclick="_permCreateUser()">' + window.t('action.create', '新建') + '</button>' +
+      '</div>' +
+    '</div>';
+  showCustomModal(html);
+}
+
+async function _permCreateUser() {
+  var username = (document.getElementById('perm-new-username') || {}).value || '';
+  var password = (document.getElementById('perm-new-password') || {}).value || '';
+  var display = (document.getElementById('perm-new-display') || {}).value || '';
+  var role = (document.getElementById('perm-new-role') || {}).value || 'user';
+  username = String(username).trim();
+  password = String(password).trim();
+  display = String(display).trim();
+  if (!username || !password) {
+    alert(window.t('perm.usernamePasswordRequired', '用户名和密码不能为空'));
+    return;
+  }
+  if (password.length < 6) {
+    alert(window.t('perm.passwordTooShort', '密码至少 6 位'));
+    return;
+  }
+  try {
+    var r = await api('POST', '/api/portal/admins/create', {
+      username: username, password: password,
+      display_name: display || username, role: role,
+    });
+    if (r && r.ok) {
+      closeModal();
+      showToast(window.t('perm.userCreated', '用户已创建'), 'success');
+      renderPermissionsPanel();
+    } else {
+      alert(window.t('perm.createFailed', '创建失败') + ': ' + ((r && r.error) || 'unknown'));
+    }
+  } catch (e) {
+    alert(window.t('perm.createFailed', '创建失败') + ': ' + (e && e.message || e));
+  }
+}
+
+async function _permDeleteUser(uid, username) {
+  var msg = window.t('perm.confirmDelete', '确认删除用户 "{name}"？此操作不可恢复。').replace('{name}', username || uid);
+  if (!confirm(msg)) return;
+  try {
+    var r = await api('POST', '/api/portal/admins/delete', {user_id: uid});
+    if (r && r.ok) {
+      showToast(window.t('perm.userDeleted', '用户已删除'), 'success');
+      renderPermissionsPanel();
+    } else {
+      alert(window.t('perm.deleteFailed', '删除失败') + ': ' + ((r && r.error) || 'unknown'));
+    }
+  } catch (e) {
+    alert(window.t('perm.deleteFailed', '删除失败') + ': ' + (e && e.message || e));
+  }
+}
+
+async function _permResetPassword(uid) {
+  var pw = prompt(window.t('perm.resetPasswordPrompt', '输入新密码（至少 6 位）：'));
+  if (!pw || pw.length < 6) return;
+  try {
+    await api('POST', '/api/portal/admins/update', {user_id: uid, password: pw});
+    showToast(window.t('perm.passwordReset', '密码已重置'), 'success');
+  } catch (e) {
+    alert(window.t('perm.saveFailed', '操作失败') + ': ' + (e && e.message || e));
+  }
+}
+
+async function _permToggleActive(uid, toActive) {
+  var confirmMsg = toActive
+    ? window.t('perm.confirmEnable', '启用该账号？')
+    : window.t('perm.confirmDisable', '禁用该账号？用户将无法登录。');
+  if (!confirm(confirmMsg)) return;
+  try {
+    await api('POST', '/api/portal/admins/update', {user_id: uid, active: !!toActive});
+    showToast(toActive ? window.t('perm.enabled', '已启用') : window.t('perm.disabled', '已禁用'), 'success');
+    renderPermissionsPanel();
+  } catch (e) {
+    alert(window.t('perm.saveFailed', '操作失败') + ': ' + (e && e.message || e));
+  }
 }
 
 // ============ Node Switcher (topbar global) ============
@@ -16833,16 +18721,16 @@ function _refreshNodeSwitcher() {
 function renderSettingsPage() {
   var c = document.getElementById('content');
   var tabs = [
-    { id: 'providers', label: 'LLM Providers', icon: 'dns' },
-    { id: 'llm_tiers', label: 'LLM 档位', icon: 'tune' },
-    { id: 'mcpconfig', label: 'MCP', icon: 'hub' },
-    { id: 'config', label: 'Global Config', icon: 'settings' },
-    { id: 'nodeconfig', label: 'Node Config', icon: 'tune' },
-    { id: 'nodes', label: 'Nodes', icon: 'device_hub' },
-    { id: 'channels', label: 'Channels', icon: 'cable' },
-    { id: 'templates', label: '专业领域', icon: 'library_books' },
-    { id: 'policy', label: '审批策略 Policy', icon: 'shield' },
-    { id: 'tokens', label: 'API Tokens', icon: 'key' },
+    { id: 'providers',  label: window.t('tab.settings.providers',    'LLM Providers'), icon: 'dns' },
+    { id: 'llm_tiers',  label: window.t('tab.settings.llmTiers',     'LLM 档位'),      icon: 'tune' },
+    { id: 'mcpconfig',  label: window.t('tab.settings.mcp',          'MCP'),           icon: 'hub' },
+    { id: 'config',     label: window.t('tab.settings.globalConfig', 'Global Config'), icon: 'settings' },
+    { id: 'nodeconfig', label: window.t('tab.settings.nodeConfig',   'Node Config'),   icon: 'tune' },
+    { id: 'nodes',      label: window.t('tab.settings.nodes',        'Nodes'),         icon: 'device_hub' },
+    { id: 'channels',   label: window.t('tab.settings.channels',     'Channels'),      icon: 'cable' },
+    { id: 'templates',  label: window.t('tab.settings.domains',      '专业领域'),      icon: 'library_books' },
+    { id: 'policy',     label: window.t('tab.settings.policy',       '审批策略'),      icon: 'shield' },
+    { id: 'tokens',     label: window.t('tab.settings.apiTokens',    'API Tokens'),    icon: 'key' },
   ];
 
   var tabsHtml = tabs.map(function(t) {
@@ -17058,7 +18946,7 @@ async function renderRolePresetsV2(container) {
         html += '<div style="padding:16px;background:var(--surface);border-radius:12px;border:1px solid var(--border-light)">' +
           '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">' +
             '<h4 style="font-size:15px;font-weight:700;margin:0">' + esc(p.display_name || p.role_id) + '</h4>' +
-            '<span style="font-size:10px;padding:2px 6px;border-radius:4px;background:rgba(203,201,255,0.12);color:var(--primary)">v' + (p.version || 2) + '</span>' +
+            '<span style="font-size:10px;padding:2px 6px;border-radius:4px;background:var(--primary-tint-12);color:var(--primary)">v' + (p.version || 2) + '</span>' +
           '</div>' +
           '<div style="color:var(--text3);font-size:11px;font-family:monospace;margin-bottom:10px">' + esc(p.role_id) + '</div>' +
           '<div style="font-size:12px;color:var(--text2);line-height:1.8">' +
@@ -17460,7 +19348,7 @@ async function renderPolicyConfig(container) {
     // ── Risk level legend ──
     html += '<div style="display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap">';
     (cfg.risk_levels||[]).forEach(function(rl) {
-      html += '<div style="display:flex;align-items:center;gap:6px;padding:8px 14px;background:var(--surface);border-radius:8px;border:1px solid rgba(255,255,255,0.05);font-size:12px">' +
+      html += '<div style="display:flex;align-items:center;gap:6px;padding:8px 14px;background:var(--surface);border-radius:8px;border:1px solid var(--overlay-5);font-size:12px">' +
         '<span style="width:10px;height:10px;border-radius:50%;background:'+riskColors[rl.id]+'"></span>' +
         '<span style="font-weight:700">'+rl.label+'</span>' +
         '<span style="color:var(--text3);font-size:11px">'+rl.desc+'</span>' +
@@ -17521,10 +19409,10 @@ async function renderPolicyConfig(container) {
       tools.forEach(function(tool) {
         var risk = toolRisks[tool];
         var desc = toolDescriptions[tool] || tool;
-        html += '<tr style="border-top:1px solid rgba(255,255,255,0.04)">' +
+        html += '<tr style="border-top:1px solid var(--overlay-4)">' +
           '<td style="padding:7px 14px 7px 28px;font-family:monospace;font-size:12px;color:var(--text)">' + esc(tool) + '</td>' +
           '<td style="padding:7px 14px">' +
-            '<select onchange="updateToolRisk(\'' + esc(tool) + '\',this.value)" style="background:var(--surface2);color:' + riskColors[risk] + ';border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:4px 8px;font-size:12px;cursor:pointer;font-weight:600">';
+            '<select onchange="updateToolRisk(\'' + esc(tool) + '\',this.value)" style="background:var(--surface2);color:' + riskColors[risk] + ';border:1px solid var(--overlay-10);border-radius:6px;padding:4px 8px;font-size:12px;cursor:pointer;font-weight:600">';
         riskOptions.forEach(function(ro) {
           html += '<option value="' + ro + '" ' + (risk===ro?'selected':'') + '>' + riskLabels[ro] + '</option>';
         });
@@ -17554,7 +19442,7 @@ async function renderPolicyConfig(container) {
     ['0','1','2','3'].forEach(function(pri) {
       var label = priLabels[pri] || 'Priority ' + pri;
       var allowed = priAuth[pri] || [];
-      html += '<tr style="border-top:1px solid rgba(255,255,255,0.05)">' +
+      html += '<tr style="border-top:1px solid var(--overlay-5)">' +
         '<td style="padding:8px 14px;font-weight:600">'+esc(label)+'</td>';
       riskOptions.forEach(function(ro) {
         var checked = allowed.indexOf(ro) >= 0;
@@ -17577,7 +19465,7 @@ async function renderPolicyConfig(container) {
         '</label>' +
         '<label style="display:flex;align-items:center;gap:10px;font-size:13px">' +
           '<span style="font-weight:600;white-space:nowrap">审批超时</span>' +
-          '<input type="number" id="policy-timeout" value="'+Math.round(cfg.approval_timeout)+'" min="30" max="3600" style="width:80px;background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:6px 10px;font-size:13px" onchange="updatePolicyGlobal(\'approval_timeout\',Number(this.value))">' +
+          '<input type="number" id="policy-timeout" value="'+Math.round(cfg.approval_timeout)+'" min="30" max="3600" style="width:80px;background:var(--surface2);color:var(--text);border:1px solid var(--overlay-10);border-radius:6px;padding:6px 10px;font-size:13px" onchange="updatePolicyGlobal(\'approval_timeout\',Number(this.value))">' +
           '<span style="font-size:11px;color:var(--text3)">秒 (30-3600)</span>' +
         '</label>' +
       '</div>' +
@@ -17594,7 +19482,7 @@ async function renderPolicyConfig(container) {
       roleKeys.sort().forEach(function(pr) {
         var children = edges[pr] || [];
         var childStr = children.length ? children.join(', ') : '<span style="color:#ef4444">（不允许委派任何子角色）</span>';
-        edgeRows += '<tr style="border-top:1px solid rgba(255,255,255,0.05)">' +
+        edgeRows += '<tr style="border-top:1px solid var(--overlay-5)">' +
           '<td style="padding:8px 14px;font-family:monospace;font-weight:600">' + esc(pr) + '</td>' +
           '<td style="padding:8px 14px;font-size:12px;color:var(--text2)">' + childStr + '</td>' +
           '<td style="padding:8px 14px;text-align:right">' +
@@ -17729,181 +19617,6 @@ async function showAddToolRiskPrompt() {
   updateToolRisk(toolName, risk);
 }
 
-// ============ Admin Management Page ============
-async function renderAdminManage() {
-  var c = document.getElementById('content');
-  if (!_adminCtx.is_super) {
-    c.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text3)"><span class="material-symbols-outlined" style="font-size:48px;display:block;margin-bottom:12px">lock</span>Only Super Admin can access this page</div>';
-    return;
-  }
-
-  c.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text3)">Loading...</div>';
-
-  try {
-    var data = await api('POST', '/api/portal/admins/list', {});
-    var admins = (data && data.admins) ? data.admins : [];
-
-    var html = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">';
-    html += '<div><h3 style="font-size:16px;font-weight:700;font-family:\'Plus Jakarta Sans\',sans-serif">Admin Accounts</h3>';
-    html += '<p style="font-size:12px;color:var(--text3);margin-top:4px">Manage admin users and their agent access</p></div>';
-    html += '<button class="btn btn-primary btn-sm" onclick="showCreateAdminModal()"><span class="material-symbols-outlined" style="font-size:16px">person_add</span> Add Admin</button>';
-    html += '</div>';
-
-    html += '<div style="display:grid;gap:12px">';
-    admins.forEach(function(a) {
-      var isSuper = a.role === 'superAdmin';
-      var roleBadge = isSuper
-        ? '<span style="padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;background:rgba(203,201,255,0.15);color:var(--primary)">Super Admin</span>'
-        : '<span style="padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;background:rgba(63,185,80,0.15);color:var(--success)">Admin</span>';
-      var statusDot = a.active !== false
-        ? '<span style="width:8px;height:8px;border-radius:50%;background:#3fb950;display:inline-block"></span>'
-        : '<span style="width:8px;height:8px;border-radius:50%;background:var(--text3);display:inline-block"></span>';
-
-      var agentTags = '';
-      if (isSuper) {
-        agentTags = '<span style="font-size:11px;color:var(--text3)">All agents</span>';
-      } else if (a.agent_ids && a.agent_ids.length > 0) {
-        agentTags = a.agent_ids.map(function(aid) {
-          var ag = agents.find(function(x){return x.id===aid;});
-          var name = ag ? ag.name : aid.substring(0,8);
-          return '<span style="padding:2px 6px;background:var(--surface3);border-radius:4px;font-size:10px;color:var(--text2)">'+esc(name)+'</span>';
-        }).join(' ');
-      } else {
-        agentTags = '<span style="font-size:11px;color:var(--text3)">No agents assigned</span>';
-      }
-
-      html += '<div style="background:var(--surface);border-radius:10px;padding:16px;border:1px solid var(--border-light);display:flex;align-items:center;gap:14px">';
-      html += '<div style="width:40px;height:40px;border-radius:10px;background:var(--surface3);display:flex;align-items:center;justify-content:center;flex-shrink:0"><span class="material-symbols-outlined" style="font-size:22px;color:'+(isSuper?'var(--primary)':'var(--success)')+'">'+( isSuper ? 'admin_panel_settings' : 'person')+'</span></div>';
-      html += '<div style="flex:1;min-width:0">';
-      html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">'+statusDot+' <span style="font-weight:700;font-size:14px">'+esc(a.display_name || a.username)+'</span> '+roleBadge+'</div>';
-      html += '<div style="font-size:11px;color:var(--text3);margin-bottom:6px">@'+esc(a.username)+'</div>';
-      html += '<div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center"><span class="material-symbols-outlined" style="font-size:14px;color:var(--text3)">smart_toy</span> '+agentTags+'</div>';
-      html += '</div>';
-      if (!isSuper) {
-        html += '<div style="display:flex;gap:6px;flex-shrink:0">';
-        html += '<button class="btn btn-ghost btn-sm" onclick="showEditAdminModal(\''+a.user_id+'\')"><span class="material-symbols-outlined" style="font-size:16px">edit</span></button>';
-        html += '<button class="btn btn-ghost btn-sm" style="color:var(--error)" onclick="deleteAdminUser(\''+a.user_id+'\',\''+esc(a.username)+'\')"><span class="material-symbols-outlined" style="font-size:16px">delete</span></button>';
-        html += '</div>';
-      }
-      html += '</div>';
-    });
-    html += '</div>';
-
-    c.innerHTML = html;
-  } catch(e) {
-    c.innerHTML = '<div style="color:var(--error);padding:20px">Failed to load admins: '+e.message+'</div>';
-  }
-}
-
-function _buildAgentCheckboxes(cssClass, checkedIds) {
-  // Group agents by node
-  var byNode = {};
-  agents.forEach(function(a) {
-    var nk = a.node_name || a.node_id || 'local';
-    if (!byNode[nk]) byNode[nk] = [];
-    byNode[nk].push(a);
-  });
-  var checked = checkedIds || [];
-  var html = '';
-  var nodeKeys = Object.keys(byNode);
-  nodeKeys.forEach(function(nk) {
-    if (nodeKeys.length > 1) {
-      html += '<div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;padding:6px 0 2px;border-bottom:1px solid var(--border-light);margin-bottom:4px">Node: '+esc(nk)+'</div>';
-    }
-    byNode[nk].forEach(function(a) {
-      var isChecked = checked.indexOf(a.id) >= 0 ? 'checked' : '';
-      html += '<label style="display:flex;align-items:center;gap:8px;padding:6px 4px;cursor:pointer;border-radius:4px;transition:background 0.1s" onmouseenter="this.style.background=\'var(--surface2)\'" onmouseleave="this.style.background=\'none\'">' +
-        '<input type="checkbox" value="'+a.id+'" class="'+cssClass+'" '+isChecked+' style="width:16px;height:16px;flex-shrink:0;accent-color:var(--primary)">' +
-        '<span style="font-size:13px;color:var(--text)">'+esc(a.name)+'</span>' +
-        '<span style="font-size:10px;color:var(--text3);margin-left:auto">('+esc(a.role||'general')+')</span>' +
-      '</label>';
-    });
-  });
-  return html || '<span style="color:var(--text3);font-size:12px">No agents available</span>';
-}
-
-function showCreateAdminModal() {
-  var agentOpts = _buildAgentCheckboxes('new-admin-agent', []);
-
-  var html = '<h3 style="margin-bottom:16px">Create Admin Account</h3>';
-  html += '<div class="form-group"><label>Username</label><input id="new-admin-username" placeholder="e.g. zhangsan"></div>';
-  html += '<div class="form-group"><label>Password</label><input id="new-admin-password" type="password" placeholder="At least 6 characters"></div>';
-  html += '<div class="form-group"><label>Display Name</label><input id="new-admin-display" placeholder="e.g. 张三"></div>';
-  html += '<div class="form-group"><label>Managed Agents</label><div style="max-height:240px;overflow-y:auto;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px">'+
-    agentOpts +'</div></div>';
-  html += '<div class="form-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button>';
-  html += '<button class="btn btn-primary" onclick="createAdminUser()">Create</button></div>';
-  showCustomModal(html);
-}
-
-async function createAdminUser() {
-  var username = document.getElementById('new-admin-username').value.trim();
-  var password = document.getElementById('new-admin-password').value.trim();
-  var display_name = document.getElementById('new-admin-display').value.trim();
-  if (!username || !password) { alert('Username and password are required'); return; }
-  if (password.length < 6) { alert('Password must be at least 6 characters'); return; }
-  var checkedAgents = [];
-  document.querySelectorAll('.new-admin-agent:checked').forEach(function(cb) { checkedAgents.push(cb.value); });
-
-  var data = await api('POST', '/api/portal/admins/create', {
-    username: username, password: password, display_name: display_name || username, agent_ids: checkedAgents
-  });
-  if (data && data.ok) {
-    closeModal();
-    renderAdminManage();
-  } else {
-    alert((data && data.error) || 'Failed to create admin');
-  }
-}
-
-function showEditAdminModal(userId) {
-  api('POST', '/api/portal/admins/list', {}).then(function(data) {
-    var admins = (data && data.admins) || [];
-    var admin = admins.find(function(a) { return a.user_id === userId; });
-    if (!admin) { alert('Admin not found'); return; }
-
-    var agentOpts = _buildAgentCheckboxes('edit-admin-agent', admin.agent_ids || []);
-
-    var html = '<h3 style="margin-bottom:16px">Edit Admin: '+esc(admin.username)+'</h3>';
-    html += '<input type="hidden" id="edit-admin-uid" value="'+admin.user_id+'">';
-    html += '<div class="form-group"><label>Display Name</label><input id="edit-admin-display" value="'+esc(admin.display_name||'')+'"></div>';
-    html += '<div class="form-group"><label>New Password (leave empty to keep current)</label><input id="edit-admin-password" type="password" placeholder="Leave empty to keep"></div>';
-    html += '<div class="form-group"><label>Managed Agents</label><div style="max-height:240px;overflow-y:auto;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px">'+
-      agentOpts +'</div></div>';
-    html += '<div class="form-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button>';
-    html += '<button class="btn btn-primary" onclick="saveAdminEdit()">Save</button></div>';
-    showCustomModal(html);
-  });
-}
-
-async function saveAdminEdit() {
-  var uid = document.getElementById('edit-admin-uid').value;
-  var display_name = document.getElementById('edit-admin-display').value.trim();
-  var password = document.getElementById('edit-admin-password').value.trim();
-  var checkedAgents = [];
-  document.querySelectorAll('.edit-admin-agent:checked').forEach(function(cb) { checkedAgents.push(cb.value); });
-
-  var body = { user_id: uid, display_name: display_name, agent_ids: checkedAgents };
-  if (password) body.password = password;
-
-  var data = await api('POST', '/api/portal/admins/update', body);
-  if (data && data.ok) {
-    closeModal();
-    renderAdminManage();
-  } else {
-    alert((data && data.error) || 'Failed to update admin');
-  }
-}
-
-async function deleteAdminUser(userId, username) {
-  if (!await confirm('Delete admin "'+username+'"? This cannot be undone.')) return;
-  var data = await api('POST', '/api/portal/admins/delete', { user_id: userId });
-  if (data && data.ok) {
-    renderAdminManage();
-  } else {
-    alert((data && data.error) || 'Failed to delete admin');
-  }
-}
 
 function showCustomModal(html) {
   // Reuse generic modal approach
@@ -18111,6 +19824,732 @@ async function _doImportSkill() {
     }
   } catch(e) { alert('导入失败: ' + (e.message || String(e))); }
 }
+
+// ============ Inbox (Block 0 Day 6) ============
+
+var _inboxSelectedAgent = '';  // viewer identity when replying
+
+async function _inboxFetchCount() {
+  try {
+    var d = await api('GET', '/api/portal/inbox/count');
+    var n = (d && typeof d.unread === 'number') ? d.unread : 0;
+    var el = document.getElementById('inbox-badge');
+    if (!el) return;
+    if (n > 0) {
+      el.textContent = (n > 99 ? '99+' : String(n));
+      el.classList.remove('hidden');
+    } else {
+      el.textContent = '0';
+      el.classList.add('hidden');
+    }
+  } catch (e) { /* silent */ }
+}
+
+function _inboxEsc(s) {
+  s = String(s == null ? '' : s);
+  return s.replace(/[&<>"']/g, function(c){
+    return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'})[c];
+  });
+}
+
+function _inboxFmtTs(ts) {
+  try {
+    var d = new Date(ts * 1000);
+    return d.toLocaleString('sv').slice(0, 16);  // YYYY-MM-DD HH:MM
+  } catch (e) { return ''; }
+}
+
+async function renderInbox() {
+  var c = document.getElementById('content');
+  // Build agent selector from loaded agents list.
+  var visibleAgents = (agents || []).filter(function(a){ return !a.parent_id; });
+  if (!visibleAgents.length) {
+    c.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text3)">' + window.t('inbox.noMessages', '暂无 agent，无法查看收件箱。') + '</div>';
+    return;
+  }
+  if (!_inboxSelectedAgent ||
+      !visibleAgents.find(function(a){ return a.id === _inboxSelectedAgent; })) {
+    _inboxSelectedAgent = visibleAgents[0].id;
+  }
+
+  var opts = visibleAgents.map(function(a){
+    var sel = a.id === _inboxSelectedAgent ? ' selected' : '';
+    return '<option value="'+_inboxEsc(a.id)+'"'+sel+'>'+_inboxEsc(a.name)+' ('+_inboxEsc(a.id.slice(0,8))+')</option>';
+  }).join('');
+
+  c.innerHTML =
+      '<div style="max-width:980px">' +
+        '<div style="display:flex;gap:12px;align-items:center;margin-bottom:16px;flex-wrap:wrap">' +
+          '<label style="font-size:12px;color:var(--text3)">当前查看：</label>' +
+          '<select id="inbox-agent-sel" onchange="_inboxOnAgentChange(this.value)" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">' +
+            opts + '</select>' +
+          '<label style="font-size:12px;color:var(--text3);margin-left:8px"><input type="checkbox" id="inbox-show-read" onchange="_inboxRefresh()" checked /> 显示已读</label>' +
+          '<label style="font-size:12px;color:var(--text3)"><input type="checkbox" id="inbox-show-acked" onchange="_inboxRefresh()" /> 显示已确认</label>' +
+          '<span id="inbox-summary" style="margin-left:auto;font-size:12px;color:var(--text3)"></span>' +
+        '</div>' +
+        '<div id="inbox-list" style="min-height:120px">加载中…</div>' +
+      '</div>';
+
+  await _inboxRefresh();
+}
+
+function _inboxOnAgentChange(id) {
+  _inboxSelectedAgent = id;
+  _inboxRefresh();
+}
+
+async function _inboxRefresh() {
+  var listEl = document.getElementById('inbox-list');
+  var sumEl = document.getElementById('inbox-summary');
+  if (!listEl) return;
+  var aid = _inboxSelectedAgent;
+  if (!aid) { listEl.innerHTML = '<div style="color:var(--text3)">请选择 agent</div>'; return; }
+  var showRead = !!(document.getElementById('inbox-show-read') || {}).checked;
+  var showAcked = !!(document.getElementById('inbox-show-acked') || {}).checked;
+  var qs = '?agent_id=' + encodeURIComponent(aid) +
+           '&include_read=' + (showRead ? 'true' : 'false') +
+           '&include_acked=' + (showAcked ? 'true' : 'false') +
+           '&limit=100';
+  try {
+    var d = await api('GET', '/api/portal/inbox/list' + qs);
+    var msgs = (d && d.messages) || [];
+    if (sumEl) sumEl.textContent = '共 ' + msgs.length + ' 条 (未读 ' + (d.unread_count||0) + ')';
+    if (!msgs.length) {
+      listEl.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text3);border:1px dashed var(--border);border-radius:8px">空</div>';
+      return;
+    }
+    var html = '<div style="display:flex;flex-direction:column;gap:8px">';
+    msgs.forEach(function(m){
+      var badge = '', border = 'var(--border)';
+      if (m.state === 'new') { badge = '<span style="padding:2px 6px;border-radius:4px;font-size:10px;background:rgba(59,130,246,0.15);color:#3b82f6;font-weight:600">NEW</span>'; border = 'rgba(59,130,246,0.4)'; }
+      else if (m.state === 'read') { badge = '<span style="padding:2px 6px;border-radius:4px;font-size:10px;background:var(--primary-tint-10);color:var(--text3)">read</span>'; }
+      else if (m.state === 'acked') { badge = '<span style="padding:2px 6px;border-radius:4px;font-size:10px;background:rgba(16,185,129,0.15);color:#10b981">acked</span>'; }
+      var prioClr = m.priority === 'urgent' ? '#ef4444' : (m.priority === 'low' ? 'var(--text3)' : 'var(--text2)');
+      html += '<div style="border:1px solid '+border+';border-radius:8px;padding:12px;background:var(--bg2)">';
+      html += '<div style="display:flex;gap:8px;align-items:center;font-size:11px;color:var(--text3);margin-bottom:6px;flex-wrap:wrap">';
+      html += badge;
+      html += '<span style="color:'+prioClr+';font-weight:600">'+_inboxEsc(m.priority)+'</span>';
+      html += '<span>from <b style="color:var(--text2)">'+_inboxEsc(m.from_agent)+'</b></span>';
+      html += '<span>'+_inboxFmtTs(m.created_at)+'</span>';
+      html += '<span style="margin-left:auto;font-family:monospace;font-size:10px">'+_inboxEsc(m.id)+'</span>';
+      html += '</div>';
+      html += '<div style="white-space:pre-wrap;word-break:break-word;color:var(--text);font-size:13px;line-height:1.5">'+_inboxEsc(m.content)+'</div>';
+      html += '<div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap">';
+      if (m.state !== 'acked') {
+        html += '<button class="btn btn-ghost btn-sm" onclick="_inboxAck(\''+_inboxEsc(m.id)+'\')">✓ Ack</button>';
+      }
+      html += '<button class="btn btn-ghost btn-sm" onclick="_inboxReply(\''+_inboxEsc(m.id)+'\',\''+_inboxEsc(m.from_agent)+'\')">↩ Reply</button>';
+      if (m.thread_id && m.thread_id !== m.id) {
+        html += '<button class="btn btn-ghost btn-sm" onclick="_inboxShowThread(\''+_inboxEsc(m.thread_id)+'\')">🧵 Thread</button>';
+      }
+      html += '</div>';
+      html += '</div>';
+    });
+    html += '</div>';
+    listEl.innerHTML = html;
+  } catch (e) {
+    listEl.innerHTML = '<div style="color:var(--error);padding:20px">加载失败: '+_inboxEsc(e.message || String(e))+'</div>';
+  }
+  _inboxFetchCount();
+}
+
+async function _inboxAck(mid) {
+  if (!_inboxSelectedAgent) return;
+  try {
+    await api('POST', '/api/portal/inbox/ack', {
+      agent_id: _inboxSelectedAgent,
+      message_ids: [mid],
+    });
+    _inboxRefresh();
+  } catch (e) { alert('Ack 失败: ' + (e.message || String(e))); }
+}
+
+function _inboxReply(mid, fromAgent) {
+  if (!_inboxSelectedAgent) return;
+  var body = prompt('Reply to ' + fromAgent + ':');
+  if (body == null) return;
+  body = String(body).trim();
+  if (!body) return;
+  api('POST', '/api/portal/inbox/reply', {
+    agent_id: _inboxSelectedAgent,
+    message_id: mid,
+    content: body,
+    priority: 'normal',
+  }).then(function(){ _inboxRefresh(); })
+    .catch(function(e){ alert('Reply 失败: ' + (e.message || String(e))); });
+}
+
+async function _inboxShowThread(tid) {
+  try {
+    var d = await api('GET', '/api/portal/inbox/thread/'+encodeURIComponent(tid));
+    var msgs = (d && d.messages) || [];
+    var html = '<div style="max-width:640px"><h3 style="margin:0 0 12px">🧵 Thread '+_inboxEsc(tid)+'</h3>';
+    if (!msgs.length) html += '<div style="color:var(--text3)">（empty）</div>';
+    msgs.forEach(function(m){
+      html += '<div style="border-left:2px solid var(--border);padding:8px 12px;margin-bottom:8px">';
+      html += '<div style="font-size:10px;color:var(--text3)">'+_inboxEsc(m.from_agent)+' → '+_inboxEsc(m.to_agent)+' · '+_inboxFmtTs(m.created_at)+'</div>';
+      html += '<div style="white-space:pre-wrap;font-size:13px">'+_inboxEsc(m.content)+'</div>';
+      html += '</div>';
+    });
+    html += '<div style="text-align:right"><button class="btn btn-sm" onclick="closeModal()">关闭</button></div></div>';
+    showModalHTML(html);
+  } catch (e) { alert('Thread 加载失败: '+(e.message||String(e))); }
+}
+
+// NOTE: the old global `_inboxFetchCount` badge updater is obsolete —
+// inbox now lives per-agent; badges are refreshed by
+// _refreshAgentHeaderCounts(agentId) from the agent detail render
+// and by the modal opener itself.
+
+
+// ============ Checkpoints (Block 3 Day 7) ============
+
+var _ckptSelectedAgent = '';
+var _ckptScopeFilter = 'all';   // 'all' | 'agent' | 'meeting' | 'project_task'
+var _ckptStatusFilter = ckpt_STATUS_OPEN();
+
+function ckpt_STATUS_OPEN() { return 'open'; }
+
+async function _ckptFetchCount() {
+  try {
+    var d = await api('GET', '/api/portal/checkpoint/stats');
+    var open = (d && d.by_status && d.by_status.open) || 0;
+    var el = document.getElementById('checkpoint-badge');
+    if (!el) return;
+    if (open > 0) {
+      el.textContent = open > 99 ? '99+' : String(open);
+      el.classList.remove('hidden');
+    } else {
+      el.textContent = '0';
+      el.classList.add('hidden');
+    }
+  } catch (e) { /* silent */ }
+}
+
+async function renderCheckpoints() {
+  var c = document.getElementById('content');
+  var visibleAgents = (agents || []).filter(function(a){ return !a.parent_id; });
+  var agentOpts = '<option value="">(选择 agent 或按 scope 筛选)</option>' +
+    visibleAgents.map(function(a){
+      var sel = a.id === _ckptSelectedAgent ? ' selected' : '';
+      return '<option value="'+_inboxEsc(a.id)+'"'+sel+'>'+_inboxEsc(a.name)+' ('+_inboxEsc(a.id.slice(0,8))+')</option>';
+    }).join('');
+
+  var scopeOpts = ['all','agent','meeting','project_task'].map(function(s){
+    var sel = s === _ckptScopeFilter ? ' selected' : '';
+    return '<option value="'+s+'"'+sel+'>'+s+'</option>';
+  }).join('');
+
+  var statusOpts = ['open','restored','archived',''].map(function(s){
+    var label = s || window.t('ckpt.anyStatus', '(全部)');
+    var sel = s === _ckptStatusFilter ? ' selected' : '';
+    return '<option value="'+s+'"'+sel+'>'+label+'</option>';
+  }).join('');
+
+  c.innerHTML =
+    '<div style="max-width:1100px">' +
+      '<div style="display:flex;gap:12px;align-items:center;margin-bottom:16px;flex-wrap:wrap">' +
+        '<label style="font-size:12px;color:var(--text3)">Agent:</label>' +
+        '<select id="ckpt-agent-sel" onchange="_ckptOnAgentChange(this.value)" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">'+agentOpts+'</select>' +
+        '<label style="font-size:12px;color:var(--text3);margin-left:8px">Scope:</label>' +
+        '<select id="ckpt-scope-sel" onchange="_ckptOnScopeChange(this.value)" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">'+scopeOpts+'</select>' +
+        '<label style="font-size:12px;color:var(--text3);margin-left:8px">状态:</label>' +
+        '<select id="ckpt-status-sel" onchange="_ckptOnStatusChange(this.value)" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">'+statusOpts+'</select>' +
+        '<span id="ckpt-summary" style="margin-left:auto;font-size:12px;color:var(--text3)"></span>' +
+      '</div>' +
+      '<div id="ckpt-list" style="min-height:120px">加载中…</div>' +
+    '</div>';
+
+  await _ckptRefresh();
+}
+
+function _ckptOnAgentChange(v){ _ckptSelectedAgent = v; _ckptRefresh(); }
+function _ckptOnScopeChange(v){ _ckptScopeFilter = v; _ckptRefresh(); }
+function _ckptOnStatusChange(v){ _ckptStatusFilter = v; _ckptRefresh(); }
+
+async function _ckptRefresh() {
+  var listEl = document.getElementById('ckpt-list');
+  var sumEl = document.getElementById('ckpt-summary');
+  if (!listEl) return;
+  if (!_ckptSelectedAgent) {
+    listEl.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text3);border:1px dashed var(--border);border-radius:8px">' + window.t('ckpt.pickAgent', '请在左上选择一个 Agent 来查看其检查点') + '</div>';
+    _ckptFetchCount();
+    return;
+  }
+  var params = 'agent_id=' + encodeURIComponent(_ckptSelectedAgent) + '&limit=100';
+  if (_ckptScopeFilter && _ckptScopeFilter !== 'all') {
+    params += '&scope=' + encodeURIComponent(_ckptScopeFilter);
+  }
+  if (_ckptStatusFilter) {
+    params += '&status=' + encodeURIComponent(_ckptStatusFilter);
+  }
+  try {
+    var d = await api('GET', '/api/portal/checkpoint/list?' + params);
+    var rows = (d && d.checkpoints) || [];
+    if (sumEl) sumEl.textContent = window.t('ckpt.totalCount', '共 {n} 个检查点').replace('{n}', rows.length);
+    if (!rows.length) {
+      listEl.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text3);border:1px dashed var(--border);border-radius:8px">空</div>';
+      return;
+    }
+    var html = '<div style="display:flex;flex-direction:column;gap:8px">';
+    rows.forEach(function(r){
+      var statusColor = r.status === 'open' ? '#3b82f6'
+                      : r.status === 'restored' ? '#10b981'
+                      : 'var(--text3)';
+      var statusBg = r.status === 'open' ? 'rgba(59,130,246,0.15)'
+                   : r.status === 'restored' ? 'rgba(16,185,129,0.15)'
+                   : 'var(--primary-tint-8)';
+      html += '<div style="border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--bg2)">';
+      html += '<div style="display:flex;gap:8px;align-items:center;font-size:11px;color:var(--text3);margin-bottom:6px;flex-wrap:wrap">';
+      html += '<span style="padding:2px 6px;border-radius:4px;background:'+statusBg+';color:'+statusColor+';font-weight:600">'+_inboxEsc(r.status)+'</span>';
+      html += '<span style="padding:2px 6px;border-radius:4px;background:var(--primary-tint-8);color:var(--text2)">'+_inboxEsc(r.scope)+(r.scope_id ? ':'+_inboxEsc(r.scope_id.slice(0,10)) : '')+'</span>';
+      html += '<span>reason: <b style="color:var(--text2)">'+_inboxEsc(r.reason)+'</b></span>';
+      html += '<span>'+_inboxFmtTs(r.created_at)+'</span>';
+      html += '<span style="margin-left:auto;font-family:monospace;font-size:10px">'+_inboxEsc(r.id)+'</span>';
+      html += '</div>';
+      var plan = r.plan_json || {};
+      var stepsN = (plan.steps || []).length;
+      var title = plan.task_summary || '(no summary)';
+      html += '<div style="color:var(--text);font-size:13px;margin-bottom:4px"><b>'+_inboxEsc(title)+'</b></div>';
+      html += '<div style="color:var(--text3);font-size:11px;margin-bottom:8px">' +
+              stepsN + ' 个 steps · ' +
+              (r.artifact_refs||[]).length + ' 个 artifacts · ' +
+              (r.chat_tail||[]).length + ' 条 chat_tail' +
+              '</div>';
+      html += '<div style="display:flex;gap:6px;flex-wrap:wrap">';
+      html += '<button class="btn btn-ghost btn-sm" onclick="_ckptShowDigest(\''+_inboxEsc(r.id)+'\')">📄 查看 digest</button>';
+      if (r.status === 'open') {
+        html += '<button class="btn btn-ghost btn-sm" onclick="_ckptRestore(\''+_inboxEsc(r.id)+'\')">▶ 恢复</button>';
+      }
+      if (r.status !== 'archived') {
+        html += '<button class="btn btn-ghost btn-sm" onclick="_ckptArchive(\''+_inboxEsc(r.id)+'\')">📦 归档</button>';
+      }
+      html += '<button class="btn btn-ghost btn-sm" onclick="_ckptRebuildDigest(\''+_inboxEsc(r.id)+'\')">🔁 重算 digest</button>';
+      html += '</div></div>';
+    });
+    html += '</div>';
+    listEl.innerHTML = html;
+  } catch (e) {
+    listEl.innerHTML = '<div style="color:var(--error);padding:20px">加载失败: '+_inboxEsc(e.message || String(e))+'</div>';
+  }
+  _ckptFetchCount();
+}
+
+async function _ckptShowDigest(cid) {
+  try {
+    var d = await api('GET', '/api/portal/checkpoint/'+encodeURIComponent(cid)+'/digest');
+    var src = d.source === 'stored' ? '（已缓存）' : '（即时计算）';
+    var html = '<div style="max-width:720px">' +
+      '<h3 style="margin:0 0 8px">📄 Digest '+_inboxEsc(cid)+'</h3>' +
+      '<div style="font-size:11px;color:var(--text3);margin-bottom:10px">source: '+_inboxEsc(d.source)+' '+src+
+        (d.token_estimate ? ' · ~'+d.token_estimate+' tokens' : '')+'</div>' +
+      '<pre style="white-space:pre-wrap;word-break:break-word;background:var(--bg2);padding:12px;border-radius:8px;font-family:inherit;font-size:12px;max-height:60vh;overflow:auto">'+_inboxEsc(d.text)+'</pre>' +
+      '<div style="text-align:right;margin-top:10px"><button class="btn btn-sm" onclick="closeModal()">关闭</button></div></div>';
+    showModalHTML(html);
+  } catch (e) { alert('Digest 失败: '+(e.message||String(e))); }
+}
+
+async function _ckptRestore(cid) {
+  if (!confirm(window.t('ckpt.confirmRestore', '确定要恢复这个检查点吗？恢复后 digest 会在该 agent 下一轮对话里自动注入。'))) return;
+  try {
+    var d = await api('POST', '/api/portal/checkpoint/'+encodeURIComponent(cid)+'/restore', {});
+    alert('已恢复。Digest 长度 ~'+(d.token_estimate||0)+' tokens。');
+    _ckptRefresh();
+  } catch (e) { alert('恢复失败: '+(e.message||String(e))); }
+}
+
+async function _ckptArchive(cid) {
+  if (!confirm(window.t('ckpt.confirmArchive', '归档这个检查点？归档后不再出现在默认列表。'))) return;
+  try {
+    await api('POST', '/api/portal/checkpoint/'+encodeURIComponent(cid)+'/archive', {});
+    _ckptRefresh();
+  } catch (e) { alert('归档失败: '+(e.message||String(e))); }
+}
+
+async function _ckptRebuildDigest(cid) {
+  try {
+    await api('POST', '/api/portal/checkpoint/'+encodeURIComponent(cid)+'/digest/rebuild', {token_budget: 2000});
+    alert('已重算并缓存 digest。');
+  } catch (e) { alert('重算失败: '+(e.message||String(e))); }
+}
+
+// (old global checkpoint badge polling removed — now per-agent)
+
+
+// ============ Agent-scoped Inbox / Checkpoint modals ============
+// Opened from the agent detail action bar (buttons next to Settings).
+// Each fetches data scoped to the currently-viewed agent, renders a
+// modal, and wires up Ack / Reply / Restore / Archive actions against
+// the same REST endpoints the old sidebar views used.
+
+async function _refreshAgentHeaderCounts(agentId) {
+  if (!agentId) return;
+  // Inbox unread
+  try {
+    var d = await api('GET', '/api/portal/inbox/count?agent_id=' + encodeURIComponent(agentId));
+    var n = (d && typeof d.unread === 'number') ? d.unread : 0;
+    var el = document.getElementById('agent-inbox-btn-badge');
+    if (el) {
+      if (n > 0) { el.textContent = n > 99 ? '99+' : String(n); el.classList.remove('hidden'); }
+      else { el.classList.add('hidden'); }
+    }
+  } catch (_) { /* silent */ }
+  // Open checkpoints
+  try {
+    var d2 = await api('GET', '/api/portal/checkpoint/list?agent_id=' + encodeURIComponent(agentId) + '&status=open&limit=100');
+    var n2 = (d2 && d2.count) || 0;
+    var el2 = document.getElementById('agent-ckpt-btn-badge');
+    if (el2) {
+      if (n2 > 0) { el2.textContent = n2 > 99 ? '99+' : String(n2); el2.classList.remove('hidden'); }
+      else { el2.classList.add('hidden'); }
+    }
+  } catch (_) { /* silent */ }
+}
+
+// ── Inbox modal ─────────────────────────────────────────────────
+
+async function _showAgentInboxModal(agentId) {
+  if (!agentId) return;
+  _inboxSelectedAgent = agentId;
+  var html =
+    '<div style="max-width:900px;min-width:640px">' +
+      '<h3 style="margin:0 0 12px">📮 ' + window.t('chat.inbox', '收件箱') + ' <span style="font-family:monospace;font-size:11px;color:var(--text3)">'+_inboxEsc(agentId)+'</span></h3>' +
+      '<div style="display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap">' +
+        '<label style="font-size:12px;color:var(--text3)"><input type="checkbox" id="inbox-show-read" onchange="_agentInboxModalRefresh(\''+_inboxEsc(agentId)+'\')" checked /> ' + window.t('inbox.showRead', '显示已读') + '</label>' +
+        '<label style="font-size:12px;color:var(--text3)"><input type="checkbox" id="inbox-show-acked" onchange="_agentInboxModalRefresh(\''+_inboxEsc(agentId)+'\')" /> ' + window.t('inbox.showAcked', '显示已确认') + '</label>' +
+        '<span id="inbox-summary" style="margin-left:auto;font-size:12px;color:var(--text3)"></span>' +
+        '<button class="btn btn-ghost btn-sm" onclick="_agentInboxModalRefresh(\''+_inboxEsc(agentId)+'\')">' + window.t('action.refresh', 'Refresh') + '</button>' +
+      '</div>' +
+      '<div id="inbox-list" style="min-height:120px;max-height:60vh;overflow:auto">' + window.t('common.loading', '加载中…') + '</div>' +
+      '<div style="text-align:right;margin-top:12px"><button class="btn btn-sm" onclick="closeModal()">' + window.t('action.close', '关闭') + '</button></div>' +
+    '</div>';
+  showModalHTML(html);
+  await _agentInboxModalRefresh(agentId);
+}
+
+async function _agentInboxModalRefresh(agentId) {
+  _inboxSelectedAgent = agentId;
+  var listEl = document.getElementById('inbox-list');
+  if (!listEl) return;
+  var showRead = !!(document.getElementById('inbox-show-read') || {}).checked;
+  var showAcked = !!(document.getElementById('inbox-show-acked') || {}).checked;
+  var qs = '?agent_id=' + encodeURIComponent(agentId) +
+           '&include_read=' + (showRead ? 'true' : 'false') +
+           '&include_acked=' + (showAcked ? 'true' : 'false') +
+           '&limit=100';
+  try {
+    var d = await api('GET', '/api/portal/inbox/list' + qs);
+    var msgs = (d && d.messages) || [];
+    var sumEl = document.getElementById('inbox-summary');
+    if (sumEl) sumEl.textContent = window.t('inbox.summary', '共 {n} 条 (未读 {u})').replace('{n}', msgs.length).replace('{u}', d.unread_count||0);
+    if (!msgs.length) {
+      listEl.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text3);border:1px dashed var(--border);border-radius:8px">' + window.t('common.empty', '空') + '</div>';
+      _refreshAgentHeaderCounts(agentId);
+      return;
+    }
+    var html = '<div style="display:flex;flex-direction:column;gap:8px">';
+    msgs.forEach(function(m){
+      var badge = '', border = 'var(--border)';
+      if (m.state === 'new') { badge = '<span style="padding:2px 6px;border-radius:4px;font-size:10px;background:rgba(59,130,246,0.15);color:#3b82f6;font-weight:600">NEW</span>'; border = 'rgba(59,130,246,0.4)'; }
+      else if (m.state === 'read') { badge = '<span style="padding:2px 6px;border-radius:4px;font-size:10px;background:var(--primary-tint-10);color:var(--text3)">read</span>'; }
+      else if (m.state === 'acked') { badge = '<span style="padding:2px 6px;border-radius:4px;font-size:10px;background:rgba(16,185,129,0.15);color:#10b981">acked</span>'; }
+      var prioClr = m.priority === 'urgent' ? '#ef4444' : (m.priority === 'low' ? 'var(--text3)' : 'var(--text2)');
+      html += '<div style="border:1px solid '+border+';border-radius:8px;padding:10px;background:var(--bg2)">';
+      html += '<div style="display:flex;gap:8px;align-items:center;font-size:11px;color:var(--text3);margin-bottom:6px;flex-wrap:wrap">';
+      html += badge + '<span style="color:'+prioClr+';font-weight:600">'+_inboxEsc(m.priority)+'</span>';
+      html += '<span>from <b style="color:var(--text2)">'+_inboxEsc(m.from_agent)+'</b></span>';
+      html += '<span>'+_inboxFmtTs(m.created_at)+'</span>';
+      html += '<span style="margin-left:auto;font-family:monospace;font-size:10px">'+_inboxEsc(m.id)+'</span></div>';
+      html += '<div style="white-space:pre-wrap;word-break:break-word;color:var(--text);font-size:13px;line-height:1.5">'+_inboxEsc(m.content)+'</div>';
+      html += '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">';
+      if (m.state !== 'acked') html += '<button class="btn btn-ghost btn-sm" onclick="_agentInboxAck(\''+_inboxEsc(agentId)+'\',\''+_inboxEsc(m.id)+'\')">✓ Ack</button>';
+      html += '<button class="btn btn-ghost btn-sm" onclick="_agentInboxReply(\''+_inboxEsc(agentId)+'\',\''+_inboxEsc(m.id)+'\',\''+_inboxEsc(m.from_agent)+'\')">↩ Reply</button>';
+      if (m.thread_id && m.thread_id !== m.id) html += '<button class="btn btn-ghost btn-sm" onclick="_inboxShowThread(\''+_inboxEsc(m.thread_id)+'\')">🧵 Thread</button>';
+      html += '</div></div>';
+    });
+    html += '</div>';
+    listEl.innerHTML = html;
+  } catch (e) {
+    listEl.innerHTML = '<div style="color:var(--error);padding:20px">加载失败: '+_inboxEsc(e.message || String(e))+'</div>';
+  }
+  _refreshAgentHeaderCounts(agentId);
+}
+
+async function _agentInboxAck(agentId, mid) {
+  try {
+    await api('POST', '/api/portal/inbox/ack', {agent_id: agentId, message_ids: [mid]});
+    _agentInboxModalRefresh(agentId);
+  } catch (e) { alert('Ack 失败: '+(e.message||String(e))); }
+}
+
+function _agentInboxReply(agentId, mid, fromAgent) {
+  var body = prompt('Reply to ' + fromAgent + ':');
+  if (body == null) return;
+  body = String(body).trim();
+  if (!body) return;
+  api('POST', '/api/portal/inbox/reply', {
+    agent_id: agentId, message_id: mid, content: body, priority: 'normal',
+  }).then(function(){ _agentInboxModalRefresh(agentId); })
+    .catch(function(e){ alert('Reply 失败: '+(e.message||String(e))); });
+}
+
+// ── Checkpoint modal ────────────────────────────────────────────
+
+async function _showAgentCheckpointsModal(agentId) {
+  if (!agentId) return;
+  _ckptSelectedAgent = agentId;
+  var scopeOpts = ['all','agent','meeting','project_task'].map(function(s){
+    return '<option value="'+s+'"'+(s===_ckptScopeFilter?' selected':'')+'>'+s+'</option>';
+  }).join('');
+  var statusOpts = ['open','restored','archived',''].map(function(s){
+    var label = s || window.t('ckpt.anyStatus', '(全部)');
+    return '<option value="'+s+'"'+(s===_ckptStatusFilter?' selected':'')+'>'+label+'</option>';
+  }).join('');
+  var html =
+    '<div style="max-width:1000px;min-width:720px">' +
+      '<h3 style="margin:0 0 12px">🔖 ' + window.t('chat.checkpoints', '检查点') + ' <span style="font-family:monospace;font-size:11px;color:var(--text3)">'+_inboxEsc(agentId)+'</span></h3>' +
+      '<div style="display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap">' +
+        '<label style="font-size:12px;color:var(--text3)">' + window.t('ckpt.scope', 'Scope') + ':</label>' +
+        '<select id="ckpt-scope-sel" onchange="_agentCkptScopeChange(\''+_inboxEsc(agentId)+'\', this.value)" style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">'+scopeOpts+'</select>' +
+        '<label style="font-size:12px;color:var(--text3)">' + window.t('ckpt.status', '状态') + ':</label>' +
+        '<select id="ckpt-status-sel" onchange="_agentCkptStatusChange(\''+_inboxEsc(agentId)+'\', this.value)" style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">'+statusOpts+'</select>' +
+        '<span id="ckpt-summary" style="margin-left:auto;font-size:12px;color:var(--text3)"></span>' +
+        '<button class="btn btn-ghost btn-sm" onclick="_agentCkptModalRefresh(\''+_inboxEsc(agentId)+'\')">' + window.t('action.refresh', 'Refresh') + '</button>' +
+      '</div>' +
+      '<div id="ckpt-list" style="min-height:120px;max-height:60vh;overflow:auto">' + window.t('common.loading', '加载中…') + '</div>' +
+      '<div style="text-align:right;margin-top:12px"><button class="btn btn-sm" onclick="closeModal()">' + window.t('action.close', '关闭') + '</button></div>' +
+    '</div>';
+  showModalHTML(html);
+  await _agentCkptModalRefresh(agentId);
+}
+
+function _agentCkptScopeChange(agentId, v) { _ckptScopeFilter = v; _agentCkptModalRefresh(agentId); }
+function _agentCkptStatusChange(agentId, v) { _ckptStatusFilter = v; _agentCkptModalRefresh(agentId); }
+
+async function _agentCkptModalRefresh(agentId) {
+  var listEl = document.getElementById('ckpt-list');
+  var sumEl = document.getElementById('ckpt-summary');
+  if (!listEl) return;
+  var params = 'agent_id=' + encodeURIComponent(agentId) + '&limit=100';
+  if (_ckptScopeFilter && _ckptScopeFilter !== 'all') params += '&scope=' + encodeURIComponent(_ckptScopeFilter);
+  if (_ckptStatusFilter) params += '&status=' + encodeURIComponent(_ckptStatusFilter);
+  try {
+    var d = await api('GET', '/api/portal/checkpoint/list?' + params);
+    var rows = (d && d.checkpoints) || [];
+    if (sumEl) sumEl.textContent = window.t('ckpt.totalCount', '共 {n} 个检查点').replace('{n}', rows.length);
+    if (!rows.length) {
+      listEl.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text3);border:1px dashed var(--border);border-radius:8px">空</div>';
+      _refreshAgentHeaderCounts(agentId);
+      return;
+    }
+    var html = '<div style="display:flex;flex-direction:column;gap:8px">';
+    rows.forEach(function(r){
+      var statusColor = r.status === 'open' ? '#3b82f6' : r.status === 'restored' ? '#10b981' : 'var(--text3)';
+      var statusBg = r.status === 'open' ? 'rgba(59,130,246,0.15)' : r.status === 'restored' ? 'rgba(16,185,129,0.15)' : 'var(--primary-tint-8)';
+      html += '<div style="border:1px solid var(--border);border-radius:8px;padding:10px;background:var(--bg2)">';
+      html += '<div style="display:flex;gap:8px;align-items:center;font-size:11px;color:var(--text3);margin-bottom:6px;flex-wrap:wrap">';
+      html += '<span style="padding:2px 6px;border-radius:4px;background:'+statusBg+';color:'+statusColor+';font-weight:600">'+_inboxEsc(r.status)+'</span>';
+      html += '<span style="padding:2px 6px;border-radius:4px;background:var(--primary-tint-8);color:var(--text2)">'+_inboxEsc(r.scope)+(r.scope_id ? ':'+_inboxEsc(r.scope_id.slice(0,10)) : '')+'</span>';
+      html += '<span>reason: <b style="color:var(--text2)">'+_inboxEsc(r.reason)+'</b></span>';
+      html += '<span>'+_inboxFmtTs(r.created_at)+'</span>';
+      html += '<span style="margin-left:auto;font-family:monospace;font-size:10px">'+_inboxEsc(r.id)+'</span></div>';
+      var plan = r.plan_json || {};
+      var stepsN = (plan.steps || []).length;
+      var title = plan.task_summary || '(no summary)';
+      html += '<div style="color:var(--text);font-size:13px;margin-bottom:4px"><b>'+_inboxEsc(title)+'</b></div>';
+      html += '<div style="color:var(--text3);font-size:11px;margin-bottom:8px">' +
+              stepsN + ' 个 steps · ' + (r.artifact_refs||[]).length + ' 个 artifacts · ' + (r.chat_tail||[]).length + ' 条 chat_tail</div>';
+      html += '<div style="display:flex;gap:6px;flex-wrap:wrap">';
+      html += '<button class="btn btn-ghost btn-sm" onclick="_ckptShowDigest(\''+_inboxEsc(r.id)+'\')">📄 查看 digest</button>';
+      if (r.status === 'open') html += '<button class="btn btn-ghost btn-sm" onclick="_agentCkptRestore(\''+_inboxEsc(agentId)+'\',\''+_inboxEsc(r.id)+'\')">▶ 恢复</button>';
+      if (r.status !== 'archived') html += '<button class="btn btn-ghost btn-sm" onclick="_agentCkptArchive(\''+_inboxEsc(agentId)+'\',\''+_inboxEsc(r.id)+'\')">📦 归档</button>';
+      html += '<button class="btn btn-ghost btn-sm" onclick="_ckptRebuildDigest(\''+_inboxEsc(r.id)+'\')">🔁 重算 digest</button>';
+      html += '</div></div>';
+    });
+    html += '</div>';
+    listEl.innerHTML = html;
+  } catch (e) {
+    listEl.innerHTML = '<div style="color:var(--error);padding:20px">加载失败: '+_inboxEsc(e.message || String(e))+'</div>';
+  }
+  _refreshAgentHeaderCounts(agentId);
+}
+
+async function _agentCkptRestore(agentId, cid) {
+  if (!confirm(window.t('ckpt.confirmRestore', '确定要恢复这个检查点吗？恢复后 digest 会在该 agent 下一轮对话里自动注入。'))) return;
+  try {
+    var d = await api('POST', '/api/portal/checkpoint/'+encodeURIComponent(cid)+'/restore', {});
+    alert('已恢复。Digest 长度 ~'+(d.token_estimate||0)+' tokens。');
+    _agentCkptModalRefresh(agentId);
+  } catch (e) { alert('恢复失败: '+(e.message||String(e))); }
+}
+
+async function _agentCkptArchive(agentId, cid) {
+  if (!confirm(window.t('ckpt.confirmArchive', '归档这个检查点？归档后不再出现在默认列表。'))) return;
+  try {
+    await api('POST', '/api/portal/checkpoint/'+encodeURIComponent(cid)+'/archive', {});
+    _agentCkptModalRefresh(agentId);
+  } catch (e) { alert('归档失败: '+(e.message||String(e))); }
+}
+
+
+// ============ Memory-refs badge (新 A.10) ============
+// When an agent called memory_recall during a turn, the backend emits
+// a `memory_refs` event at end-of-turn listing the L3 fact ids it
+// consulted. We attach a clickable 🧠 badge to the assistant bubble
+// that, on click, opens a popover listing each fact + a DELETE button
+// (the "this memory is wrong" flow).
+
+function _attachMemoryRefsBadge(contentDiv, refs) {
+  if (!contentDiv || !refs || !refs.length) return;
+  if (contentDiv._memRefsAttached) return;   // idempotent
+  contentDiv._memRefsAttached = true;
+  try { contentDiv._memoryRefs = refs; } catch (_) {}
+
+  // Find the bubble's action bar (buttons added by addChatBubble).
+  var bubble = contentDiv.parentElement;
+  var actionBar = bubble ? bubble.querySelector('.chat-msg-actions') : null;
+
+  var btn = document.createElement('button');
+  btn.className = 'chat-action-btn';
+  btn.title = '本轮引用的记忆 (点击查看/刷新)';
+  btn.innerHTML = '🧠 <span style="font-size:11px;font-weight:600">' +
+                  refs.length + '</span>';
+  btn.style.cssText =
+    'background:var(--primary-tint-10);color:var(--primary);border-radius:6px;'
+    + 'padding:2px 8px;margin-left:4px;border:none;cursor:pointer';
+  btn.onclick = function () { _showMemoryRefsPopover(refs); };
+
+  if (actionBar) {
+    actionBar.appendChild(btn);
+  } else {
+    // Fallback: tiny inline row under the bubble.
+    var row = document.createElement('div');
+    row.style.cssText = 'margin-top:4px;display:flex;gap:6px;flex-wrap:wrap';
+    row.appendChild(btn);
+    contentDiv.appendChild(row);
+  }
+}
+
+function _fmtMemAge(days) {
+  if (days == null) return '';
+  if (days < 1) return '今天';
+  if (days < 2) return '昨天';
+  if (days < 7) return Math.round(days) + ' 天前';
+  if (days < 30) return Math.round(days / 7) + ' 周前';
+  if (days < 365) return Math.round(days / 30) + ' 月前';
+  return Math.round(days / 365) + ' 年前';
+}
+
+function _escMem(s) {
+  s = String(s == null ? '' : s);
+  return s.replace(/[&<>"']/g, function (c) {
+    return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;',
+             '"': '&quot;', '\'': '&#39;' })[c];
+  });
+}
+
+function _showMemoryRefsPopover(refs) {
+  if (!refs || !refs.length) return;
+  var html = '<div style="max-width:640px;min-width:480px">' +
+    '<h3 style="margin:0 0 10px">🧠 本轮引用的记忆 (' + refs.length + ' 条)</h3>' +
+    '<div style="font-size:12px;color:var(--text3);margin-bottom:12px">' +
+    '这些是 agent 用 memory_recall 从自己的 L3 记忆里查到的条目。' +
+    '如果哪条不对，点「❌ 标记错误删除」，' +
+    '下次 agent 再查这个 topic 会自然从 LLM / web 重新获取。</div>';
+
+  refs.forEach(function (r, idx) {
+    var cid = _escMem(r.id || '');
+    var preview = _escMem((r.content_preview || '').replace(/\n/g, ' '));
+    var cat = _escMem(r.category || 'general');
+    var age = _fmtMemAge(r.age_days);
+    var conf = typeof r.confidence === 'number' ? r.confidence.toFixed(2) : '';
+    var stale = r.age_days && r.age_days > 30 ? '🚨' :
+                r.age_days && r.age_days > 14 ? '⚠️' : '';
+    var row =
+      '<div id="mem-ref-' + cid + '" ' +
+      'style="border:1px solid var(--border);border-radius:8px;padding:10px;' +
+      'margin-bottom:8px;background:var(--bg2)">' +
+        '<div style="font-size:11px;color:var(--text3);display:flex;gap:8px;' +
+        'flex-wrap:wrap;margin-bottom:6px">' +
+          '<span style="padding:2px 6px;border-radius:4px;background:var(--primary-tint-10);' +
+          'color:var(--primary)">' + cat + '</span>' +
+          (conf ? '<span>conf=' + conf + '</span>' : '') +
+          (age ? '<span>' + stale + ' ' + age + '</span>' : '') +
+          '<span style="margin-left:auto;font-family:monospace;font-size:10px">' + cid + '</span>' +
+        '</div>' +
+        '<div style="color:var(--text);font-size:13px;line-height:1.5;' +
+        'white-space:pre-wrap;word-break:break-word">' + preview + '</div>' +
+        '<div style="display:flex;gap:6px;margin-top:8px">' +
+          '<button class="btn btn-ghost btn-sm" onclick="_memoryMarkWrong(\'' + cid +
+          '\')">❌ 这条错了，删掉重学</button>' +
+          '<button class="btn btn-ghost btn-sm" onclick="_memoryViewFull(\'' + cid +
+          '\')">🔍 查看完整</button>' +
+        '</div>' +
+      '</div>';
+    html += row;
+  });
+  html += '<div style="text-align:right;margin-top:10px">' +
+    '<button class="btn btn-sm" onclick="closeModal()">关闭</button></div></div>';
+  showModalHTML(html);
+}
+
+async function _memoryMarkWrong(factId) {
+  if (!factId) return;
+  if (!confirm('确认把这条记忆标为错误并删除？\n\n' +
+               '删除后下次 agent 查询同主题会从 LLM 重新学习。')) return;
+  try {
+    var r = await api('DELETE', '/api/portal/memory/' + encodeURIComponent(factId));
+    if (r && r.ok) {
+      window._toast && window._toast('已删除：' + (r.preview || factId), 'ok');
+      var row = document.getElementById('mem-ref-' + factId);
+      if (row) {
+        row.style.opacity = '0.4';
+        row.style.pointerEvents = 'none';
+        var tag = document.createElement('div');
+        tag.style.cssText = 'margin-top:6px;color:#ef4444;font-weight:600;font-size:12px';
+        tag.textContent = '✓ 已删除，下次会重新学习';
+        row.appendChild(tag);
+      }
+    } else {
+      alert('删除失败: ' + JSON.stringify(r));
+    }
+  } catch (e) {
+    alert('删除失败: ' + (e.message || String(e)));
+  }
+}
+
+async function _memoryViewFull(factId) {
+  if (!factId) return;
+  try {
+    var d = await api('GET', '/api/portal/memory/' + encodeURIComponent(factId));
+    var html =
+      '<div style="max-width:720px">' +
+        '<h3 style="margin:0 0 10px">🧠 Memory 详情</h3>' +
+        '<div style="font-size:11px;color:var(--text3);margin-bottom:10px">' +
+          'id: <span style="font-family:monospace">' + _escMem(d.id) + '</span> · ' +
+          'agent: ' + _escMem(d.agent_id) + ' · category: ' + _escMem(d.category) + ' · ' +
+          'conf: ' + (d.confidence || 0).toFixed(2) +
+        '</div>' +
+        '<pre style="white-space:pre-wrap;word-break:break-word;' +
+        'background:var(--bg2);padding:12px;border-radius:8px;font-family:inherit;' +
+        'font-size:13px;max-height:50vh;overflow:auto">' +
+        _escMem(d.content || '') + '</pre>' +
+        (d.source
+          ? '<div style="margin-top:8px;font-size:11px;color:var(--text3)">' +
+            'source: ' + _escMem(d.source) + '</div>'
+          : '') +
+        '<div style="text-align:right;margin-top:10px">' +
+          '<button class="btn btn-sm" style="background:#ef4444;color:#fff" onclick="_memoryMarkWrong(\'' +
+          _escMem(d.id) + '\');closeModal()">❌ 标记错误删除</button> ' +
+          '<button class="btn btn-sm" onclick="closeModal()">关闭</button>' +
+        '</div>' +
+      '</div>';
+    showModalHTML(html);
+  } catch (e) {
+    alert('加载失败: ' + (e.message || String(e)));
+  }
+}
+
 
 // ============ Init ============
 refresh();

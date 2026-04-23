@@ -222,6 +222,14 @@ class ExecutionStep:
     started_at: float = 0.0
     completed_at: float = 0.0
     result_summary: str = ""      # brief result after completion
+    # LLM routing hint — which category best fits this step's work.
+    # Filled by the primary LLM when it calls plan_update(create_plan)
+    # (with the scores table injected into its system prompt, so the
+    # decision is informed). Read by the per-iteration LLM resolver to
+    # override keyword-based detection. Empty = fall back to detection.
+    # Valid values: tool-heavy | multimodal | reasoning | analysis | default
+    llm_purpose: str = ""
+    llm_rationale: str = ""       # short sentence explaining the choice (optional)
 
     def to_dict(self) -> dict:
         return {
@@ -233,6 +241,8 @@ class ExecutionStep:
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "result_summary": self.result_summary,
+            "llm_purpose": self.llm_purpose,
+            "llm_rationale": self.llm_rationale,
         }
 
     @staticmethod
@@ -247,6 +257,8 @@ class ExecutionStep:
             started_at=d.get("started_at", 0),
             completed_at=d.get("completed_at", 0),
             result_summary=d.get("result_summary", ""),
+            llm_purpose=str(d.get("llm_purpose") or ""),
+            llm_rationale=str(d.get("llm_rationale") or ""),
         )
 
 

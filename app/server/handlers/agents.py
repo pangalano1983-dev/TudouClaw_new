@@ -154,19 +154,6 @@ def try_handle(handler, path: str, hub, body: dict, auth,
     if path.startswith("/api/portal/agent/") and path.endswith("/soul"):
         return _handle_soul(handler, path, hub, body, auth, actor_name, user_role)
 
-    # ── Active thinking ──
-    if path.startswith("/api/portal/agent/") and path.endswith("/thinking/enable"):
-        return _handle_thinking_enable(handler, path, hub, body, auth, actor_name, user_role)
-
-    if path.startswith("/api/portal/agent/") and path.endswith("/thinking/disable"):
-        return _handle_thinking_disable(handler, path, hub, body, auth, actor_name, user_role)
-
-    if path.startswith("/api/portal/agent/") and path.endswith("/thinking/trigger"):
-        return _handle_thinking_trigger(handler, path, hub, body, auth, actor_name, user_role)
-
-    if path.startswith("/api/portal/agent/") and path.endswith("/thinking/history"):
-        return _handle_thinking_history(handler, path, hub, body, auth, actor_name, user_role)
-
     # ── Workspace authorization ──
     if path == "/api/portal/agent/workspace/authorize":
         return _handle_workspace_authorize(handler, hub, body, auth, actor_name, user_role)
@@ -608,13 +595,27 @@ def _handle_profile(handler, path, hub, body, auth, actor_name, user_role) -> bo
                     if not isinstance(s, dict):
                         continue
                     label = str(s.get("label") or "").strip()
-                    if not label:
+                    provider = str(s.get("provider") or "").strip()
+                    model = str(s.get("model") or "").strip()
+                    purpose = str(s.get("purpose") or "").strip()
+                    if not (label or provider or model or purpose):
                         continue
+                    raw_scores = s.get("scores")
+                    scores_clean: dict = {}
+                    if isinstance(raw_scores, dict):
+                        for k, v in raw_scores.items():
+                            try:
+                                vf = float(v)
+                            except (TypeError, ValueError):
+                                continue
+                            if 0.0 <= vf <= 10.0:
+                                scores_clean[str(k)] = vf
                     cleaned.append({
                         "label": label,
-                        "provider": str(s.get("provider") or "").strip(),
-                        "model": str(s.get("model") or "").strip(),
-                        "purpose": str(s.get("purpose") or "").strip(),
+                        "provider": provider,
+                        "model": model,
+                        "purpose": purpose,
+                        "scores": scores_clean,
                         "note": str(s.get("note") or "").strip(),
                     })
                 agent.extra_llms = cleaned
@@ -1004,59 +1005,6 @@ def _handle_soul(handler, path, hub, body, auth, actor_name, user_role) -> bool:
         agent.messages[0]["content"] = agent._build_system_prompt()
     hub._save_agents()
     handler._json({"ok": True, "agent_id": agent_id})
-    return True
-
-
-def _handle_thinking_enable(handler, path, hub, body, auth, actor_name, user_role) -> bool:
-    agent_id = path.split("/")[4]
-    agent = hub.get_agent(agent_id)
-    if not agent:
-        handler._json({"error": "Agent not found"}, 404)
-        return True
-    config = body or {}
-    stats = agent.enable_active_thinking(**config)
-    hub._save_agents()
-    handler._json({"ok": True, "stats": stats})
-    return True
-
-
-def _handle_thinking_disable(handler, path, hub, body, auth, actor_name, user_role) -> bool:
-    agent_id = path.split("/")[4]
-    agent = hub.get_agent(agent_id)
-    if not agent:
-        handler._json({"error": "Agent not found"}, 404)
-        return True
-    agent.disable_active_thinking()
-    hub._save_agents()
-    handler._json({"ok": True})
-    return True
-
-
-def _handle_thinking_trigger(handler, path, hub, body, auth, actor_name, user_role) -> bool:
-    agent_id = path.split("/")[4]
-    agent = hub.get_agent(agent_id)
-    if not agent:
-        handler._json({"error": "Agent not found"}, 404)
-        return True
-    trigger = body.get("trigger", "manual")
-    context = body.get("context", "")
-    result = agent.trigger_thinking(trigger=trigger, context=context)
-    hub._save_agents()
-    handler._json({"ok": True, "result": result})
-    return True
-
-
-def _handle_thinking_history(handler, path, hub, body, auth, actor_name, user_role) -> bool:
-    agent_id = path.split("/")[4]
-    agent = hub.get_agent(agent_id)
-    if not agent:
-        handler._json({"error": "Agent not found"}, 404)
-        return True
-    history = []
-    if agent.active_thinking:
-        history = [r.to_dict() for r in agent.active_thinking.history[-20:]]
-    stats = agent.active_thinking.get_stats() if agent.active_thinking else None
-    handler._json({"history": history, "stats": stats})
     return True
 
 

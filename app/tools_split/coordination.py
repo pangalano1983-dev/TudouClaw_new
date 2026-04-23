@@ -132,11 +132,126 @@ def _tool_team_create(name: str, task: str, role: str = "coder",
         return f"Error dispatching background worker: {e}"
 
 
+# ── Handoff envelope (P0-A) ─────────────────────────────────────
+# Structure any cross-agent message / reply / handoff carries. Fields
+# in priority order for recipient:
+#   summary     — 1-3 sentence conclusion (ALWAYS rendered)
+#   key_fields  — structured dict: decisions / numbers / names
+#   artifact_refs — paths/ids pointing to large outputs on disk
+#   detail      — optional long-form body (legacy `content`)
+#
+# When a sender only provides `content`, we auto-derive `summary` from
+# its first ~200 chars so downstream rendering still stays compact.
+#
+# Downstream (inbox injection) renders envelope in this order. The
+# agent default is "read summary + key_fields + ref list; call
+# read_file(path) if you need the detail".
+
+_ENVELOPE_SUMMARY_MAX_CHARS = 800
+_ENVELOPE_DETAIL_PREVIEW_CHARS = 400
+
+
+def _build_handoff_envelope(content: str, summary: str,
+                            key_fields, artifact_refs) -> dict:
+    """Normalize envelope fields into a dict ready to stash in inbox
+    metadata. All fields optional; sensible defaults derived from
+    ``content`` when omitted."""
+    content = (content or "").strip()
+    summary = (summary or "").strip()
+    # Auto-derive summary from content if not provided — preserves
+    # back-compat with callers that only pass raw content.
+    if not summary and content:
+        head = content.replace("\n", " ")[:_ENVELOPE_SUMMARY_MAX_CHARS]
+        if len(content) > _ENVELOPE_SUMMARY_MAX_CHARS:
+            head = head.rstrip() + "…"
+        summary = head
+
+    # Normalize key_fields: accept dict or None.
+    if not isinstance(key_fields, dict):
+        key_fields = {}
+    # JSON-safe the values via default=str coercion later when stored.
+
+    # Normalize artifact_refs: accept list/tuple/str.
+    if artifact_refs is None:
+        refs: list[str] = []
+    elif isinstance(artifact_refs, str):
+        refs = [artifact_refs] if artifact_refs.strip() else []
+    else:
+        try:
+            refs = [str(r).strip() for r in artifact_refs if str(r).strip()]
+        except Exception:
+            refs = []
+
+    return {
+        "summary": summary,
+        "key_fields": dict(key_fields),
+        "artifact_refs": refs,
+        "detail_len": len(content),
+    }
+
+
+def _render_envelope_for_wire(content: str, envelope: dict) -> str:
+    """Compact text representation of envelope + detail for legacy
+    message-content field. Used as the `content` passed through
+    hub.route_message and stored on the inbox row so recipients that
+    DON'T read metadata still see the summary up top."""
+    lines: list[str] = []
+    summary = envelope.get("summary") or ""
+    if summary:
+        lines.append(f"📣 Summary: {summary}")
+    kf = envelope.get("key_fields") or {}
+    if kf:
+        try:
+            import json as _json
+            kf_txt = _json.dumps(kf, ensure_ascii=False, default=str)
+        except Exception:
+            kf_txt = str(kf)
+        if len(kf_txt) > 600:
+            kf_txt = kf_txt[:600] + "…"
+        lines.append(f"🔑 Key: {kf_txt}")
+    refs = envelope.get("artifact_refs") or []
+    if refs:
+        lines.append("📎 Artifacts: " + ", ".join(refs[:6])
+                     + (f" (+{len(refs)-6})" if len(refs) > 6 else ""))
+    if content and len(content.strip()) > 0:
+        # Keep a bounded detail preview for recipients that want to see
+        # the raw text without reading the artifact. Full detail still
+        # lives in inbox row's metadata.detail field.
+        detail = content.strip()
+        if len(detail) > _ENVELOPE_DETAIL_PREVIEW_CHARS:
+            detail = (detail[:_ENVELOPE_DETAIL_PREVIEW_CHARS]
+                      + f"…(+{len(content) - _ENVELOPE_DETAIL_PREVIEW_CHARS} chars in detail)")
+        lines.append(f"📄 Detail: {detail}")
+    # If neither summary nor any structured field was given, just use
+    # the raw content (legacy callers).
+    return "\n".join(lines) if lines else content
+
+
 # ── send_message ─────────────────────────────────────────────────────
 
-def _tool_send_message(to_agent: str, content: str,
-                       msg_type: str = "task", **_: Any) -> str:
-    """Send an inter-agent message."""
+def _tool_send_message(to_agent: str, content: str = "",
+                       msg_type: str = "task",
+                       thread_id: str = "",
+                       reply_to: str = "",
+                       priority: str = "normal",
+                       ttl_s: int = 0,
+                       summary: str = "",
+                       key_fields=None,
+                       artifact_refs=None,
+                       **_: Any) -> str:
+    """Send an inter-agent message with an optional structured envelope.
+
+    Envelope-shaped delivery (P0-A) is the preferred path — pass
+    `summary` + `key_fields` + `artifact_refs` instead of dumping a
+    long `content`. The recipient's inbox injection then renders the
+    envelope compactly (typically 200-400 tokens), saving the bulk of
+    the raw detail for on-demand read_file() access.
+
+    Backward compat: callers that still pass only `content` work
+    unchanged — `summary` gets auto-derived from the first 800 chars.
+
+    ``thread_id``/``reply_to``/``priority``/``ttl_s`` stay the same as before.
+    """
     try:
         hub = _get_hub()
         # Resolve agent by name if not an ID.
@@ -153,21 +268,249 @@ def _tool_send_message(to_agent: str, content: str,
                 f"Error: Agent '{to_agent}' not found.\n"
                 f"Available agents: {', '.join(available) or 'none'}"
             )
+
+        # Build envelope — auto-derives summary from content if missing.
+        envelope = _build_handoff_envelope(
+            content=content,
+            summary=summary,
+            key_fields=key_fields,
+            artifact_refs=artifact_refs,
+        )
+        # Wire-safe text form (legacy content). Compact if envelope is
+        # structured; falls back to raw `content` if no structured fields.
+        wire_text = _render_envelope_for_wire(content, envelope)
+
         # Use hub's canonical routing entry point (audited).
         caller_id = _.get("_caller_agent_id", "unknown") if isinstance(_, dict) else "unknown"
         route = getattr(hub, "route_message", None)
         if callable(route):
-            route(caller_id, target.id, content, msg_type=msg_type,
+            route(caller_id, target.id, wire_text, msg_type=msg_type,
                   source="tool_send_message")
         else:
-            hub.send_message(caller_id, target.id, content, msg_type=msg_type)
+            hub.send_message(caller_id, target.id, wire_text, msg_type=msg_type)
+
+        # ── Durable inbox persistence (additive) ──
+        # Never let a persistence error break the primary delivery path.
+        inbox_msg_id = ""
+        try:
+            from ..inbox import get_store as _get_inbox_store
+            _store = _get_inbox_store()
+            inbox_msg_id = _store.send(
+                to_agent=target.id,
+                from_agent=caller_id or "system",
+                content=wire_text,
+                thread_id=thread_id or "",
+                reply_to=reply_to or "",
+                priority=priority or "normal",
+                ttl_s=int(ttl_s or 0),
+                metadata={
+                    "msg_type": msg_type,
+                    "source": "tool_send_message",
+                    # Structured envelope, read by _build_inbox_context
+                    # to render the recipient's injection compactly.
+                    "envelope": envelope,
+                    "detail_full": content if content else "",
+                },
+            )
+        except Exception as _ibx_err:
+            logger.debug("inbox persistence skipped: %s", _ibx_err)
+
+        _tail = f"\n  Inbox id: {inbox_msg_id}" if inbox_msg_id else ""
+        env_tail = ""
+        if envelope.get("key_fields") or envelope.get("artifact_refs"):
+            env_tail = (
+                f"\n  Envelope: summary={len(envelope['summary'])}c "
+                f"keys={len(envelope['key_fields'])} "
+                f"artifacts={len(envelope['artifact_refs'])}"
+            )
         return (
             f"Message sent to {target.name} ({target.id}).\n"
             f"  Type: {msg_type}\n"
-            f"  Content: {content[:_SEND_MESSAGE_PREVIEW_CHARS]}"
+            f"  Preview: {wire_text[:_SEND_MESSAGE_PREVIEW_CHARS]}"
+            f"{env_tail}"
+            f"{_tail}"
         )
     except Exception as e:
         return f"Error sending message: {e}"
+
+
+# ── check_inbox / ack_message / reply_message ─────────────────────────
+
+def _tool_check_inbox(limit: int = 20, include_read: bool = False,
+                      **_: Any) -> str:
+    """Return a compact view of the calling agent's inbox.
+
+    By default only unread (state="new") messages are listed. Pass
+    ``include_read=True`` to also see recently-read-but-not-acked ones.
+    Does NOT modify state.
+    """
+    try:
+        caller_id = _.get("_caller_agent_id", "") if isinstance(_, dict) else ""
+        if not caller_id:
+            return "Error: check_inbox requires a calling agent context."
+
+        from ..inbox import get_store
+        store = get_store()
+        lim = max(1, min(int(limit or 20), 100))
+        msgs = store.fetch_unread(caller_id, limit=lim)
+
+        extra_read: list = []
+        if include_read and len(msgs) < lim:
+            # Pull recent read-but-not-acked by peeking at the raw store.
+            try:
+                with store._lock:  # internal; acceptable for read-only peek
+                    cur = store._conn.execute(
+                        "SELECT id, from_agent, content, priority, "
+                        "created_at, thread_id "
+                        "FROM inbox_messages "
+                        "WHERE to_agent=? AND state='read' "
+                        "ORDER BY created_at DESC LIMIT ?",
+                        (caller_id, lim - len(msgs)),
+                    )
+                    extra_read = list(cur.fetchall())
+            except Exception as _q_err:
+                logger.debug("include_read peek failed: %s", _q_err)
+                extra_read = []
+
+        if not msgs and not extra_read:
+            return "Inbox is empty (no new messages)."
+
+        from datetime import datetime as _dt
+        lines = [f"Inbox for {caller_id}:"]
+        lines.append(f"  unread: {len(msgs)}    "
+                     f"read (shown): {len(extra_read)}")
+        lines.append("")
+        for i, m in enumerate(msgs, 1):
+            ts = _dt.fromtimestamp(m.created_at).strftime("%m-%d %H:%M")
+            preview = (m.content or "").strip().replace("\n", " ")
+            if len(preview) > 200:
+                preview = preview[:200] + "…"
+            lines.append(
+                f"  [NEW {i}] id={m.id}  from={m.from_agent}  "
+                f"prio={m.priority}  at={ts}"
+            )
+            if m.thread_id and m.thread_id != m.id:
+                lines.append(f"         thread={m.thread_id}")
+            lines.append(f"         {preview}")
+        for row in extra_read:
+            ts = _dt.fromtimestamp(row["created_at"]).strftime("%m-%d %H:%M")
+            preview = (row["content"] or "").strip().replace("\n", " ")
+            if len(preview) > 200:
+                preview = preview[:200] + "…"
+            lines.append(
+                f"  [read ] id={row['id']}  from={row['from_agent']}  "
+                f"prio={row['priority']}  at={ts}"
+            )
+            lines.append(f"         {preview}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error reading inbox: {e}"
+
+
+def _tool_ack_message(message_ids: str = "", **_: Any) -> str:
+    """Mark one or more inbox messages as acknowledged (state='acked').
+
+    ``message_ids`` may be a single id or a comma / whitespace separated
+    list. Only messages addressed to the calling agent are affected.
+    Acked messages will not be re-injected at the next chat turn.
+    """
+    try:
+        caller_id = _.get("_caller_agent_id", "") if isinstance(_, dict) else ""
+        if not caller_id:
+            return "Error: ack_message requires a calling agent context."
+        raw = (message_ids or "").strip()
+        if not raw:
+            return "Error: message_ids is required."
+        ids = [p.strip() for p in raw.replace(",", " ").split() if p.strip()]
+        if not ids:
+            return "Error: no valid message ids parsed."
+
+        from ..inbox import get_store
+        n = get_store().mark_acked(ids, caller_id)
+        skipped = len(ids) - n
+        if n == 0:
+            return (f"No messages acked (0/{len(ids)}). IDs may not exist or "
+                    f"not belong to {caller_id}.")
+        tail = f" (skipped: {skipped})" if skipped else ""
+        return f"Acked {n}/{len(ids)} message(s){tail}."
+    except Exception as e:
+        return f"Error acking message(s): {e}"
+
+
+def _tool_reply_message(message_id: str, content: str = "",
+                        priority: str = "normal", ttl_s: int = 0,
+                        summary: str = "",
+                        key_fields=None,
+                        artifact_refs=None,
+                        **_: Any) -> str:
+    """Reply to an inbox message — preserves the thread and reply_to chain.
+
+    Same envelope pattern as send_message (P0-A): pass `summary` +
+    `key_fields` + `artifact_refs` for a token-lean delivery; plain
+    `content` still accepted for back-compat (summary auto-derived).
+    """
+    try:
+        caller_id = _.get("_caller_agent_id", "") if isinstance(_, dict) else ""
+        if not caller_id:
+            return "Error: reply_message requires a calling agent context."
+        if not message_id:
+            return "Error: message_id is required."
+        if not content and not summary:
+            return "Error: provide either content or summary for the reply."
+
+        from ..inbox import get_store
+        store = get_store()
+        orig = store.get_by_id(message_id)
+        if orig is None:
+            return f"Error: message '{message_id}' not found in inbox."
+        if orig.to_agent != caller_id:
+            return (f"Error: cannot reply — message '{message_id}' was "
+                    f"addressed to '{orig.to_agent}', not '{caller_id}'.")
+
+        envelope = _build_handoff_envelope(
+            content=content, summary=summary,
+            key_fields=key_fields, artifact_refs=artifact_refs,
+        )
+        wire_text = _render_envelope_for_wire(content, envelope)
+
+        target = orig.from_agent
+        thread = orig.thread_id or orig.id
+        new_id = store.send(
+            to_agent=target,
+            from_agent=caller_id,
+            content=wire_text,
+            thread_id=thread,
+            reply_to=message_id,
+            priority=priority or "normal",
+            ttl_s=int(ttl_s or 0),
+            metadata={
+                "msg_type": "reply",
+                "source": "tool_reply_message",
+                "in_reply_to": message_id,
+                "envelope": envelope,
+                "detail_full": content if content else "",
+            },
+        )
+
+        # Best-effort: mirror the reply into the legacy hub channel so
+        # live routing / audit still fire (matches send_message's dual path).
+        try:
+            hub = _get_hub()
+            route = getattr(hub, "route_message", None)
+            if callable(route):
+                route(caller_id, target, wire_text, msg_type="reply",
+                      source="tool_reply_message")
+        except Exception as _he:
+            logger.debug("reply hub-mirror skipped: %s", _he)
+
+        return (
+            f"Reply sent to {target} on thread {thread}.\n"
+            f"  In reply to: {message_id}\n"
+            f"  New inbox id: {new_id}\n"
+            f"  Preview: {wire_text[:_SEND_MESSAGE_PREVIEW_CHARS]}"
+        )
+    except Exception as e:
+        return f"Error replying: {e}"
 
 
 # ── task_update ──────────────────────────────────────────────────────
@@ -381,3 +724,4 @@ def _tool_task_update(action: str, task_id: str = "", title: str = "",
         return f"Error: Unknown action '{action}'. Use: create | update | complete | list"
     except Exception as e:
         return f"Error managing tasks: {e}"
+

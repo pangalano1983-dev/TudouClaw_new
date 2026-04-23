@@ -18,6 +18,7 @@ from typing import Tuple
 
 from .base import Rule, ToolCheckContext, Verdict
 from .global_denylist import rule_global_denylist
+from .command_patterns import rule_command_patterns
 from .red_line import rule_red_line
 from .low_risk_allow import rule_low_risk_allow
 from .granted_skill import rule_covered_by_granted_skill
@@ -44,6 +45,7 @@ from .high_default import rule_high_default
 #  10. high_default         — terminal; always returns a verdict
 RULES: list[Rule] = [
     rule_global_denylist,
+    rule_command_patterns,       # 通用门禁 — 按命令内容 deny / approve
     rule_red_line,
     rule_low_risk_allow,
     rule_covered_by_granted_skill,

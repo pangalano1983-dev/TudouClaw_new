@@ -26,7 +26,7 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar, Optional
 
 # ── Re-export extracted types for backward compatibility ──
 from .agent_types import (                                        # noqa: F401
@@ -180,6 +180,101 @@ def _compress_old_tool_results(messages: list[dict],
             "older tool result, see recent turns for full data]"
         )
         result.append({**m, "content": trimmed})
+    return result
+
+
+# ── Compress old write_file / edit_file tool_call args ──
+# When the LLM calls write_file({path, content="<5000 chars of code>"})
+# the FULL content stays on the assistant message forever. On turn 2+
+# we re-send it. Once the write succeeded and we have the file on disk,
+# the payload is pure waste — the LLM can always re-read it via read_file
+# if needed. This trimmer replaces old content args with a one-line
+# summary pointing at the path.
+_KEEP_LAST_WRITE_CALLS = 2
+_OLD_WRITE_CALL_HEAD_CHARS = 200
+_WRITE_LIKE_TOOLS = frozenset({"write_file", "edit_file", "create_file"})
+
+
+def _compress_old_write_tool_calls(messages: list[dict],
+                                    keep_last: int = _KEEP_LAST_WRITE_CALLS,
+                                    max_body_chars: int = _OLD_WRITE_CALL_HEAD_CHARS
+                                    ) -> list[dict]:
+    """Trim large `content` / `new_string` args on OLD write_file-like
+    tool_calls sitting on assistant messages.
+
+    Only touches messages OLDER than ``keep_last`` write-like calls back —
+    the 2 most recent stay verbatim so the current iteration of the loop
+    can still see what it just tried to write.
+
+    Returns a NEW list; never mutates input. Large-arg JSON strings are
+    replaced with a single-line summary that preserves path + a head
+    preview so the model still remembers it happened.
+    """
+    import json as _json
+
+    # Pass 1: index assistant messages that carry at least one write call.
+    write_msg_idx: list[int] = []
+    for i, m in enumerate(messages):
+        if m.get("role") != "assistant":
+            continue
+        for tc in (m.get("tool_calls") or []):
+            fn = (tc.get("function") or {}).get("name") or ""
+            if fn in _WRITE_LIKE_TOOLS:
+                write_msg_idx.append(i)
+                break
+    if len(write_msg_idx) <= keep_last:
+        return messages
+    to_compress = set(write_msg_idx[:-keep_last])
+
+    def _shrink_arg(val, field_name: str) -> str:
+        """Return a short placeholder for a large string arg value."""
+        s = val if isinstance(val, str) else _json.dumps(val, ensure_ascii=False, default=str)
+        if len(s) <= max_body_chars:
+            return s
+        head = s[:max_body_chars].replace("\n", "⏎")
+        return (f"[elided: {len(s)} chars of {field_name} — written to disk; "
+                f"head preview: {head}…]")
+
+    result: list[dict] = []
+    for i, m in enumerate(messages):
+        if i not in to_compress:
+            result.append(m)
+            continue
+        calls = m.get("tool_calls") or []
+        new_calls = []
+        changed = False
+        for tc in calls:
+            fn = (tc.get("function") or {}).get("name") or ""
+            if fn not in _WRITE_LIKE_TOOLS:
+                new_calls.append(tc)
+                continue
+            fn_obj = dict(tc.get("function") or {})
+            raw_args = fn_obj.get("arguments")
+            if isinstance(raw_args, str):
+                try:
+                    parsed = _json.loads(raw_args)
+                except Exception:
+                    new_calls.append(tc); continue
+            elif isinstance(raw_args, dict):
+                parsed = dict(raw_args)
+            else:
+                new_calls.append(tc); continue
+            modified = False
+            for field in ("content", "new_string"):
+                v = parsed.get(field)
+                if isinstance(v, str) and len(v) > max_body_chars:
+                    parsed[field] = _shrink_arg(v, field)
+                    modified = True
+            if modified:
+                fn_obj["arguments"] = _json.dumps(parsed, ensure_ascii=False)
+                new_calls.append({**tc, "function": fn_obj})
+                changed = True
+            else:
+                new_calls.append(tc)
+        if changed:
+            result.append({**m, "tool_calls": new_calls})
+        else:
+            result.append(m)
     return result
 
 
@@ -510,10 +605,24 @@ class ExecutionStep:
     Used to track real-time task decomposition — the agent breaks down
     a user request into steps, and marks them as it progresses.
     Similar to Claude's Todo widget.
+
+    `acceptance` (P1/L2): a short natural-language criterion that MUST
+    be satisfied before the step can be marked completed. Example:
+    "生成 report.pptx ≥ 5 slides，落在 $AGENT_WORKSPACE"。Injected
+    into system prompt so the LLM self-checks; backward compatible
+    (missing acceptance = legacy step, no guard).
     """
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
     title: str = ""               # short description: "Read existing code"
     detail: str = ""              # longer description when needed
+    acceptance: str = ""          # L2: what "done" looks like — plain text
+    # Block 2 Review loop — when the LLM calls complete_step, if this
+    # is set the step is handed to the verifier module. A failing
+    # verifier rolls the step status back to FAILED with the verifier's
+    # reason as result_summary. Shape: {"kind": "...", "config": {...},
+    # "required": true, "timeout_s": 300}. None / empty = no auto check
+    # (LLM's own result_summary + acceptance heuristic is the only gate).
+    verify: dict = field(default_factory=dict)
     status: StepStatus = StepStatus.PENDING
     order: int = 0                # display order
     parent_step_id: str = ""      # for nested sub-steps
@@ -521,11 +630,20 @@ class ExecutionStep:
     started_at: float = 0.0
     completed_at: float = 0.0
     result_summary: str = ""      # brief result after completion
+    # LLM routing hint — which category best fits this step. Filled by the
+    # primary LLM when calling plan_update(create_plan) with scores table
+    # injected in its system prompt. Read by the per-iteration LLM resolver
+    # as a category override (beats keyword detection). "" = fall back.
+    # Valid: tool-heavy | multimodal | reasoning | analysis | default
+    llm_purpose: str = ""
+    llm_rationale: str = ""
 
     def to_dict(self) -> dict:
         return {
             "id": self.id, "title": self.title,
             "detail": self.detail,
+            "acceptance": self.acceptance,
+            "verify": dict(self.verify) if self.verify else {},
             "status": self.status.value,
             "order": self.order,
             "parent_step_id": self.parent_step_id,
@@ -533,6 +651,8 @@ class ExecutionStep:
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "result_summary": self.result_summary,
+            "llm_purpose": self.llm_purpose,
+            "llm_rationale": self.llm_rationale,
         }
 
     @staticmethod
@@ -541,6 +661,8 @@ class ExecutionStep:
             id=d.get("id", uuid.uuid4().hex[:8]),
             title=d.get("title", ""),
             detail=d.get("detail", ""),
+            acceptance=d.get("acceptance", ""),
+            verify=dict(d.get("verify") or {}),
             status=StepStatus(d.get("status", "pending")),
             order=d.get("order", 0),
             parent_step_id=d.get("parent_step_id", ""),
@@ -548,6 +670,8 @@ class ExecutionStep:
             started_at=d.get("started_at", 0),
             completed_at=d.get("completed_at", 0),
             result_summary=d.get("result_summary", ""),
+            llm_purpose=str(d.get("llm_purpose") or ""),
+            llm_rationale=str(d.get("llm_rationale") or ""),
         )
 
 
@@ -566,9 +690,13 @@ class ExecutionPlan:
     status: str = "active"        # active | completed | failed
 
     def add_step(self, title: str, detail: str = "",
-                 parent_step_id: str = "") -> ExecutionStep:
+                 parent_step_id: str = "",
+                 acceptance: str = "",
+                 verify: Optional[dict] = None) -> ExecutionStep:
         step = ExecutionStep(
             title=title, detail=detail,
+            acceptance=acceptance,
+            verify=dict(verify) if verify else {},
             order=len(self.steps),
             parent_step_id=parent_step_id,
         )
@@ -750,6 +878,20 @@ class AgentProfile:
     # Tools that skip approval for this agent (e.g. coder can auto-approve write_file)
     temperature: float = 0.7
     # LLM temperature for this agent
+    # P1-C: per-agent output token budget. 0 = no explicit budget (use
+    # provider default). When > 0, the chat loop injects a compact
+    # system hint "⚠️ 本轮输出 ≤ N tokens" on the LAST message before
+    # the LLM call, nudging the model toward concise output. This is
+    # advisory — LLMs usually respect explicit budget hints but some
+    # providers also expose a hard max_tokens parameter we can wire
+    # through later.
+    max_output_tokens: int = 0
+    # P1-C: agent tier. Drives default budget shape:
+    #   "thinker"    — high input, medium output (plan / analyze)
+    #   "actor"      — low input, short output (execute tools)
+    #   "summarizer" — medium input, very short output (compress)
+    #   ""           — no tier-based defaults
+    agent_tier: str = ""
     custom_instructions: str = ""
     # Extra instructions appended to system prompt
     exec_policy: str = "ask"
@@ -812,6 +954,8 @@ class AgentProfile:
             "denied_tools": self.denied_tools,
             "auto_approve_tools": self.auto_approve_tools,
             "temperature": self.temperature,
+            "max_output_tokens": self.max_output_tokens,
+            "agent_tier": self.agent_tier,
             "custom_instructions": self.custom_instructions,
             "exec_policy": self.exec_policy,
             "exec_blacklist": self.exec_blacklist,
@@ -857,6 +1001,8 @@ class AgentProfile:
             denied_tools=d.get("denied_tools", []),
             auto_approve_tools=d.get("auto_approve_tools", []),
             temperature=d.get("temperature", 0.7),
+            max_output_tokens=int(d.get("max_output_tokens", 0) or 0),
+            agent_tier=d.get("agent_tier", "") or "",
             custom_instructions=d.get("custom_instructions", ""),
             exec_policy=d.get("exec_policy", "ask"),
             exec_blacklist=d.get("exec_blacklist", []),
@@ -893,6 +1039,60 @@ class AgentEvent:
 
 
 # ---------------------------------------------------------------------------
+# Retrieval Protocol — auto-injected into system prompt for RAG-bound agents
+# ---------------------------------------------------------------------------
+_RETRIEVAL_PROTOCOL_TEXT = (
+    "【检索协议 — 强制执行】\n"
+    "你绑定了专业领域知识库 (RAG)。对于任何涉及知识库内容的问题"
+    "（事实、数量、文档内容、概念、术语、验收用例、架构、产品规格等），"
+    "必须遵守：\n"
+    "1. 第一步 ALWAYS 调用 `knowledge_lookup`。禁止用 bash / read_file "
+    "/ search_files / grep 去工作区找知识库内容——工作区里没有 KB 文档。\n"
+    "2. 根据问题类型选模式：\n"
+    "   • 普通事实/解释题 → `knowledge_lookup(query=\"...\", mode=\"search\")`"
+    "（默认，返回 top-8 chunk 含 content）。\n"
+    "   • 聚合/计数题（\"有多少\"、\"总数\"、\"多少个\"）→ "
+    "`knowledge_lookup(query=\"...关键词...\", mode=\"count\")`。"
+    "这是对全库的精确扫描，不是 top-k 抽样——直接复用返回的数字，不要"
+    "自己估算。\n"
+    "   • 目录/清单题（\"列出所有\"、\"都有哪些\"、\"文档目录\"）→ "
+    "`knowledge_lookup(query=\"...\", mode=\"list\")`。\n"
+    "3. mode=search 返回 `{entries:[{content, source_file, heading_path, "
+    "chunk_index, ...}]}`，直接从 `entries[*].content` 推理。禁止说"
+    " \"只返回了索引/未提供内容\"——内容就在 entries 里。\n"
+    "4. 召回不足时换 2-3 个关键词再试（中英同义词、换 query 角度）。"
+    "单次 search 最多 8 块。\n"
+    "5. 每个事实必须引用来源：`[source_file §heading_path]` 或 "
+    "`[title #chunk_index]`。没有引用的回答不合格。\n"
+    "6. 2-3 次检索后仍无结果 → 说「知识库中未找到直接答案」并建议用户"
+    "补充什么材料。禁止编造、禁止用 bash 兜底。"
+)
+
+
+def _build_retrieval_protocol(profile: "AgentProfile") -> str:
+    """Return the Retrieval Protocol block if this agent has a bound KB,
+    else empty string.
+
+    Triggers on either:
+      * rag_collection_ids non-empty (user bound a domain KB), OR
+      * agent_class == "advisor" with any non-empty rag_mode
+
+    Kept in code (not agents.json) so the hub's periodic save of agent
+    state cannot clobber it.
+    """
+    if profile is None:
+        return ""
+    mode = getattr(profile, "rag_mode", "") or ""
+    if mode in ("", "none"):
+        return ""
+    has_kb = bool(getattr(profile, "rag_collection_ids", None))
+    is_advisor = getattr(profile, "agent_class", "") == "advisor"
+    if not (has_kb or is_advisor):
+        return ""
+    return _RETRIEVAL_PROTOCOL_TEXT
+
+
+# ---------------------------------------------------------------------------
 # Agent
 # ---------------------------------------------------------------------------
 
@@ -926,18 +1126,21 @@ class Agent:
     # 没指定就走默认的 provider/model（或 auto_route 的启发式）。
     extra_llms: list[dict] = field(default_factory=list)
 
-    # ── 方案乙(b): 启发式自动路由 ──
-    # 按输入类型自动挑 extra_llms 里的某个 label。结构：
+    # ── Score-based auto-route (supersedes the old label-map) ──
+    # 当前设计：每个 iteration 按消息/任务信号判定 category（tool-heavy /
+    # multimodal / reasoning / analysis / complex / default），再按打分
+    # 挑 extra_llms + primary 里最合适的那个。打分来源：
+    #   1. slot 里自己写的 `scores: {category: float}`（用户实测，最高优先级）
+    #   2. app/data/model_scores.json（公共 benchmark 归一，0.0-10.0）
+    #   3. 都没覆盖 → 5.0（中性）
+    # 结构：
     #   {
-    #     "enabled": true,
-    #     "default":    "",              # 日常交流，空=用 agent.provider/model
-    #     "complex":    "big_model",     # 长/复杂任务 → big_model slot
-    #     "multimodal": "vision_model",  # 图片/音频输入 → vision_model slot
-    #     "coding":     "code_model",  # 工具调用/代码生成 → code_model slot
-    #     "complex_threshold_chars": 2000,  # prompt 超过多少字算复杂
+    #     "enabled": true,              # 总开关；false = 始终用 primary
+    #     "complex_threshold_chars": 2000,  # prompt 超过多少字算 complex
     #   }
-    # 所有字段都是可选的。没有 extra_llms 或没命中规则时回退到默认 LLM。
+    # 没有 extra_llms 或所有候选分数 <= primary → 用 primary。
     # task 显式指定 llm_label 的优先级仍然高于 auto_route。
+    # 每个路由决策会在 logger.info 里打印完整分数明细，方便排查。
     auto_route: dict = field(default_factory=dict)
     working_dir: str = ""
     system_prompt: str = ""
@@ -960,6 +1163,12 @@ class Agent:
     priority_level: int = 3  # 1=CXO (highest), 2=PM, 3=Team Member (default)
     role_title: str = ""  # e.g. "CXO", "PM", "Developer", etc.
     department: str = ""  # Organizational unit: 研发/产品/运营/市场/... empty = 未分配
+    # Ownership: user_id of the admin/user who created this agent.
+    # Empty string = legacy/unowned (pre-migration); treated as
+    # superAdmin-only to be safe. Regular admins can only manage
+    # agents whose owner_id == their user_id OR whose id is in their
+    # AdminUser.agent_ids delegation list. See app/permissions.py.
+    owner_id: str = ""
     authorized_workspaces: list[str] = field(default_factory=list)  # List of agent IDs whose workspaces this agent can access
     soul_md: str = ""  # SOUL.md personality/persona in markdown
     robot_avatar: str = ""  # Robot avatar ID e.g. "robot_ceo"
@@ -991,8 +1200,6 @@ class Agent:
     _memory_manager: Any = field(default=None, repr=False)
     _memory_consolidator: Any = field(default=None, repr=False)
     _memory_turn_counter: int = 0  # 累计轮次，用于 L1→L2 压缩判断
-    # --- Active Thinking engine ---
-    active_thinking: Any = field(default=None, repr=False)
     # --- Self-Improvement engine (experience library) ---
     self_improvement: Any = field(default=None, repr=False)
     # --- Growth Tracker (养成量化) ---
@@ -1074,6 +1281,7 @@ class Agent:
             "priority_level": self.priority_level,
             "role_title": self.role_title,
             "department": self.department,
+            "owner_id": self.owner_id,
             "authorized_workspaces": self.authorized_workspaces,
             "soul_md": self.soul_md,
             "robot_avatar": self.robot_avatar,
@@ -1102,8 +1310,6 @@ class Agent:
             "max_budget_tokens": self.max_budget_tokens,
             # --- Enhancement module persistence ---
             "enhancer": self.enhancer.to_dict() if self.enhancer else None,
-            # --- Active Thinking persistence ---
-            "active_thinking": self.active_thinking.to_dict() if self.active_thinking else None,
             # --- Self-Improvement persistence ---
             "self_improvement": self.self_improvement.to_dict() if self.self_improvement else None,
             # --- Skill system persistence ---
@@ -1157,6 +1363,7 @@ class Agent:
             priority_level=d.get("priority_level", 3),
             role_title=d.get("role_title", ""),
             department=d.get("department", "") or "",
+            owner_id=d.get("owner_id", "") or "",
             authorized_workspaces=d.get("authorized_workspaces", []),
             soul_md=d.get("soul_md", ""),
             robot_avatar=d.get("robot_avatar", ""),
@@ -1192,14 +1399,9 @@ class Agent:
         # Restore enhancement module
         if d.get("enhancer"):
             agent.enhancer = AgentEnhancer.from_dict(d["enhancer"])
-        # Restore active thinking engine
-        if d.get("active_thinking"):
-            try:
-                from .active_thinking import ActiveThinkingEngine
-                agent.active_thinking = ActiveThinkingEngine.from_dict(
-                    d["active_thinking"], agent=agent)
-            except Exception as e:
-                logger.debug("Failed to restore active_thinking: %s", e)
+        # Note: `active_thinking` field removed — Think button is now an
+        # on-demand self-summary action, not a persistent engine. Any
+        # legacy active_thinking payload in the JSON is silently ignored.
         # Restore self-improvement engine
         if d.get("self_improvement"):
             try:
@@ -1251,6 +1453,7 @@ class Agent:
             "priority_level": self.priority_level,
             "role_title": self.role_title,
             "department": self.department,
+            "owner_id": self.owner_id,
             "robot_avatar": self.robot_avatar,
             "created_at": self.created_at,
             "message_count": len(self.messages),
@@ -1285,8 +1488,6 @@ class Agent:
             },
             # --- Enhancement module ---
             "enhancement": self.enhancer.get_stats() if self.enhancer else None,
-            # --- Active Thinking ---
-            "active_thinking": self.active_thinking.get_stats() if self.active_thinking else None,
             # --- Self-Improvement ---
             "self_improvement": self.self_improvement.get_stats() if self.self_improvement else None,
             # --- Execution plans (current + recent) ---
@@ -1805,6 +2006,16 @@ class Agent:
                 # hiccups are noise, not bugs we'd page on).
                 logger.debug("conversation_observer forward failed: %s", e)
 
+            # Mirror to the progress bus so a single SSE subscriber on
+            # "agent:<id>" sees both these classic events AND the new
+            # plan/step progress frames (coming in Block 1/2). Also
+            # best-effort — never let a bus hiccup kill chat.
+            try:
+                from .progress_bus import mirror_agent_event
+                mirror_agent_event(agent_id=self.id, kind=kind, data=data)
+            except Exception as _mb:
+                logger.debug("progress_bus mirror failed: %s", _mb)
+
     # ---- system prompt ----
 
     def _get_git_context(self) -> str:
@@ -2289,8 +2500,7 @@ class Agent:
                            ("Skills.md", "skills"),
                            ("MCP.md", "mcp_servers"),
                            ("Tasks.md", "tasks"),
-                           ("Scheduled.md", "scheduled_tasks"),
-                           ("ActiveThinking.md", "active_thinking")):
+                           ("Scheduled.md", "scheduled_tasks")):
             fp = ws / fname
             if not fp.exists():
                 continue
@@ -2301,35 +2511,65 @@ class Agent:
             blocks.append(f'<{tag} file="workspace/{fname}">\n{content}\n</{tag}>')
         if not blocks:
             return ""
+        # Opt 3 (Nov 2026): shrunk the workspace header from ~1400 chars
+        # to ~400 chars. The info was largely boilerplate that duplicated
+        # what's already visible via the XML blocks below OR obvious from
+        # tool descriptions. Kept only the decisions the LLM genuinely
+        # needs to repeatedly remember (output location / scheduled-task
+        # 3-step / MCP discovery pattern / config-over-history rule).
         header = (
             f"\n[Agent workspace: {ws}]\n"
-            "工作区规范 / WORKSPACE CONVENTIONS:\n"
-            "- workspace/Project.md — 长期目标、约束、关键决策（稳定，更新谨慎）\n"
-            "- workspace/Skills.md — 当前加载的 skill presets（自动生成，勿手改）\n"
-            "- workspace/MCP.md — 当前绑定的 MCP servers（自动生成，勿手改）\n"
-            "- workspace/Tasks.md — 一次性任务列表\n"
-            "- workspace/Scheduled.md — 周期性定时任务\n"
-            "- workspace/ActiveThinking.md — 主动思考记录（自动生成）\n"
-            "- ../session/ ../memory/ ../logs/ — 会话、记忆、日志目录\n\n"
-            "重要 / IMPORTANT:\n"
-            "- 生成的报告、文档、输出文件 MUST 放在 workspace/ 目录下（或其子目录），"
-            "不要放到 agent home 或节点根目录下。\n"
-            "- 用户说\"每天/每周/每月X点做Y\"时，你 MUST:\n"
-            "  1) 先**立即执行一次**该任务（搜索、整理、发邮件等），让用户马上看到结果；\n"
-            "  2) 然后调用 task_update (action=create, recurrence=daily|weekly|monthly, "
-            "recurrence_spec=HH:MM) 创建定时任务，后续由调度器自动触发；\n"
-            "  3) 用 edit_file/write_file 把新条目追加到 "
-            "workspace/Scheduled.md 的 ## Active Schedules 段落之下。\n"
-            "  除非用户明确说\"从明天开始\"或\"不用现在执行\"，否则必须先执行再建定时。\n"
-            "- 一次性任务写进 workspace/Tasks.md 的 ## Open。完成后移到 ## Done。\n"
-            "- 不要回答\"我做不到定时任务\"——调度器会在 next_run_at 自动触发。\n"
-            "- 需要发邮件/发消息/调外部服务时，先 mcp_call(list_mcps=true) 查看绑定的 MCP，"
-            "再 mcp_call(mcp_id, tool, arguments) 调用。\n"
-            "\n⚠️ 配置冲突覆盖规则 / CONFIG OVERRIDE RULE:\n"
-            "以下工作区文件反映的是**当前最新的实时配置**，每次对话都会重新生成。"
-            "如果对话历史中有旧的信息（例如之前说过\"没有 MCP\"或\"工具不可用\"），"
-            "但工作区文件显示已经有了，**以工作区文件为准**，忽略历史中的过时描述。"
-            "直接使用最新配置执行任务，不要再说\"不可用\"。\n")
+            "约定：产出文件放 workspace/；以下 <project>/<skills>/<mcp_servers>/<tasks>/... "
+            "XML 块反映**当前配置**，与对话历史冲突时以它们为准。\n"
+            "- 定时任务：用户说「每天/每周X点做Y」→ 1) 立即执行一次 "
+            "2) task_update(recurrence=daily|weekly, recurrence_spec=HH:MM) "
+            "3) 追加到 Scheduled.md。明确说「从明天开始」除外。\n"
+            "- 外部服务（邮件/IM/第三方 API）**只能**用 mcp_call：\n"
+            "    · 查 MCP：mcp_call(list_mcps=true)\n"
+            "    · 执行：mcp_call(mcp_id, tool, arguments)\n"
+            "    · 禁止 bash echo JSON-RPC / 禁止假设存在本地 socket / 禁止用 get_skill_guide 查 MCP。\n"
+            "- **外部交付前硬性确认**：以下操作**禁止**先斩后奏，执行前必须输出一行"
+            "「准备 <操作> <对象摘要>，请确认」然后**停下**等用户回复 OK / 确认 / yes：\n"
+            "    · 发邮件 / 发 IM 到外部收件人（包括 mcp_call tool=send_email/send_message 等）\n"
+            "    · 删除任何文件\n"
+            "    · git push / 提交 PR / 发布到任何外部系统\n"
+            "    · 修改 agent workspace 之外的任何文件\n"
+            "  不接受「我已经 <操作> 了」这种事后告知。只要用户原始消息没含"
+            "「直接做 / 别确认 / 已授权」之类明确授权词，就必须先确认。\n"
+            "- **卡壳自省**：同一 tool 或同一操作连续失败 3 次后，**停下** —— 不要再试第 4 次，"
+            "而是向用户说明：(1) 你试图做什么 (2) 最近的错误 (3) 你需要什么支持。不要无限 retry / cp 绕路。\n"
+            "- **多步任务开始前先列计划**：用户请求明显需要 3+ 步时，**第一步**必须调 "
+            "plan_update(action='create_plan', task_summary='...', steps=[{title, acceptance, llm_purpose}, ...])。"
+            "每步必须带 `acceptance` —— 具体的交付物/状态，不是 '完成xxx' 这种空话。"
+            "**好示例**：acceptance='report.pptx 生成且 ≥5 页，用 python-pptx 打开 OK'；"
+            "**坏示例**：acceptance='完成报告'。每完成一步调 "
+            "plan_update(action='complete_step', step_id=..., result_summary='<具体验证 acceptance 是否满足>')。"
+            "这个 checklist 会在前端 TODOs 面板实时显示给用户，也是你自己的进度记忆。\n"
+            "  · 若已启用 auto_route（系统下方会注入 LLM 评分表），每个 step 还要带 "
+            "`llm_purpose`（tool-heavy / multimodal / reasoning / analysis / default 五选一），"
+            "系统会据此把该步派给最合适的 LLM。\n"
+            "- **禁止重复叙述计划**：每一轮 iteration 必须做下面之一，**不许再次列出同一段计划文字**：\n"
+            "    (a) 调一个具体 tool（web_search / read_file / bash / mcp_call / plan_update 等）；\n"
+            "    (b) 基于上一轮 tool_result 输出具体结论或下一步（例 '搜到 X，接下来查 Y'）；\n"
+            "    (c) 调 plan_update 真正登记/推进步骤。\n"
+            "  Markdown checkbox 的 '计划' 文字不是 tool_call；只写文字不调 tool 会被判重复输出并打断。\n"
+        )
+        # Auto-route scores hint (Phase 1-B): inject per-category scores so
+        # the LLM can pick `llm_purpose` on each step informed by actual
+        # capability numbers instead of guessing.
+        try:
+            ar = self.auto_route or {}
+            if ar.get("enabled") and self.extra_llms:
+                from . import llm_router as _router
+                _scores_hint = _router.build_scores_hint_for_agent(
+                    primary_provider=self.provider or "",
+                    primary_model=self.model or "",
+                    extra_llms=self.extra_llms,
+                )
+                if _scores_hint:
+                    header = header + "\n" + _scores_hint
+        except Exception as _sh_err:
+            logger.debug("scores hint injection skipped: %s", _sh_err)
         return header + "\n" + "\n".join(blocks)
 
     # ------------------------------------------------------------------
@@ -2470,47 +2710,29 @@ class Agent:
         if self.system_prompt and len(self.system_prompt) > 200:
             parts = [self.system_prompt]
             parts.append("")
+            # NOTE (Opt 3 — Nov 2026): removed ~700 chars of tool-use prose
+            # and the "记忆/知识三件套" explainer that duplicated info
+            # already present in the OpenAI function schemas (sent as a
+            # separate `tools` parameter). The tool descriptions carry
+            # when-to-use / when-NOT-to-use / output / gotcha inline.
+            # Keeping only what the schemas DON'T cover:
+            #   1. Approval-UX hint (not in schemas)
+            #   2. 3-件套 分流一行 (shorthand routing guidance)
             parts.append(
-                "你可以使用以下工具：读写文件、运行 shell 命令、搜索代码、网络搜索、网页抓取。"
+                "⚠️ 某些工具调用（bash / 敏感路径写入）可能需要人工审批；被拒时请告知用户并给替代方案。"
             )
             parts.append(
-                "多智能体协作工具：team_create (创建子Agent并行执行任务), "
-                "send_message (向其他Agent发送消息), task_update (更新共享任务列表)。"
-            )
-            parts.append(
-                "执行计划工具：plan_update — 在开始执行任务时，务必先使用 plan_update(action='create_plan') "
-                "创建一个执行计划，将任务分解为具体步骤。然后在每完成一个步骤时调用 "
-                "plan_update(action='complete_step') 标记完成。这样用户可以实时看到你的进度。"
-            )
-            parts.append("用户让你操作文件或运行命令时，务必使用工具。")
-            parts.append(
-                "当任务可以分解为多个独立子任务时，使用 team_create 创建子Agent并行执行，"
-                "这样3个子任务可以在~1分钟内完成，而非串行的3分钟。"
-            )
-            parts.append("")
-            parts.append(
-                "重要提示：某些工具调用（如修改系统的 bash 命令、写入敏感路径）"
-                "可能需要人工审批。如果工具调用被拒绝，请告知用户并建议替代方案。"
-            )
-            parts.append("")
-            parts.append(
-                "【记忆/知识三件套 — 请严格分流，不要混用】\n"
-                "1) skill（技能包）：可安装的能力包，由「技能库」UI 统一管理，"
-                "位于 ~/.tudou_claw/skills/。agent 不要用工具去保存/创建 skill，"
-                "也不要把复盘/经验内容写成 SKILL.md。\n"
-                "2) experience（经验条目）：复盘(retrospective)或主动学习(active_learning) "
-                "产出的 scene→核心知识→行动规则/禁忌规则 结构化经验，使用 save_experience "
-                "工具写入你角色的经验库，之后会自动注入到同角色 agent 的系统提示里。\n"
-                "3) knowledge（全局知识 wiki）：跨角色共享的参考资料（设计规范、技术栈、"
-                "网站清单等），按需使用 knowledge_lookup 工具查询，不要复制其内容去创建 "
-                "experience 或 skill。\n"
-                "简单判断：想存『我下次遇到 X 场景应该怎么做』→ save_experience；"
-                "想查『官方规范/已沉淀资料』→ knowledge_lookup；"
-                "想加『可复用能力包』→ 让用户去技能库 UI 安装，不要自己建。"
+                "💾 记忆分流：存场景经验→save_experience；查沉淀资料→knowledge_lookup；"
+                "装能力包→让用户去技能库 UI 安装（不要自建 skill 或写 SKILL.md）。"
             )
             if p.custom_instructions:
                 parts.append("")
                 parts.append(p.custom_instructions)
+            # Auto-inject Retrieval Protocol for RAG-bound advisors.
+            _rp = _build_retrieval_protocol(p)
+            if _rp:
+                parts.append("")
+                parts.append(_rp)
             if p.language and p.language != "auto":
                 lang_map = {"zh-CN": "中文", "en": "English",
                             "ja": "日本語", "ko": "한국어", "es": "Español",
@@ -2588,6 +2810,10 @@ class Agent:
             if p.custom_instructions:
                 parts.append("")
                 parts.append(p.custom_instructions)
+            _rp = _build_retrieval_protocol(p)
+            if _rp:
+                parts.append("")
+                parts.append(_rp)
 
         # File display contract — keeps the agent from writing broken
         # markdown image syntax for binary files, or "drag the file into
@@ -2916,6 +3142,21 @@ class Agent:
             return True
 
         # Priority order: most important context first
+
+        # 0.0 Plan state injection (P0/L1) — authoritative "where am I"
+        # snapshot so the LLM doesn't have to reconstruct its own
+        # execution state from scattered tool_result history. See
+        # agent.format_plan_state_for_llm() for format. Kept first so
+        # budget truncation can't drop it.
+        try:
+            plan_ctx = self.format_plan_state_for_llm()
+            if plan_ctx:
+                _try_add(plan_ctx)
+        except Exception as _pe:
+            try:
+                logger.debug("plan state injection skipped: %s", _pe)
+            except Exception:
+                pass
 
         # 1. Shared Knowledge Wiki (lightweight title list)
         try:
@@ -3424,6 +3665,149 @@ class Agent:
 
         return ctx
 
+    def _build_inbox_context(self, limit: int = 10):
+        """Pull unread inbox messages for this agent and format as
+        LLM system context.
+
+        Returns ``(context_str_or_None, msg_ids_to_mark_read)``. Caller
+        is responsible for calling ``mark_read`` AFTER the context has
+        been committed to the LLM turn — that way a crash between build
+        and commit doesn't silently drop the messages.
+        """
+        try:
+            from .inbox import get_store
+            store = get_store()
+        except Exception as e:
+            logger.debug("inbox context skipped (store unavailable): %s", e)
+            return None, []
+
+        try:
+            msgs = store.fetch_unread(self.id, limit=max(1, int(limit)))
+        except Exception as e:
+            logger.debug("inbox context skipped (fetch failed): %s", e)
+            return None, []
+
+        if not msgs:
+            return None, []
+
+        from datetime import datetime as _dt
+        parts = [
+            "<inbox>",
+            f"你有 {len(msgs)} 条未读消息（按优先级+时间排序）。"
+            f"其他 agent 或用户发的。默认只读 summary+key+artifacts；"
+            f"需要看原文时用 read_file(artifact) 或主动查：",
+            "",
+        ]
+        for i, m in enumerate(msgs, 1):
+            ts = ""
+            try:
+                ts = _dt.fromtimestamp(m.created_at).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                pass
+            hdr = f"[{i}] from={m.from_agent} prio={m.priority} at={ts} id={m.id}"
+            if m.thread_id and m.thread_id != m.id:
+                hdr += f" thread={m.thread_id}"
+            if m.reply_to:
+                hdr += f" reply_to={m.reply_to}"
+            parts.append(hdr)
+
+            # P0-A: prefer envelope rendering over raw content. This is
+            # the single biggest token saver on inbox injection —
+            # rendered compact, always ≤ ~500 tokens regardless of how
+            # much detail the sender stuffed into the inbox row.
+            env = (m.metadata or {}).get("envelope") if m.metadata else None
+            if env and isinstance(env, dict):
+                summary = (env.get("summary") or "").strip()
+                if summary:
+                    if len(summary) > 600:
+                        summary = summary[:600] + "…"
+                    parts.append(f"📣 {summary}")
+                kf = env.get("key_fields") or {}
+                if kf:
+                    try:
+                        import json as _json
+                        kf_txt = _json.dumps(kf, ensure_ascii=False,
+                                             default=str)
+                    except Exception:
+                        kf_txt = str(kf)
+                    if len(kf_txt) > 400:
+                        kf_txt = kf_txt[:400] + "…"
+                    parts.append(f"🔑 {kf_txt}")
+                refs = env.get("artifact_refs") or []
+                if refs:
+                    parts.append(
+                        "📎 " + ", ".join(refs[:5])
+                        + (f" (+{len(refs)-5})" if len(refs) > 5 else "")
+                        + "  → 需要内容时用 read_file(路径)"
+                    )
+                # If only summary+keys and no detail hint, skip the body
+                # entirely. Detail lives in metadata.detail_full on
+                # the inbox row for on-demand recall.
+                detail_len = int(env.get("detail_len") or 0)
+                if detail_len > 0:
+                    parts.append(
+                        f"  (详情 {detail_len} chars 保留在 inbox 元数据里，"
+                        f"默认不展开以省 token；需要调 inbox 工具看原文)"
+                    )
+            else:
+                # Legacy / no envelope: render raw content (bounded).
+                body = (m.content or "").strip()
+                if len(body) > 1200:
+                    body = body[:1200] + "…(truncated)"
+                parts.append(body)
+            parts.append("")
+        parts.append("</inbox>")
+
+        ctx = "\n".join(parts)
+        msg_ids = [m.id for m in msgs]
+        return ctx, msg_ids
+
+    def _build_resume_digest_context(self):
+        """Pull a pending-delivery restored checkpoint for this agent
+        and return (digest_text, checkpoint_id). Returns (None, "") if
+        nothing is queued.
+
+        Consumption is atomic — once this returns a digest, the
+        pending flag is cleared in the store so the next chat turn
+        won't re-inject the same block.
+        """
+        try:
+            from .checkpoint import get_store as _ck_store
+            from .digest import build_digest as _build_digest
+            store = _ck_store()
+        except Exception as e:
+            logger.debug("resume digest skipped (import): %s", e)
+            return None, ""
+
+        try:
+            c = store.consume_pending_resume(self.id)
+        except Exception as e:
+            logger.debug("resume digest skipped (consume): %s", e)
+            return None, ""
+        if c is None:
+            return None, ""
+
+        # Prefer a precomputed digest if present; otherwise build now.
+        text = c.digest or ""
+        if not text:
+            try:
+                r = _build_digest(c)
+                text = r.text or ""
+            except Exception as e:
+                logger.debug("resume digest build failed: %s", e)
+                text = ""
+        if not text:
+            return None, c.id
+
+        wrapped = (
+            "<checkpoint_resume>\n"
+            f"你之前的工作已从检查点 {c.id} 恢复。以下是压缩后的历史摘要 —— "
+            "请据此继续，不要重做已完成的部分：\n\n"
+            f"{text}\n"
+            "</checkpoint_resume>"
+        )
+        return wrapped, c.id
+
     def _format_active_plan_summary(self) -> str:
         """将当前活跃的 ExecutionPlan 格式化为可读摘要。"""
         active_plans = [p for p in self.execution_plans if p.status == "active"]
@@ -3615,10 +3999,23 @@ class Agent:
 
     def _write_step_completion_to_memory(self, plan: "ExecutionPlan",
                                           step: "ExecutionStep"):
-        """将步骤完成结果写入 L3 记忆 (action_done)。"""
+        """写步骤完成到 L3 记忆 — 走 upsert 自带刷新语义 (新 A.5)。
+
+        对"结论式"步骤 (含 result_summary 且长度 ≥ 12 字) 才入库；
+        相同主题的重复完成会 refresh 已有条目而不是堆栈式累加。
+        category 使用新 taxonomy 的 ``outcome``。
+        """
         mm = self._get_memory_manager()
         if mm is None:
             return
+        # Guard: skip trivial completions — "Done"/"ok"/"完成" don't teach
+        # the agent anything for future recall. We want sentences the
+        # agent can actually reuse later ("parsed 17 CSVs into dataset
+        # X", "tests pass: 52 green 0 failed").
+        summary = (step.result_summary or "").strip()
+        if len(summary) < 12:
+            return
+
         try:
             from .core.memory import SemanticFact
         except ImportError:
@@ -3628,22 +4025,23 @@ class Agent:
                 return
 
         try:
-            content = (
-                f"[{time.strftime('%Y-%m-%d %H:%M')}] "
-                f"完成步骤: {step.title}"
-            )
-            if step.result_summary:
-                content += f" → 结果: {step.result_summary[:200]}"
-
-            mm.save_fact(SemanticFact(
+            # Compact content: title first (for retrieval anchoring),
+            # then summary. Skip the timestamp header — updated_at on
+            # the fact records recency for us.
+            content = f"完成「{step.title}」 → {summary[:240]}"
+            fact = SemanticFact(
                 agent_id=self.id,
-                category="action_done",
+                category="outcome",      # new-taxonomy name for action_done
                 content=content,
-                source=f"execution_plan:{plan.id}:step:{step.id}",
-                confidence=0.95,
-            ))
+                source=f"plan:{plan.id[:10]}:step:{step.id[:8]}",
+                confidence=0.9,
+            )
+            res = mm.upsert_fact(fact, threshold=0.75)
             self._log("memory", {
                 "action": "step_done_to_memory",
+                "result": res.get("action"),
+                "similarity": res.get("similarity"),
+                "fact_id": res.get("id"),
                 "plan_id": plan.id,
                 "step": step.title[:50],
             })
@@ -3969,13 +4367,21 @@ Write only the summary body. Do not include any preamble or prefix."""
         """
         token_count = self._estimate_token_count()
         context_limit = self._get_context_limit()
-        threshold = int(context_limit * 0.5)  # 50% threshold, not 70%
+        relative_threshold = int(context_limit * 0.5)  # 50% of context limit
+        # Absolute cap: regardless of context_limit, once tokens exceed this
+        # we always compress. Prevents "context_limit=128k + agent at 40k"
+        # from staying uncompressed (40k < 50%*128k = 64k, which is already
+        # very expensive per LLM call).
+        absolute_threshold = int(
+            getattr(self.profile, "compress_tokens_absolute", 0) or 30000
+        )
+        threshold = min(relative_threshold, absolute_threshold)
 
         if token_count <= threshold:
             return  # Below threshold, no compression needed
 
         self.history_log.add("context_compress",
-                             f"tokens={token_count} limit={context_limit} threshold={threshold}")
+                             f"tokens={token_count} limit={context_limit} threshold={threshold} (rel={relative_threshold}, abs={absolute_threshold})")
 
         # Separate system message
         system_msg = None
@@ -4161,17 +4567,344 @@ Write only the summary body. Do not include any preamble or prefix."""
 
     # ---- tool execution with policy check ----
 
+    # ── P0-B: auto-spill large tool results ─────────────────────────
+    # Tool outputs over this many chars get written to
+    # $workspace/tool_outputs/<ts>_<name>.md and replaced with a compact
+    # ref + 300-char preview in the conversation. Agent can still read
+    # the full content via read_file(<path>) when needed — but we stop
+    # paying for 5-10k tokens of raw HTML/CSV/log on every subsequent
+    # LLM call. Configurable via profile.spill_tool_result_chars.
+    _SPILL_TOOL_RESULT_THRESHOLD: int = 1500
+    _SPILL_PREVIEW_CHARS: int = 300
+
+    # Tools whose outputs we never spill — usually because the full body
+    # is itself the output the LLM must reason on (small JSON ACKs) or
+    # because the tool already returns a file path (so spilling a path
+    # is pointless).
+    _SPILL_SKIP_TOOLS: frozenset = frozenset({
+        "plan_update", "complete_step",
+        "check_inbox", "ack_message", "reply_message",
+        "memory_recall",
+        "save_experience",
+        # Pack v2: knowledge_lookup returns capped RAG chunks (top_k×1500
+        # chars ≤ ~12KB). Spilling this hides citations from the LLM and
+        # forces an extra read_file round-trip just to aggregate across
+        # chunks. Keep the full result inline so the LLM can reason once.
+        "knowledge_lookup",
+    })
+
+    # Max age of files in tool_outputs/ before _cleanup_stale_tool_outputs
+    # deletes them. 7 days = long enough for debug, short enough that the
+    # directory doesn't grow forever.
+    _SPILL_MAX_AGE_SECONDS: int = 7 * 24 * 3600
+    # Hard cap on per-agent file count — if this many pile up, prune the
+    # oldest first regardless of age. Prevents runaway loops from filling
+    # the disk before the 7-day timer fires.
+    _SPILL_MAX_FILES: int = 200
+
+    def cleanup_stale_tool_outputs(self, max_age_seconds: int | None = None,
+                                   max_files: int | None = None) -> dict:
+        """Prune {workspace}/tool_outputs/ entries. Safe to call anytime.
+
+        Deletes files whose mtime is older than ``max_age_seconds``, then
+        if still above ``max_files`` deletes the oldest until the count
+        is back under the cap. Returns {"deleted_stale", "deleted_cap",
+        "remaining"}.
+        """
+        import os as _os
+        import time as _time
+        deleted_stale = 0
+        deleted_cap = 0
+        remaining = 0
+        try:
+            ws = self._get_agent_workspace()
+        except Exception:
+            return {"deleted_stale": 0, "deleted_cap": 0, "remaining": 0}
+        if not ws:
+            return {"deleted_stale": 0, "deleted_cap": 0, "remaining": 0}
+        out_dir = _os.path.join(str(ws), "tool_outputs")
+        if not _os.path.isdir(out_dir):
+            return {"deleted_stale": 0, "deleted_cap": 0, "remaining": 0}
+        age_limit = int(max_age_seconds if max_age_seconds is not None
+                        else self._SPILL_MAX_AGE_SECONDS)
+        cap = int(max_files if max_files is not None
+                  else self._SPILL_MAX_FILES)
+        now = _time.time()
+        try:
+            entries = []
+            for name in _os.listdir(out_dir):
+                fp = _os.path.join(out_dir, name)
+                if not _os.path.isfile(fp):
+                    continue
+                try:
+                    mtime = _os.path.getmtime(fp)
+                except OSError:
+                    continue
+                entries.append((fp, mtime))
+            # Pass 1: age-based prune
+            for fp, mtime in entries:
+                if now - mtime > age_limit:
+                    try:
+                        _os.remove(fp)
+                        deleted_stale += 1
+                    except OSError:
+                        pass
+            # Pass 2: cap-based prune (oldest first)
+            remaining_entries = [(fp, m) for fp, m in entries
+                                 if _os.path.exists(fp)]
+            if len(remaining_entries) > cap:
+                remaining_entries.sort(key=lambda t: t[1])  # oldest first
+                over = len(remaining_entries) - cap
+                for fp, _m in remaining_entries[:over]:
+                    try:
+                        _os.remove(fp)
+                        deleted_cap += 1
+                    except OSError:
+                        pass
+            remaining = sum(1 for n in _os.listdir(out_dir)
+                            if _os.path.isfile(_os.path.join(out_dir, n)))
+        except OSError as e:
+            logger.debug("cleanup_stale_tool_outputs failed: %s", e)
+        return {"deleted_stale": deleted_stale,
+                "deleted_cap": deleted_cap,
+                "remaining": remaining}
+
+    def _maybe_spill_tool_result(self, tool_name: str,
+                                 result_str: str,
+                                 call_id: str) -> str:
+        """Return a content string suitable for appending as the tool
+        message. Large results are spilled to disk + replaced by a
+        compact ref. Idempotent on already-spilled content.
+        """
+        import os as _os
+        if not isinstance(result_str, str):
+            return result_str
+        # Honour agent-level override if the profile carries one.
+        threshold = int(
+            getattr(self.profile, "spill_tool_result_chars", 0)
+            or self._SPILL_TOOL_RESULT_THRESHOLD
+        )
+        if len(result_str) < threshold:
+            return result_str
+        if tool_name in self._SPILL_SKIP_TOOLS:
+            return result_str
+        # Heuristic: if the result already looks like a spill or a
+        # "file saved" ack, leave it alone.
+        first80 = result_str.lstrip()[:80].lower()
+        if first80.startswith("[artifact:") or first80.startswith("[spilled:"):
+            return result_str
+        # Fix (Nov 2026): read_file against an already-spilled file would
+        # re-spill the same content (same header + body), creating a
+        # runaway cascade of near-duplicate tool_outputs files. Detect by
+        # the spill header marker we write in _spill body below.
+        first_line = result_str.lstrip().split("\n", 1)[0]
+        if first_line.startswith("# Spilled tool result"):
+            return result_str
+
+        try:
+            ws = self._get_agent_workspace()
+        except Exception:
+            ws = ""
+        if not ws:
+            return result_str
+
+        try:
+            out_dir = _os.path.join(str(ws), "tool_outputs")
+            _os.makedirs(out_dir, exist_ok=True)
+            # Lazy cleanup: every ~50th spill, sweep stale files + enforce
+            # the per-agent file cap. Keeps the directory from growing
+            # forever without a background job.
+            try:
+                import random as _random
+                if _random.randint(0, 49) == 0:
+                    self.cleanup_stale_tool_outputs()
+            except Exception:
+                pass
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            # Sanitize tool_name for filename.
+            safe = "".join(c if c.isalnum() or c in "-_" else "_"
+                           for c in (tool_name or "tool"))[:40]
+            # Add call_id tail so repeated same-tool calls don't collide.
+            fname = f"{ts}_{safe}_{(call_id or '')[:6]}.md"
+            path = _os.path.join(out_dir, fname)
+            body = (
+                f"# Spilled tool result — {tool_name}\n"
+                f"# timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"# call_id:   {call_id}\n"
+                f"# size:      {len(result_str)} chars\n"
+                f"# agent:     {self.id} ({self.name})\n"
+                f"# ─────────────────────────────────────\n\n"
+                f"{result_str}\n"
+            )
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(body)
+        except Exception as e:
+            logger.debug("spill tool_result failed: %s", e)
+            return result_str
+
+        # Build compact replacement. Keep ONLY:
+        #   1. Line 1: machine-parseable ref header
+        #   2. Line 2: plain-text pointer the LLM reads
+        #   3. Line 3+: 300-char preview so the LLM still has the gist
+        preview = result_str.replace("\n", " ⏎ ")[: self._SPILL_PREVIEW_CHARS]
+        if len(result_str) > self._SPILL_PREVIEW_CHARS:
+            preview += "…"
+        try:
+            rel = _os.path.relpath(path, str(ws))
+        except Exception:
+            rel = path
+        kb = max(1, len(result_str) // 1024)
+        replacement = (
+            f"[Artifact: path={rel} size={kb}KB tool={tool_name} "
+            f"call_id={(call_id or '')[:8]}]\n"
+            f"Full output spilled to disk — use read_file('{path}') "
+            f"if you need details.\n\n"
+            f"Preview:\n{preview}"
+        )
+
+        # Emit a progress frame so the UI can render the artifact.
+        try:
+            from .progress_bus import get_bus, ProgressFrame
+            get_bus().publish(ProgressFrame(
+                kind="tool_result_spilled",
+                channel=f"agent:{self.id}",
+                agent_id=self.id,
+                data={
+                    "tool": tool_name,
+                    "path": path,
+                    "size_chars": len(result_str),
+                    "call_id": call_id,
+                },
+            ))
+        except Exception:
+            pass
+
+        self._log("tool_result_spilled", {
+            "tool": tool_name,
+            "path": rel,
+            "size_chars": len(result_str),
+            "call_id": call_id,
+        })
+        return replacement
+
+    # ── P1-C / P1-D: agent tier → default output budget ─────────────
+    # A pragmatic mapping used ONLY when profile.max_output_tokens is
+    # unset and the agent declares a tier. Overridable via profile.
+    #   thinker    — plans/regards/explains; medium budget
+    #   actor      — fires tools; short budget
+    #   summarizer — produces compact outputs; very short budget
+    _TIER_DEFAULT_OUTPUT_BUDGET: ClassVar[dict[str, int]] = {
+        "thinker": 1800,
+        "actor": 400,
+        "summarizer": 250,
+    }
+
+    @classmethod
+    def _tier_default_output_budget(cls, tier: str) -> int:
+        if not tier:
+            return 0
+        return cls._TIER_DEFAULT_OUTPUT_BUDGET.get(tier.strip().lower(), 0)
+
+    # ── Default minimal tool set ────────────────────────────────────
+    # Used when profile.allowed_tools is empty AND the role preset also
+    # has no allowed_tools. Sized to cover read / write / search / plan
+    # / test / basic web / coordination — the 80% case. Avoids the old
+    # "empty ⇒ all 40+ tools" behavior that blew LLM payloads past 12k
+    # tokens of schema every turn.
+    # Min distinctive tokens (≥5 chars, Latin/CJK) from a memory's
+    # preview that must appear inside the final assistant reply for
+    # the memory to count as "used". Bigram similarity leaked too many
+    # false positives on generic English prose; word-overlap is stricter.
+    _MEMORY_USED_MIN_MATCHES: int = 1
+    _MEMORY_USED_MIN_TOKEN_LEN: int = 5
+    # Recognised token: ≥ N Latin-letter-run OR ≥ 2 consecutive CJK chars.
+    # Use the bash-analyzer's `re` alias-free import by lazy-compiling.
+    _MEMORY_USED_TOKEN_RE = None  # compiled on first use (re_handoff)
+
+    @classmethod
+    def _extract_usage_tokens(cls, s: str) -> set[str]:
+        """Lowercase set of distinctive content tokens in ``s``."""
+        if not s:
+            return set()
+        if cls._MEMORY_USED_TOKEN_RE is None:
+            cls._MEMORY_USED_TOKEN_RE = _re_handoff.compile(
+                r"[A-Za-z][A-Za-z0-9_\-]{4,}|[\u4e00-\u9fff]{2,}"
+            )
+        return {m.group(0).lower()
+                for m in cls._MEMORY_USED_TOKEN_RE.finditer(s)}
+
+    @classmethod
+    def _filter_memory_refs_by_usage(cls, refs: list[dict],
+                                     final_content: str) -> list[dict]:
+        """Keep only memory refs whose ``content_preview`` shares enough
+        distinctive tokens with the final assistant reply.
+
+        Rationale: we must NOT attach the 🧠 delete-this-memory button
+        when the agent just recalled memory but answered from fresh
+        sources — the user would otherwise delete a memory that wasn't
+        actually on screen. Word-level overlap on 5+ char tokens gives
+        precision-first behaviour (generic "uses/this/with/the" don't
+        count, "pytest/terraform/conftest.py" do).
+
+        Conservative guards:
+          * final_content < 30 chars: too short to be an "answer".
+          * ref with no content_preview: can't judge → skip.
+          * ≥ ``_MEMORY_USED_MIN_MATCHES`` tokens must overlap.
+
+        Returns a new list; never mutates the input.
+        """
+        text = (final_content or "").strip()
+        if len(text) < 30 or not refs:
+            return []
+        text_tokens = cls._extract_usage_tokens(text)
+        if not text_tokens:
+            return []
+
+        kept: list[dict] = []
+        for r in refs:
+            prev = (r or {}).get("content_preview") or ""
+            if not prev:
+                continue
+            prev_tokens = cls._extract_usage_tokens(prev)
+            if not prev_tokens:
+                continue
+            matched = prev_tokens & text_tokens
+            if len(matched) >= cls._MEMORY_USED_MIN_MATCHES:
+                entry = dict(r)
+                entry["used_similarity"] = round(
+                    len(matched) / max(1, len(prev_tokens)), 3)
+                entry["matched_tokens"] = sorted(matched)[:5]
+                kept.append(entry)
+        return kept
+
+    _MINIMAL_DEFAULT_TOOLS: tuple[str, ...] = (
+        "read_file", "write_file", "edit_file",
+        "search_files", "glob_files",
+        "bash", "run_tests",
+        "web_search", "web_fetch",
+        "plan_update", "complete_step",
+        "get_skill_guide",
+        # Agent-private memory probe (新 A) — cheap way to check
+        # "have I seen this before" before expensive web lookups.
+        "memory_recall",
+    )
+
     def _get_effective_tools(self) -> list[dict]:
-        """Filter tool definitions based on profile + global denylist.
+        """Filter tool definitions based on profile + role preset + global
+        denylist.
 
         Filters applied in order:
-          1. profile.allowed_tools (if non-empty, INTERSECT — only these)
+          0. RAG-only hard route (chat-header "RAG" toggle)  ← NEW
+          1. profile.allowed_tools OR role_preset.allowed_tools OR
+             MINIMAL_DEFAULT_TOOLS  (INTERSECT — only these ship to LLM)
           2. profile.denied_tools  (per-agent deny)
-          3. GLOBAL denylist from ~/.tudou_claw/tool_denylist.json —
-             previously this only blocked EXECUTION, but the tool's
-             JSON schema still shipped to the LLM, wasting ~750 tokens
-             per globally-denied tool. Fixing here strips them before
-             the schema is serialized for the model.
+          3. GLOBAL denylist (admin-managed)
+          4. capability-skill tier filter
+
+        The "empty list ⇒ all tools" behavior was explicitly removed:
+        too many agents ship with default-empty allowed_tools and end up
+        sending 40 tool schemas (~12k tokens) per LLM call. Now an empty
+        list means "use preset defaults or the minimal safe set".
 
         NOT narrowed by meeting/project scope — those contexts are for
         conversation, but users still expect the agent to be able to
@@ -4180,13 +4913,51 @@ Write only the summary body. Do not include any preamble or prefix."""
         denylist UI, not implicitly.
         """
         all_tools = tools.get_tool_definitions()
-        allowed = self.profile.allowed_tools
+
+        # ── RAG-only hard route ──
+        # When the chat request flagged `rag_only=True` (chat-header
+        # 🔍 RAG toggle on), restrict tool exposure to ``knowledge_lookup``
+        # ONLY. Skips every other filter below — the LLM literally sees
+        # one tool, so bash / read_file loops are architecturally
+        # impossible. Defensive: if knowledge_lookup happens to be
+        # denied by profile, fall through to the normal path rather
+        # than returning an empty tools list (which would lock the
+        # chat up).
+        if getattr(self, "_rag_only_mode", False):
+            denied_now = set(self.profile.denied_tools or [])
+            if "knowledge_lookup" not in denied_now:
+                kb = [t for t in all_tools
+                      if t.get("function", {}).get("name") == "knowledge_lookup"]
+                if kb:
+                    return kb
+
+        allowed = list(self.profile.allowed_tools or [])
         denied = set(self.profile.denied_tools)
 
-        if allowed:
-            allowed_set = set(allowed)
-            all_tools = [t for t in all_tools
-                         if t["function"]["name"] in allowed_set]
+        # ── resolve the effective allow-list ──
+        if not allowed:
+            # Tier 1: inherit from role_preset.allowed_tools if configured.
+            try:
+                preset = getattr(self, "_role_preset_v2", None)
+                if preset is None:
+                    from .role_preset_registry import get_registry
+                    preset = get_registry().get(self.role or "") if self.role else None
+                if preset is not None:
+                    allowed = list(getattr(preset, "allowed_tools", []) or [])
+            except Exception:
+                pass
+        if not allowed:
+            # Tier 2: hard fallback to the minimal safe set.
+            allowed = list(self._MINIMAL_DEFAULT_TOOLS)
+            logger.debug(
+                "agent %s has no allowed_tools and no role preset defaults; "
+                "using MINIMAL_DEFAULT_TOOLS (%d tools)",
+                self.id, len(allowed),
+            )
+
+        allowed_set = set(allowed)
+        all_tools = [t for t in all_tools
+                     if t["function"]["name"] in allowed_set]
 
         if denied:
             all_tools = [t for t in all_tools
@@ -4289,12 +5060,18 @@ Write only the summary body. Do not include any preamble or prefix."""
         except Exception as _el_err:
             logger.debug("extra_llms routing skipped: %s", _el_err)
 
-        # 方案乙(b): auto_route 启发式 —— 没显式指定 llm_label 时，按输入
-        # 类型自动挑 extra_llms 里的某个 slot：
-        #   multimodal 输入 → auto_route["multimodal"]
-        #   长/复杂 prompt  → auto_route["complex"]
-        #   其他             → auto_route["default"]（留空就是走 agent.provider/model）
-        # 全部可选，任何没命中的分支都安全回退。
+        # Score-based auto-route — replaces the old label-map approach.
+        # When auto_route.enabled = true, the router:
+        #   1. Detects the current turn's category (tool-heavy / multimodal /
+        #      reasoning / analysis / complex / default) from signals.
+        #   2. Ranks each candidate slot (primary + extra_llms) by a score
+        #      for that category: user-declared `slot.scores[category]` wins,
+        #      otherwise falls back to the public benchmark table in
+        #      app/data/model_scores.json, otherwise neutral 5.0.
+        #   3. Picks the winner — primary wins ties (stable sort).
+        # Emits a single info-level log line per decision so the operator
+        # can see "Agent X: route[tool-heavy] primary=glm/6.8 qwen/8.7 →
+        # pick qwen" without needing to guess.
         try:
             ar = self.auto_route or {}
             explicit_label = ""
@@ -4303,54 +5080,73 @@ Write only the summary body. Do not include any preamble or prefix."""
             if (
                 ar.get("enabled")
                 and self.extra_llms
-                and not explicit_label  # 显式 label 已经在上面处理过了
+                and not explicit_label  # explicit label was already handled above
             ):
-                # ---- 决定 category ----
-                category = "default"
+                from . import llm_router as _router
+                threshold = int(ar.get("complex_threshold_chars", 2000) or 2000)
+                # Phase 1-B: if there's an active plan with an
+                # in-progress step whose `llm_purpose` is set, use that
+                # as the category — it's the LLM's own routing hint for
+                # this specific sub-task, which is more accurate than
+                # message-text keyword detection (which only sees the
+                # original user prompt, not "which step am I on").
+                category = ""
                 try:
-                    if user_message is not None and self._message_is_multimodal(user_message):
-                        category = "multimodal"
-                    else:
-                        # 粗略估算 prompt 长度：取字符串化后的长度
-                        threshold = int(ar.get("complex_threshold_chars", 2000) or 2000)
-                        msg_text = ""
-                        if isinstance(user_message, str):
-                            msg_text = user_message
-                        elif isinstance(user_message, list):
-                            # OpenAI 风格 multi-part：拼一下 text 部分
-                            parts = []
-                            for p in user_message:
-                                if isinstance(p, dict):
-                                    t = p.get("text") or ""
-                                    if isinstance(t, str):
-                                        parts.append(t)
-                            msg_text = "\n".join(parts)
-                        elif isinstance(user_message, dict):
-                            msg_text = str(user_message.get("content", "") or "")
-                        if threshold > 0 and len(msg_text) >= threshold:
-                            category = "complex"
-                except Exception:
-                    category = "default"
-
-                target_label = str(ar.get(category, "") or "").strip()
-                if target_label:
-                    for slot in self.extra_llms:
-                        if not isinstance(slot, dict):
-                            continue
-                        slot_label = str(slot.get("label", "")).strip()
-                        slot_purpose = str(slot.get("purpose", "")).strip()
-                        if slot_label == target_label or slot_purpose == target_label:
-                            sp = str(slot.get("provider", "")).strip()
-                            sm = str(slot.get("model", "")).strip()
-                            if sp or sm:
-                                logger.info(
-                                    "Agent %s: auto_route[%s=%s] → routing to %s/%s",
-                                    self.id[:8], category, target_label,
-                                    sp or prov, sm or mdl,
-                                )
-                                prov = sp or prov
-                                mdl = sm or mdl
-                            break
+                    _plan = getattr(self, "_current_plan", None)
+                    if _plan is not None:
+                        _step = next((s for s in _plan.steps
+                                      if getattr(s, "status", None)
+                                      and str(s.status.value if hasattr(s.status, "value") else s.status) == "in_progress"),
+                                     None)
+                        if _step is not None:
+                            _hint = str(getattr(_step, "llm_purpose", "") or "").strip()
+                            if _hint in ("tool-heavy", "multimodal",
+                                         "reasoning", "analysis", "default"):
+                                category = _hint
+                                logger.debug(
+                                    "Agent %s: route category from plan step "
+                                    "%s.llm_purpose=%s",
+                                    self.id[:8], _step.id, _hint)
+                except Exception as _step_err:
+                    logger.debug("step-purpose lookup failed: %s", _step_err)
+                if not category:
+                    category = _router.detect_category(
+                        user_message=user_message,
+                        has_tools=True,
+                        recent_tool_call_density=0.0,
+                        complex_threshold_chars=threshold,
+                    )
+                data = _router.load_scores()
+                # Build a decision breakdown for the log line — shows every
+                # candidate's score so the operator can sanity-check why
+                # a specific slot won.
+                _breakdown: list[str] = []
+                _primary_score = _router.score_for_model(mdl, category, data) if mdl else 5.0
+                _breakdown.append(f"primary({prov}/{mdl})={_primary_score:.1f}")
+                for _slot in self.extra_llms:
+                    if not isinstance(_slot, dict):
+                        continue
+                    _lbl = (_slot.get("label") or _slot.get("purpose")
+                            or _slot.get("model") or "?")
+                    _s = _router._slot_score(_slot, category, data)
+                    _breakdown.append(f"{_lbl}={_s:.1f}")
+                new_prov, new_mdl, winner_slot = _router.best_slot_for_category(
+                    self.extra_llms, category,
+                    primary_provider=prov, primary_model=mdl, data=data)
+                winner_label = (
+                    "primary" if winner_slot is None
+                    else str(winner_slot.get("label", "") or winner_slot.get("purpose", "") or "?"))
+                if (new_prov, new_mdl) != (prov, mdl):
+                    logger.info(
+                        "Agent %s: route[%s] scores=[%s] → switch to %s/%s (%s)",
+                        self.id[:8], category, ", ".join(_breakdown),
+                        new_prov, new_mdl, winner_label)
+                    prov, mdl = new_prov, new_mdl
+                else:
+                    logger.info(
+                        "Agent %s: route[%s] scores=[%s] → keep primary %s/%s",
+                        self.id[:8], category, ", ".join(_breakdown),
+                        prov, mdl)
         except Exception as _ar_err:
             logger.debug("auto_route skipped: %s", _ar_err)
 
@@ -4396,6 +5192,28 @@ Write only the summary body. Do not include any preamble or prefix."""
             logger.error("Agent %s: provider resolution failed: %s",
                          self.id[:8], e)
         return prov, mdl
+
+    def _resolve_fallback_llm(self) -> tuple[str, str]:
+        """Return (provider, model) of the designated fallback LLM, if any.
+
+        Looks into ``self.extra_llms`` for a slot whose ``purpose`` or
+        ``label`` equals ``"fallback"`` (case-insensitive). Partial slots
+        (provider only, or model only) are accepted — the caller should
+        inherit the missing half from the primary. Returns ``("", "")``
+        when no fallback is configured.
+        """
+        try:
+            for slot in (self.extra_llms or []):
+                if not isinstance(slot, dict):
+                    continue
+                tag = str(slot.get("purpose", "") or slot.get("label", "")).strip().lower()
+                if tag != "fallback":
+                    continue
+                return (str(slot.get("provider", "")).strip(),
+                        str(slot.get("model", "")).strip())
+        except Exception as e:
+            logger.debug("fallback LLM lookup failed: %s", e)
+        return "", ""
 
     def _handle_large_result(self, tool_name: str, result: str) -> str:
         """If tool result exceeds 100KB, save to file and return a summary + path."""
@@ -4664,6 +5482,21 @@ Write only the summary body. Do not include any preamble or prefix."""
         if _os.path.isdir(agent_skills_dir):
             allowed_dirs.append(agent_skills_dir)
 
+        # Granted skills: open read/cd to each install_dir so get_skill_guide's
+        # skill_dir is actually reachable via read_file / bash cd. Only skills
+        # granted to THIS agent — ungranted skill dirs remain blocked.
+        try:
+            from .skills.engine import get_registry as _get_skill_registry
+            _reg = _get_skill_registry()
+            if _reg is not None:
+                for _inst in _reg.list_for_agent(self.id):
+                    _sd = getattr(_inst, "install_dir", "") or ""
+                    if _sd and _os.path.isdir(_sd) and _sd not in allowed_dirs:
+                        allowed_dirs.append(_sd)
+        except Exception:
+            # Non-fatal — sandbox without extended skill access is still usable.
+            pass
+
         policy = _sandbox.SandboxPolicy(
             root=root, mode=mode, allow_list=allow_list,
             agent_id=self.id, agent_name=self.name,
@@ -4693,6 +5526,13 @@ Write only the summary body. Do not include any preamble or prefix."""
 
         with self._lock:
             self.status = AgentStatus.BUSY
+
+            # 新 A.8: reset per-turn memory_recall bucket so refs from
+            # the previous turn don't leak into this turn's assistant msg.
+            try:
+                self._turn_memory_refs = []
+            except Exception:
+                pass
 
             # ── Multimodal content handling ──
             # user_message can be str (text-only) or list[dict] (multimodal)
@@ -4774,6 +5614,51 @@ Write only the summary body. Do not include any preamble or prefix."""
             except Exception:
                 pass  # template library is optional
 
+            # ── Inbox pull: inject unread inter-agent messages ──
+            # Other agents' send_message calls persist to the durable
+            # inbox. At the start of each chat we surface any unread
+            # messages addressed to THIS agent so the LLM can decide
+            # whether/how to react in-turn.
+            try:
+                _inbox_ctx, _inbox_msg_ids = self._build_inbox_context(limit=10)
+                if _inbox_ctx:
+                    self.messages.append({
+                        "role": "system",
+                        "content": _inbox_ctx,
+                    })
+                    # Mark read ONLY after injection is committed.
+                    try:
+                        from .inbox import get_store
+                        get_store().mark_read(_inbox_msg_ids, self.id)
+                    except Exception as _mr_err:
+                        logger.debug("inbox mark_read skipped: %s", _mr_err)
+                    self._log("inbox_pull", {
+                        "count": len(_inbox_msg_ids),
+                        "chars": len(_inbox_ctx),
+                    })
+            except Exception as _ibx_err:
+                logger.debug("inbox injection skipped: %s", _ibx_err)
+
+            # ── Checkpoint resume: inject digest once on resume ──
+            # When the user clicks "Restore" in the portal, the
+            # checkpoint row is flipped to status=restored AND the
+            # metadata.pending_chat_delivery flag is set. This block
+            # atomically consumes it and prepends the digest as LLM
+            # context on this turn. Delivered exactly once.
+            try:
+                _ckpt_ctx, _ckpt_id = self._build_resume_digest_context()
+                if _ckpt_ctx:
+                    self.messages.append({
+                        "role": "system",
+                        "content": _ckpt_ctx,
+                    })
+                    self._log("checkpoint_resumed", {
+                        "checkpoint_id": _ckpt_id,
+                        "chars": len(_ckpt_ctx),
+                    })
+            except Exception as _cke:
+                logger.debug("checkpoint resume injection skipped: %s", _cke)
+
             # ── RolePresetV2 Pre-hook: SOP stage injection ──
             # Runs ONLY for V2 agents with sop_template_id configured.
             self._active_sop_instance = None
@@ -4840,8 +5725,12 @@ Write only the summary body. Do not include any preamble or prefix."""
                                           if not _refs_denied(p)]
                     if matched_skills:
                         skill_ids = [s.skill_id for s in matched_skills]
+                        # Default to summary mode (5000 chars ≈ 1250 tokens
+                        # for 3-6 skills). Agent can call
+                        # get_skill_guide(name, brief=false) for full body
+                        # when it actually needs to execute.
                         context_text = registry.build_context_injection(
-                            skill_ids, max_chars=15000)
+                            skill_ids, max_chars=5000)
                         if context_text:
                             self.messages.append({
                                 "role": "system",
@@ -4854,6 +5743,35 @@ Write only the summary body. Do not include any preamble or prefix."""
                             })
             except Exception:
                 pass  # skill system is optional
+
+            # ── P1-C: inject per-agent output budget hint ──
+            # The LLM usually respects explicit budget hints — this adds
+            # a final compact system note on the messages list stating
+            # the expected token ceiling for THIS turn's output. Agents
+            # with max_output_tokens=0 get no hint (default provider
+            # behaviour). Tier defaults kick in when an agent has a
+            # tier set but no explicit ceiling yet (see _tier_budgets()).
+            try:
+                budget = int(getattr(self.profile, "max_output_tokens", 0) or 0)
+                if budget <= 0:
+                    budget = self._tier_default_output_budget(
+                        getattr(self.profile, "agent_tier", "") or "")
+                if budget > 0:
+                    tier_tag = ""
+                    _t = (getattr(self.profile, "agent_tier", "") or "").strip()
+                    if _t:
+                        tier_tag = f" [tier={_t}]"
+                    self.messages.append({
+                        "role": "system",
+                        "content": (
+                            f"⚠️ 本轮输出预算：≤{budget} tokens{tier_tag}。"
+                            f"请用精简语言，能用 summary + key_fields + artifact_refs "
+                            f"的就用，避免长篇 prose；大产出先 write_file 再通过 "
+                            f"send_message(artifact_refs=[...]) 传 ref。"
+                        ),
+                    })
+            except Exception:
+                pass
 
             # --- src memory engine: transcript + routing ---
             self.transcript.append(_user_text)
@@ -5011,6 +5929,10 @@ Write only the summary body. Do not include any preamble or prefix."""
                 # results from earlier iterations). Keep the newest 4
                 # in full; older ones get a 600-char head preview.
                 _msgs_to_send = _compress_old_tool_results(_msgs_to_send)
+                # Also trim OLD write_file / edit_file tool_call `content`
+                # / `new_string` args — once the write committed, resending
+                # the 10KB file body on every turn is pure waste.
+                _msgs_to_send = _compress_old_write_tool_calls(_msgs_to_send)
 
                 # ── Multimodal diagnostic: verify images survive pipeline ──
                 if _is_multimodal:
@@ -5087,10 +6009,11 @@ Write only the summary body. Do not include any preamble or prefix."""
                     # may have grown with tool results from previous iteration).
                     # Dynamic context is appended at the end — keeps prefix stable.
                     if iteration > 0:
-                        _msgs_to_send = _compress_old_tool_results(
-                            _strip_old_images(
-                                self._inject_dynamic_context(
-                                    self.messages, current_query=_user_text)))
+                        _msgs_to_send = _compress_old_write_tool_calls(
+                            _compress_old_tool_results(
+                                _strip_old_images(
+                                    self._inject_dynamic_context(
+                                        self.messages, current_query=_user_text))))
                     # Strategy: always try streaming first (with tools).
                     # If the provider doesn't support streaming+tools,
                     # it falls back to non-streaming internally.
@@ -5411,6 +6334,17 @@ Write only the summary body. Do not include any preamble or prefix."""
                         # === 记录 Agent 自身操作到记忆 ===
                         self._record_tool_action(name, result_str)
 
+                        # P0-B: Auto-spill large tool results to an
+                        # artifact file. Replaces the in-message content
+                        # with a compact ref + 300-char preview so the
+                        # LLM can still reason on the outcome without
+                        # paying for 5-10k tokens of raw HTML / CSV /
+                        # log output every turn. Agent can call
+                        # read_file(path) if it needs the full text.
+                        result_str = self._maybe_spill_tool_result(
+                            name, result_str, call_id,
+                        )
+
                         # Check and inject budget pressure note
                         budget_note = llm.get_budget_pressure_note(iteration, max_iters)
                         if budget_note:
@@ -5562,6 +6496,46 @@ Write only the summary body. Do not include any preamble or prefix."""
             except Exception:
                 pass
 
+            # ── 新 A.8: attach memory_recall refs to the final assistant
+            # message so the UI can render a 🧠 badge + per-ref delete
+            # buttons. _turn_memory_refs was accumulated by
+            # _tool_memory_recall across this turn's tool calls.
+            #
+            # IMPORTANT (user-requested): only surface the badge when the
+            # final assistant reply actually USED the memory — not just
+            # "agent called memory_recall but the hits were irrelevant".
+            # We use a cheap bigram-Jaccard overlap test between each
+            # ref's content_preview and the final assistant text; only
+            # refs above ``_MEMORY_USED_SIM_THRESHOLD`` get kept. The
+            # button is the user's "delete this wrong memory" escape
+            # hatch — we want it pointing at memories that genuinely
+            # contributed to what's on screen.
+            try:
+                bucket = getattr(self, "_turn_memory_refs", None) or []
+                if bucket:
+                    used_refs = self._filter_memory_refs_by_usage(
+                        bucket, final_content or "")
+                    if used_refs:
+                        for i in range(len(self.messages) - 1, -1, -1):
+                            m = self.messages[i]
+                            if m.get("role") != "assistant":
+                                continue
+                            if m.get("tool_calls"):
+                                continue
+                            m["memory_refs"] = list(used_refs)
+                            break
+                        try:
+                            self._log("memory_refs", {"refs": list(used_refs)})
+                        except Exception:
+                            pass
+            except Exception as _mref_err:
+                logger.debug("attach memory_refs skipped: %s", _mref_err)
+            # Clear the bucket for the next turn regardless of outcome.
+            try:
+                self._turn_memory_refs = []
+            except Exception:
+                pass
+
             self._auto_save_check()  # Auto-save after each chat turn
             return final_content
 
@@ -5577,6 +6551,7 @@ Write only the summary body. Do not include any preamble or prefix."""
         finish. We NEVER abort the running task just because a new message
         arrived — that would destroy in-flight work.
         """
+        from .agent_types import AgentStatus as _AgentStatus
         mgr = get_chat_task_manager()
         # Detect any in-flight task for this agent
         active_states = (ChatTaskStatus.THINKING,
@@ -5584,11 +6559,37 @@ Write only the summary body. Do not include any preamble or prefix."""
                          ChatTaskStatus.TOOL_EXEC,
                          ChatTaskStatus.QUEUED,
                          ChatTaskStatus.WAITING_APPROVAL)
+        # Invariant: while a chat loop is running, self.status != IDLE.
+        # So if the agent is IDLE *and* some ChatTask still claims an
+        # active state, that task is a ghost — a previous turn crashed,
+        # the server restarted mid-turn, or a WebSocket dropped without
+        # the terminal-state transition landing. Sweep the ghosts so
+        # new messages don't queue behind them forever.
+        agent_is_idle = (getattr(self, "status", None) == _AgentStatus.IDLE)
         has_active = False
         for existing_task in mgr.get_agent_tasks(self.id):
-            if existing_task.status in active_states:
-                has_active = True
-                break
+            if existing_task.status not in active_states:
+                continue
+            if agent_is_idle:
+                try:
+                    existing_task.error = (
+                        "ghost task: agent is IDLE but this task claimed "
+                        "an active state. Marked FAILED at new-message arrival.")
+                    existing_task.set_status(
+                        ChatTaskStatus.FAILED,
+                        phase="stale (agent IDLE)",
+                    )
+                    logger.warning(
+                        "chat_async: swept ghost task %s for agent %s "
+                        "(was %s, agent is IDLE)",
+                        existing_task.id, self.id[:8],
+                        existing_task.status.value)
+                except Exception as e:
+                    logger.debug("ghost sweep failed for %s: %s",
+                                 existing_task.id, e)
+                continue
+            has_active = True
+            break
         task = mgr.create_task(self.id, user_message)
         task.set_status(ChatTaskStatus.QUEUED, "Queued", 0)
 
@@ -5622,6 +6623,11 @@ Write only the summary body. Do not include any preamble or prefix."""
                 _eff_prov, _eff_mdl = self._resolve_effective_provider_model(
                     user_message=user_message,
                 )
+                # Keep provider/model resolved for later log output, but
+                # the user-facing progress bar only shows a clean label.
+                # The raw "mlx-community/Qwen3.5-…-4bit" model name
+                # clutters the UI and the user can already see it in
+                # the chat-header dropdown.
                 _mdl_name = _eff_mdl or self.model or "default"
                 _prov_name = _eff_prov or self.provider or "default"
                 try:
@@ -5631,10 +6637,8 @@ Write only the summary body. Do not include any preamble or prefix."""
                         _prov_name = f"{entry.name} ({entry.kind})"
                 except Exception:
                     pass
-                task.set_status(ChatTaskStatus.THINKING,
-                                f"🧠 Thinking... ({_mdl_name})", 10)
-                task.push_event({"type": "thinking",
-                                 "content": f"🧠 Thinking... ({_mdl_name})"})
+                task.set_status(ChatTaskStatus.THINKING, "发言中…", 10)
+                task.push_event({"type": "thinking", "content": "发言中…"})
 
                 _tool_count = [0]  # track tool iterations for progress
 
@@ -5928,40 +6932,185 @@ Write only the summary body. Do not include any preamble or prefix."""
             "tool_chains": [tc.to_dict() for tc in self.enhancer.tool_chains.values()],
         }
 
-    # ---- Active Thinking ----
+    # ---- Think button: on-demand self-summary ----
 
-    def enable_active_thinking(self, **kwargs) -> dict:
-        """Enable the active thinking engine for this agent."""
-        from .active_thinking import ActiveThinkingEngine
-        if not self.active_thinking:
-            self.active_thinking = ActiveThinkingEngine(
-                agent=self, role=self.role)
-        self.active_thinking.enable(**kwargs)
-        # Rebuild system prompt to include active thinking context
-        if self.messages and self.messages[0].get("role") == "system":
-            self.messages[0]["content"] = self._build_system_prompt()
-        logger.info("Active thinking enabled for agent %s", self.id)
-        return self.active_thinking.get_stats()
+    def think_now(self, turns_window: int = 15) -> dict:
+        """Summarize the last N turns of this agent's conversation.
 
-    def disable_active_thinking(self):
-        """Disable active thinking."""
-        if self.active_thinking:
-            self.active_thinking.disable()
-        if self.messages and self.messages[0].get("role") == "system":
-            self.messages[0]["content"] = self._build_system_prompt()
-        logger.info("Active thinking disabled for agent %s", self.id)
+        The old ``Think`` button opened a panel and toggled a scheduler
+        loop that almost nobody enabled, and whose output went to a
+        file nobody read. This replacement is a single on-demand call:
 
-    def trigger_thinking(self, trigger: str = "manual",
-                         context: str = "") -> dict:
-        """Manually trigger one active thinking cycle."""
-        from .active_thinking import ActiveThinkingEngine
-        if not self.active_thinking:
-            self.active_thinking = ActiveThinkingEngine(
-                agent=self, role=self.role)
-            self.active_thinking.enable()
-        result = self.active_thinking.think_now(trigger=trigger,
-                                                 context=context)
-        return result.to_dict()
+          1. Collect the last ``turns_window`` user+assistant messages.
+          2. Ask the agent's own LLM to produce a short recap + extract
+             any reusable rules worth persisting to the experience lib.
+          3. Append the summary as an assistant-kind event so the
+             portal renders it as a chat bubble prefixed with 【自我总结】.
+          4. If the LLM emits structured ``<experience>`` blocks, write
+             them through ``save_experience`` — that's the one real
+             self-improvement channel that already works.
+
+        Returns ``{"ok": True, "summary": str, "experiences_saved": int}``
+        or ``{"ok": False, "error": str}``.
+        """
+        import json as _json
+        try:
+            msgs = list(self.messages or [])
+        except Exception:
+            msgs = []
+        # Skip system messages; pick recent user/assistant pairs.
+        convo = [m for m in msgs
+                 if isinstance(m, dict)
+                 and m.get("role") in ("user", "assistant")
+                 and str(m.get("content") or "").strip()]
+        if not convo:
+            return {"ok": False, "error": "no_conversation_yet"}
+        window = convo[-int(max(1, turns_window)):]
+
+        # Compact transcript — bound each turn's content.
+        def _fmt(m):
+            role = "用户" if m.get("role") == "user" else "我"
+            content = str(m.get("content") or "")
+            if len(content) > 800:
+                content = content[:800] + "…(截断)"
+            return f"[{role}]: {content}"
+
+        transcript = "\n\n".join(_fmt(m) for m in window)
+
+        # Build the self-summary prompt.
+        prompt = (
+            "请对最近的对话做一次【自我总结】。\n\n"
+            "要求：\n"
+            "1. 用中文，简短 3-5 段，每段 1-2 句。\n"
+            "2. 按以下结构输出：\n"
+            "   - 我刚才在做什么：一句话概括话题。\n"
+            "   - 遇到的关键问题或卡点（如果有）。\n"
+            "   - 有用的规则/教训：具体可复用的做法。写不出来就说『暂无』，不要编。\n"
+            "   - 下一步建议（如果有）。\n"
+            "3. 如果在【有用的规则/教训】里提炼出了具体可复用的行动规则，"
+            "并且你判断值得沉淀进经验库，请在结尾追加 1 个或多个 JSON 块，"
+            "用 ```experience ... ``` 包围，格式：\n"
+            '   {"scene": "…场景描述…", "knowledge": "…核心知识…", '
+            '"rule_do": "…应该做…", "rule_dont": "…不应该做…", '
+            '"priority": 3}\n'
+            "   没有值得沉淀的就不要加 JSON 块。禁止编造。\n\n"
+            "--- 最近对话（旧→新）---\n"
+            f"{transcript}\n"
+            "--- 对话结束 ---"
+        )
+
+        # Run through the agent's own LLM (non-streaming).
+        try:
+            from . import llm as _llm
+            _prov, _mdl = self._resolve_effective_provider_model()
+            resp = _llm.chat_no_stream(
+                messages=[
+                    {"role": "system",
+                     "content": "你是一个严谨的自我复盘助手。输出必须忠实于对话内容，不编造。"},
+                    {"role": "user", "content": prompt},
+                ],
+                model=_mdl, provider=_prov,
+            )
+            raw = resp.get("content", "") if isinstance(resp, dict) else str(resp)
+        except Exception as e:
+            logger.error("think_now LLM call failed: %s", e, exc_info=True)
+            return {"ok": False, "error": f"llm_failed: {e}"}
+
+        raw = (raw or "").strip()
+        if not raw:
+            return {"ok": False, "error": "empty_llm_output"}
+
+        # Extract optional ```experience ...``` JSON blocks. Strip them
+        # from the displayed summary so the chat bubble stays clean.
+        import re as _re
+        exp_pattern = _re.compile(
+            r"```experience\s*(.+?)```", _re.DOTALL | _re.IGNORECASE)
+        raw_exps = exp_pattern.findall(raw)
+        display_summary = exp_pattern.sub("", raw).strip()
+
+        # Attempt to persist each experience via the library.
+        saved_count = 0
+        if raw_exps:
+            try:
+                from .experience_library import SelfImprovementEngine
+                if not self.self_improvement:
+                    self.self_improvement = SelfImprovementEngine(
+                        agent=self, role=self.role)
+                lib = self.self_improvement.library
+                for block in raw_exps:
+                    block = block.strip()
+                    try:
+                        parsed = _json.loads(block)
+                    except Exception:
+                        continue
+                    if not isinstance(parsed, dict):
+                        continue
+                    if not str(parsed.get("scene") or "").strip():
+                        continue
+                    try:
+                        from .experience_library import Experience
+                        # Priority: accept numeric (1-3) or string (high/medium/low)
+                        raw_pri = parsed.get("priority")
+                        if isinstance(raw_pri, (int, float)):
+                            pri_str = {3: "high", 2: "medium",
+                                       1: "low"}.get(int(raw_pri), "medium")
+                        else:
+                            pri_str = str(raw_pri or "medium").lower().strip()
+                            if pri_str not in ("high", "medium", "low"):
+                                pri_str = "medium"
+                        # Experience fields: scene / core_knowledge /
+                        # action_rules[] / taboo_rules[]. Map from the
+                        # simpler LLM-emitted JSON shape.
+                        rule_do = str(parsed.get("rule_do") or "").strip()
+                        rule_dont = str(parsed.get("rule_dont") or "").strip()
+                        action_rules = [rule_do] if rule_do else []
+                        taboo_rules = [rule_dont] if rule_dont else []
+                        exp = Experience(
+                            role=self.role,
+                            exp_type="retrospective",
+                            source=f"think_now:agent={self.id}",
+                            scene=str(parsed.get("scene") or "").strip(),
+                            core_knowledge=str(
+                                parsed.get("knowledge") or "").strip(),
+                            action_rules=action_rules,
+                            taboo_rules=taboo_rules,
+                            priority=pri_str,
+                        )
+                        lib.add_experience(self.role, exp)
+                        saved_count += 1
+                    except Exception as e:
+                        logger.debug("think_now: skipping malformed exp: %s", e)
+            except Exception as e:
+                logger.debug("think_now: experience persistence failed: %s", e)
+
+        # Surface the summary as an assistant-kind chat event.
+        display_text = f"【自我总结】\n\n{display_summary}"
+        if saved_count:
+            display_text += (
+                f"\n\n— 已沉淀 **{saved_count}** 条经验到你的经验库。"
+            )
+        try:
+            self._log("message", {
+                "role": "assistant",
+                "content": display_text,
+                "source": "think_now",
+            })
+            # Also append to in-memory messages so subsequent LLM calls
+            # include the summary as context (aligns with existing
+            # self-improvement injection path).
+            self.messages.append({
+                "role": "assistant",
+                "content": display_text,
+            })
+        except Exception as e:
+            logger.debug("think_now: failed to append summary event: %s", e)
+
+        return {
+            "ok": True,
+            "summary": display_summary,
+            "experiences_saved": saved_count,
+            "turns_analyzed": len(window),
+        }
 
     # ---- Self-Improvement (Experience Library) ----
 
@@ -6431,6 +7580,7 @@ Write only the summary body. Do not include any preamble or prefix."""
                 steps_raw = []
             # 确保每个 step 是 dict
             steps_clean = []
+            missing_acceptance: list[str] = []
             for s in steps_raw:
                 if isinstance(s, str):
                     try:
@@ -6438,34 +7588,170 @@ Write only the summary body. Do not include any preamble or prefix."""
                     except (json.JSONDecodeError, TypeError):
                         s = {"title": s}
                 if isinstance(s, dict):
+                    # P1/L2 — track steps that forgot the acceptance
+                    # criterion so we can nudge the LLM (not hard-fail —
+                    # we create the plan either way, but the LLM sees
+                    # a warning and can patch via add_step/replan).
+                    _acc = str(s.get("acceptance") or "").strip()
+                    if not _acc:
+                        missing_acceptance.append(str(s.get("title", ""))[:40])
                     steps_clean.append(s)
             plan = self.create_execution_plan(
                 task_summary=arguments.get("task_summary", ""),
                 steps=steps_clean,
             )
-            step_ids = [{"id": s.id, "title": s.title} for s in plan.steps]
-            return json.dumps({"ok": True, "plan_id": plan.id,
-                               "steps": step_ids}, ensure_ascii=False)
-        elif action == "start_step":
-            step = self.update_plan_step(
-                arguments.get("step_id", ""), "in_progress")
-            return json.dumps({"ok": step is not None,
-                               "step": step.to_dict() if step else None},
-                              ensure_ascii=False)
-        elif action == "complete_step":
-            step = self.update_plan_step(
-                arguments.get("step_id", ""), "completed",
-                arguments.get("result_summary", ""))
-            return json.dumps({"ok": step is not None,
-                               "step": step.to_dict() if step else None},
-                              ensure_ascii=False)
-        elif action == "fail_step":
-            step = self.update_plan_step(
-                arguments.get("step_id", ""), "failed",
-                arguments.get("result_summary", ""))
-            return json.dumps({"ok": step is not None,
-                               "step": step.to_dict() if step else None},
-                              ensure_ascii=False)
+            step_ids = [{"id": s.id, "title": s.title,
+                         "acceptance": s.acceptance} for s in plan.steps]
+            payload: dict = {"ok": True, "plan_id": plan.id, "steps": step_ids}
+            if missing_acceptance:
+                payload["warning"] = (
+                    f"{len(missing_acceptance)} step(s) have no `acceptance` "
+                    f"criterion: {missing_acceptance}. Vague steps are the #1 "
+                    f"source of fake completions. Call plan_update(action='replan', "
+                    f"steps=[...]) to patch them, or explicitly accept the risk."
+                )
+            return json.dumps(payload, ensure_ascii=False)
+        elif action in ("start_step", "complete_step", "fail_step"):
+            # Map action → status (needed to drive update_plan_step and
+            # to detect "already in that state" so repeated calls don't
+            # loop on their own idempotency).
+            _status_for = {
+                "start_step": "in_progress",
+                "complete_step": "completed",
+                "fail_step": "failed",
+            }
+            status = _status_for[action]
+            step_id = arguments.get("step_id", "")
+            summary = str(arguments.get("result_summary", "") or "").strip()
+
+            # Informative-error path: when the caller's step_id doesn't
+            # match, we previously returned bare {ok:false, step:null}.
+            # The LLM saw this and had nothing to correct with, so it
+            # retried the same call forever (observed: 10+ identical
+            # plan_update complete_step calls at 15-20s intervals).
+            # Now we diagnose and tell the LLM what's wrong.
+            plan = self._current_plan
+            if plan is None:
+                return json.dumps({
+                    "ok": False,
+                    "error": (
+                        "No active plan. Call "
+                        "plan_update(action='create_plan', steps=[...]) "
+                        "first before start_step / complete_step / fail_step. "
+                        "If you don't need a formal plan for this task, "
+                        "skip plan_update entirely and just do the work."
+                    ),
+                }, ensure_ascii=False)
+
+            # P1/L2 — complete_step / fail_step require a non-trivial
+            # result_summary. Empty / too-short summaries are how agents
+            # fake completion ("done", "完成"). We reject and require the
+            # LLM to re-call with a proper summary that references the
+            # step's acceptance criterion.
+            if action in ("complete_step", "fail_step"):
+                matched_for_summary = next(
+                    (s for s in plan.steps if s.id == step_id), None,
+                )
+                if len(summary) < 8:  # "completed" / "done" / "OK." all < 8
+                    acc_hint = ""
+                    if matched_for_summary and matched_for_summary.acceptance:
+                        acc_hint = (f" The step's acceptance was: "
+                                    f"{matched_for_summary.acceptance!r}. "
+                                    f"Your result_summary should cite specific "
+                                    f"evidence that this was met (file path, "
+                                    f"count, id).")
+                    return json.dumps({
+                        "ok": False,
+                        "error": (
+                            f"result_summary is too short ({len(summary)} chars). "
+                            f"Describe what you actually produced — file paths, "
+                            f"counts, identifiers — not just 'done'.{acc_hint}"
+                        ),
+                    }, ensure_ascii=False)
+
+            # Idempotent success: if the step is already in the target
+            # state, return ok:true so the LLM moves on instead of retrying.
+            matched = None
+            for s in plan.steps:
+                if s.id == step_id:
+                    matched = s
+                    break
+            if matched is not None and matched.status.value == status:
+                return json.dumps({
+                    "ok": True,
+                    "note": f"step '{step_id}' was already {status} — no-op",
+                    "step": matched.to_dict(),
+                }, ensure_ascii=False)
+
+            step = self.update_plan_step(step_id, status, summary)
+            if step is not None:
+                # ── Block 2 Review loop: run verifier on complete_step ──
+                # Only fires on complete_step (not fail_step/start_step);
+                # complete_step with a declared verify means "I think I'm
+                # done — please check". Verifier failure rolls the step
+                # back to FAILED with the verifier's reason in
+                # result_summary, so the next plan_state snapshot the LLM
+                # sees has the concrete failure info and can replan.
+                verify_dict = None
+                if action == "complete_step" and step.verify:
+                    try:
+                        verify_dict = self._run_step_verifier(step)
+                    except Exception as _verr:
+                        logger.warning(
+                            "verifier hook crashed for step %s: %s",
+                            step.id, _verr,
+                        )
+                if verify_dict is not None and not verify_dict.get("ok", False):
+                    # Roll back: step → FAILED, splice verifier reason
+                    # into result_summary for plan-in-context visibility.
+                    step.status = StepStatus.FAILED
+                    step.completed_at = time.time()
+                    vs = verify_dict.get("summary", "") or "verifier rejected"
+                    step.result_summary = (
+                        f"{summary}\n[verifier:{verify_dict.get('verifier_kind','')}] "
+                        f"{vs}"
+                    )[:2000]
+                    # If the plan's overall status was bumped to completed
+                    # by update_plan_step (it checks all-done condition),
+                    # reset it — at least one step is now FAILED.
+                    plan.status = "active"
+                    return json.dumps({
+                        "ok": False,
+                        "error": (
+                            f"Step completion REJECTED by verifier "
+                            f"({verify_dict.get('verifier_kind')}): {vs}"
+                        ),
+                        "verify": verify_dict,
+                        "step": step.to_dict(),
+                        "hint": (
+                            "Fix the underlying issue and call "
+                            "complete_step again, OR call fail_step + "
+                            "replan if this step is unrecoverable."
+                        ),
+                    }, ensure_ascii=False)
+                resp: dict = {"ok": True, "step": step.to_dict()}
+                if verify_dict is not None:
+                    resp["verify"] = verify_dict
+                return json.dumps(resp, ensure_ascii=False)
+
+            # update_plan_step returned None — step_id didn't match any
+            # step in the plan. Surface the available IDs so the LLM can
+            # retry with the right one OR conclude the plan is empty and
+            # stop retrying.
+            available = [{"id": s.id, "title": s.title,
+                          "status": s.status.value if hasattr(s.status, "value") else str(s.status)}
+                         for s in plan.steps]
+            return json.dumps({
+                "ok": False,
+                "error": (
+                    f"step_id {step_id!r} not found in current plan. "
+                    f"Use one of the IDs below (exact string match). "
+                    f"If the plan is empty or the wrong one, call "
+                    f"plan_update(action='create_plan', ...) to replace it, "
+                    f"or skip plan_update for this task."
+                ),
+                "available_steps": available,
+            }, ensure_ascii=False)
         elif action == "add_step":
             step = self.add_plan_step(
                 title=arguments.get("title", ""),
@@ -6515,6 +7801,232 @@ Write only the summary body. Do not include any preamble or prefix."""
             return json.dumps({"error": f"Unknown action: {action}"},
                               ensure_ascii=False)
 
+    # ---- Stale step detection (emergency fix for "IDLE + in_progress" bug) ──
+
+    def _detect_stale_plan_steps(self, threshold_s: float = 120.0,
+                                   emit_frames: bool = True) -> list[dict]:
+        """Find plan steps that are in_progress but the agent isn't actually
+        working on them.
+
+        Two staleness signals:
+
+        1. **agent.status == IDLE** AND step.status == IN_PROGRESS — this is
+           ALWAYS an inconsistency. Nothing can be happening if the agent
+           isn't running. No time threshold needed.
+
+        2. **agent.status == BUSY** AND step.status == IN_PROGRESS AND
+           step.started_at > threshold_s ago AND no new events in the
+           last threshold_s — the LLM or a tool call hung. Time threshold
+           protects against false positives during legit long operations.
+
+        Per user rule (a): this method does NOT mutate step state. It
+        only detects and emits a warning frame to ProgressBus so the UI
+        can surface the issue to a human, who picks mark_failed / skip
+        / resume via dedicated API endpoints.
+
+        Returns a list of dicts describing each stale step (for tests
+        and for the caller to log/act on if it wants).
+        """
+        plan = self._current_plan
+        if plan is None or not plan.steps:
+            return []
+
+        # Figure out agent's current status. Imported lazily to avoid
+        # circular-import pain (agent_types is itself imported from agent).
+        try:
+            from .agent_types import AgentStatus as _AS
+            agent_idle = (self.status == _AS.IDLE)
+        except Exception:
+            agent_idle = str(getattr(self.status, "value", self.status)) == "idle"
+
+        # Most recent agent.events timestamp — proxy for "is anything
+        # actually happening". events is an in-memory list; we cap at
+        # 2000 elsewhere so len() is cheap.
+        latest_event_ts = 0.0
+        try:
+            events = getattr(self, "events", None) or []
+            if events:
+                for evt in reversed(events[-20:]):  # only scan recent
+                    t = getattr(evt, "timestamp", 0.0) or 0.0
+                    if t > latest_event_ts:
+                        latest_event_ts = t
+        except Exception:
+            pass
+
+        now = time.time()
+        stale: list[dict] = []
+        for s in plan.steps:
+            if s.status != StepStatus.IN_PROGRESS:
+                continue
+            started = s.started_at or 0.0
+            age = now - started if started > 0 else 0.0
+
+            reason = ""
+            if agent_idle:
+                # Signal 1 — always stale
+                reason = "agent IDLE with step in_progress"
+            elif started > 0 and age > threshold_s:
+                # Signal 2 — BUSY but no recent events
+                since_activity = now - latest_event_ts if latest_event_ts > 0 else age
+                if since_activity > threshold_s:
+                    reason = (f"no tool activity for {int(since_activity)}s "
+                              f"(threshold {int(threshold_s)}s)")
+
+            if not reason:
+                continue
+
+            stale_info = {
+                "step_id": s.id,
+                "title": s.title,
+                "started_at": started,
+                "stale_s": age,
+                "reason": reason,
+            }
+            stale.append(stale_info)
+
+            if emit_frames:
+                try:
+                    from .progress_bus import emit_step_stale
+                    emit_step_stale(
+                        plan_id=plan.id, step_id=s.id, agent_id=self.id,
+                        step_title=s.title, stale_s=age, reason=reason,
+                    )
+                except Exception as _e:
+                    logger.debug("stale-step frame emit failed: %s", _e)
+
+        return stale
+
+    # ---- Manual-resolution helpers (called by /plan/step/* API endpoints) ──
+
+    def mark_step_failed(self, step_id: str, reason: str = "") -> Optional["ExecutionStep"]:
+        """Human-initiated failure. Moves step → FAILED with reason."""
+        plan = self._current_plan
+        if plan is None:
+            return None
+        for s in plan.steps:
+            if s.id == step_id:
+                s.status = StepStatus.FAILED
+                s.completed_at = time.time()
+                s.result_summary = (
+                    (s.result_summary or "") +
+                    f"\n[manually marked FAILED] {reason}"[:2000]
+                ).strip()
+                # Plan can't be completed if a step is failed
+                plan.status = "active"
+                return s
+        return None
+
+    def mark_step_skipped(self, step_id: str, reason: str = "") -> Optional["ExecutionStep"]:
+        """Human-initiated skip. Moves step → SKIPPED; allows plan to
+        progress past it without the agent's output."""
+        plan = self._current_plan
+        if plan is None:
+            return None
+        for s in plan.steps:
+            if s.id == step_id:
+                s.status = StepStatus.SKIPPED
+                s.completed_at = time.time()
+                s.result_summary = (
+                    (s.result_summary or "") +
+                    f"\n[manually SKIPPED] {reason}"[:2000]
+                ).strip()
+                # Check all-done state now that this one's out of the way
+                if all(x.status in (StepStatus.COMPLETED, StepStatus.SKIPPED)
+                       for x in plan.steps):
+                    plan.status = "completed"
+                    plan.completed_at = time.time()
+                return s
+        return None
+
+    def resume_step(self, step_id: str) -> Optional["ExecutionStep"]:
+        """Human clicks 'continue': reset step's started_at so the stale
+        detector's clock restarts. Does NOT change status — caller should
+        ensure agent is chatting / running so it can pick up where it
+        left off."""
+        plan = self._current_plan
+        if plan is None:
+            return None
+        for s in plan.steps:
+            if s.id == step_id:
+                if s.status == StepStatus.IN_PROGRESS:
+                    s.started_at = time.time()
+                return s
+        return None
+
+    # ---- Block 2 Review loop: verifier helper ──────────────────────
+
+    def _run_step_verifier(self, step: "ExecutionStep") -> Optional[dict]:
+        """Run the verifier declared on ``step`` and return its dict result.
+
+        Returns None when the step has no verify config (caller skips
+        the check). Otherwise always returns a dict (even on crash —
+        VerifyResult itself is crash-safe).
+
+        Also emits a verify_result frame to ProgressBus so the UI
+        timeline sees it even before the plan_state digest updates.
+        """
+        cfg_dict = step.verify or {}
+        if not cfg_dict:
+            return None
+        from .verifier import VerifyConfig, VerifyContext, run_verify
+        cfg = VerifyConfig.from_dict(cfg_dict)
+        if cfg is None:
+            return {
+                "ok": False,
+                "summary": "verify config invalid",
+                "error": f"Invalid verify config on step: {cfg_dict!r}",
+                "verifier_kind": "(invalid)",
+            }
+        # Inject LLM callable for llm_judge verifier. Bridge via this
+        # agent's provider / model so the judge uses the SAME model the
+        # caller is using (keeps cost + behavior consistent).
+        def _llm_call(messages, _options):
+            try:
+                from . import llm as _llm
+                prov, mdl = self._resolve_effective_provider_model()
+                return _llm.chat_no_stream(
+                    messages, tools=None,
+                    provider=prov, model=mdl,
+                    temperature=self._effective_temperature()
+                    if hasattr(self, "_effective_temperature") else None,
+                )
+            except Exception as _llm_err:
+                logger.debug("verifier llm_call failed: %s", _llm_err)
+                return {"message": {"content": ""}}
+        ctx = VerifyContext(
+            workspace_dir=self.shared_workspace or self.working_dir or "",
+            step_started_at=step.started_at,
+            acceptance=step.acceptance,
+            result_summary=step.result_summary,
+            agent_id=self.id,
+            plan_id=self._current_plan.id if self._current_plan else "",
+            step_id=step.id,
+            llm_call=_llm_call,
+        )
+        result = run_verify(cfg, ctx)
+        # Emit progress bus frame for UI timeline — best-effort.
+        try:
+            from .progress_bus import get_bus, ProgressFrame
+            plan_id = self._current_plan.id if self._current_plan else ""
+            get_bus().publish(ProgressFrame(
+                kind="verify_result",
+                channel=f"plan:{plan_id}" if plan_id else f"agent:{self.id}",
+                plan_id=plan_id,
+                step_id=step.id,
+                agent_id=self.id,
+                data={
+                    "ok": result.ok,
+                    "summary": result.summary,
+                    "verifier_kind": result.verifier_kind,
+                    "duration_s": round(result.duration_s, 2),
+                    "required": cfg.required,
+                    "details_preview": (str(result.details) or "")[:500],
+                },
+            ))
+        except Exception as _e:
+            logger.debug("verify_result frame emit failed: %s", _e)
+        return result.to_dict()
+
     # ---- Execution Plan management ----
 
     def create_execution_plan(self, task_summary: str,
@@ -6522,13 +8034,27 @@ Write only the summary body. Do not include any preamble or prefix."""
         """Create a new execution plan for the current task."""
         plan = ExecutionPlan(task_summary=task_summary)
         if steps:
+            _valid_purposes = {"tool-heavy", "multimodal", "reasoning",
+                               "analysis", "default"}
             for s in steps:
                 step = plan.add_step(
                     title=s.get("title", ""),
                     detail=s.get("detail", ""),
+                    acceptance=s.get("acceptance", ""),
+                    verify=s.get("verify"),
                 )
                 if "depends_on" in s:
                     step.depends_on = s["depends_on"]
+                # Capture the LLM's routing hint (new in Phase 1-B). The
+                # primary LLM fills this when it can see the model-scores
+                # table in its system prompt; otherwise it stays "" and
+                # the per-iteration resolver falls back to keyword detection.
+                _purpose = str(s.get("llm_purpose") or "").strip()
+                if _purpose in _valid_purposes:
+                    step.llm_purpose = _purpose
+                _rationale = str(s.get("llm_rationale") or "").strip()
+                if _rationale:
+                    step.llm_rationale = _rationale
         self._current_plan = plan
         self.execution_plans.append(plan)
         # Emit event so UI can update
@@ -6588,6 +8114,133 @@ Write only the summary body. Do not include any preamble or prefix."""
         if self._current_plan:
             return self._current_plan.to_dict()
         return None
+
+    def format_plan_state_for_llm(self) -> str:
+        """P0/L1 — render the current plan as a compact block for the LLM.
+
+        Injected into the conversation right before each LLM call so the
+        model always sees "which step am I on, what does done look like,
+        what's blocking what". Returns empty string when there's no plan
+        or the plan has no steps — caller omits the injection entirely
+        in that case.
+
+        Format (stable; referenced by SKILLs):
+
+            <plan_state>
+            task: 生成云厂商技术服务能力报告 PPT
+            current: [3] 创建 PPTX 报告  (IN_PROGRESS, 2m ago)
+              acceptance: 产出 *.pptx 文件 ≥ 5 slides，落 $AGENT_WORKSPACE
+            done:
+              [1] 搜索 2025 云厂商数据 — "AWS 31%, Azure 25%, GCP 11%"
+              [2] 搜索图表资源      — "找到 3 张 statista 图"
+            pending:
+              [4] 发送邮件           blocked_by=[3]
+            rules:
+              - 只做 current 这一步承诺的事；别跳到 pending
+              - 标完成前在 result_summary 里引用 acceptance 是否满足
+            </plan_state>
+
+        Keep it short: bullets truncated to ~80 chars each; no more than
+        8 done/pending rows shown (older done rows collapsed to counts).
+        """
+        plan = self._current_plan
+        if plan is None or not plan.steps:
+            return ""
+
+        def _truncate(s: str, n: int = 80) -> str:
+            s = (s or "").replace("\n", " ").strip()
+            return s if len(s) <= n else s[: n - 1] + "…"
+
+        def _fmt_step_line(s: ExecutionStep, *, show_acceptance: bool = False) -> str:
+            bits = [f"[{s.order}] {_truncate(s.title, 60)}"]
+            if s.result_summary:
+                bits.append(f'— "{_truncate(s.result_summary, 60)}"')
+            line = "  " + " ".join(bits)
+            if show_acceptance and s.acceptance:
+                line += f"\n    acceptance: {_truncate(s.acceptance, 120)}"
+            return line
+
+        # Partition steps
+        current_steps = [s for s in plan.steps if s.status == StepStatus.IN_PROGRESS]
+        done_steps = [s for s in plan.steps
+                      if s.status in (StepStatus.COMPLETED, StepStatus.SKIPPED)]
+        pending_steps = [s for s in plan.steps if s.status == StepStatus.PENDING]
+        failed_steps = [s for s in plan.steps if s.status == StepStatus.FAILED]
+
+        lines: list[str] = ["<plan_state>"]
+        if plan.task_summary:
+            lines.append(f"task: {_truncate(plan.task_summary, 140)}")
+
+        # CURRENT — highest priority, always show full detail + acceptance
+        if current_steps:
+            lines.append("current:")
+            for s in current_steps:
+                age = ""
+                if s.started_at > 0:
+                    elapsed = time.time() - s.started_at
+                    if elapsed < 60:
+                        age = f", {int(elapsed)}s ago"
+                    elif elapsed < 3600:
+                        age = f", {int(elapsed/60)}m ago"
+                    else:
+                        age = f", {int(elapsed/3600)}h ago"
+                lines.append(f"  [{s.order}] {_truncate(s.title, 60)}  (IN_PROGRESS{age})")
+                if s.acceptance:
+                    lines.append(f"    acceptance: {_truncate(s.acceptance, 140)}")
+                if s.detail and not s.acceptance:
+                    # Fall back to detail when acceptance is empty (legacy plans).
+                    lines.append(f"    detail: {_truncate(s.detail, 140)}")
+        else:
+            # No in-progress step — tell the model so it starts the
+            # next one rather than faking a completion.
+            if pending_steps:
+                nxt = pending_steps[0]
+                lines.append("current: (none — next step to start)")
+                lines.append(f"  [{nxt.order}] {_truncate(nxt.title, 60)}")
+                if nxt.acceptance:
+                    lines.append(f"    acceptance: {_truncate(nxt.acceptance, 140)}")
+            elif not failed_steps and done_steps and \
+                    len(done_steps) == len(plan.steps):
+                lines.append("current: (all steps done — summarize and stop)")
+
+        # DONE — compact (last 5, show summary if present)
+        if done_steps:
+            lines.append("done:")
+            for s in done_steps[-5:]:
+                lines.append(_fmt_step_line(s))
+            if len(done_steps) > 5:
+                lines.append(f"  … (+ {len(done_steps) - 5} earlier)")
+
+        # PENDING — show up to 5, highlight dependencies
+        if pending_steps:
+            lines.append("pending:")
+            for s in pending_steps[:5]:
+                dep_suffix = ""
+                if s.depends_on:
+                    dep_ids = [d[:8] for d in s.depends_on]
+                    dep_suffix = f"  blocked_by={dep_ids}"
+                lines.append(f"  [{s.order}] {_truncate(s.title, 60)}{dep_suffix}")
+            if len(pending_steps) > 5:
+                lines.append(f"  … (+ {len(pending_steps) - 5} more)")
+
+        # FAILED — always show, can't collapse
+        if failed_steps:
+            lines.append("failed:")
+            for s in failed_steps:
+                bits = f"[{s.order}] {_truncate(s.title, 60)}"
+                if s.result_summary:
+                    bits += f' — error: "{_truncate(s.result_summary, 60)}"'
+                lines.append("  " + bits)
+
+        # Rules — minimal, only if we actually have non-trivial plan.
+        if current_steps or pending_steps:
+            lines.append("rules:")
+            lines.append("  - 只做 current 这一步承诺的事；不要跳到 pending")
+            lines.append("  - complete_step 前 result_summary 要引用 acceptance 是否满足")
+            lines.append("  - acceptance 未满足就 fail_step，不要硬标完成")
+
+        lines.append("</plan_state>")
+        return "\n".join(lines)
 
     def get_execution_plans(self, limit: int = 10) -> list[dict]:
         """Get recent execution plans."""

@@ -980,7 +980,7 @@ def _do_post_inner(handler, path: str):
                     agent.multimodal_provider = str(body.get("multimodal_provider") or "")
                 if "multimodal_model" in body:
                     agent.multimodal_model = str(body.get("multimodal_model") or "")
-                # ── 方案乙(a): extra_llms 任意 N 个 LLM slot ──
+                # ── extra_llms 任意 N 个 LLM slot（接受 label 或 provider/model/purpose 任一非空）──
                 if "extra_llms" in body:
                     raw_slots = body.get("extra_llms") or []
                     if not isinstance(raw_slots, list):
@@ -990,14 +990,27 @@ def _do_post_inner(handler, path: str):
                         if not isinstance(s, dict):
                             continue
                         label = str(s.get("label") or "").strip()
-                        # label 不能为空、不能和 purpose 同时缺失
-                        if not label:
+                        provider = str(s.get("provider") or "").strip()
+                        model = str(s.get("model") or "").strip()
+                        purpose = str(s.get("purpose") or "").strip()
+                        if not (label or provider or model or purpose):
                             continue
+                        raw_scores = s.get("scores")
+                        scores_clean: dict = {}
+                        if isinstance(raw_scores, dict):
+                            for k, v in raw_scores.items():
+                                try:
+                                    vf = float(v)
+                                except (TypeError, ValueError):
+                                    continue
+                                if 0.0 <= vf <= 10.0:
+                                    scores_clean[str(k)] = vf
                         cleaned.append({
                             "label": label,
-                            "provider": str(s.get("provider") or "").strip(),
-                            "model": str(s.get("model") or "").strip(),
-                            "purpose": str(s.get("purpose") or "").strip(),
+                            "provider": provider,
+                            "model": model,
+                            "purpose": purpose,
+                            "scores": scores_clean,
                             "note": str(s.get("note") or "").strip(),
                         })
                     agent.extra_llms = cleaned
@@ -1598,13 +1611,20 @@ def _do_post_inner(handler, path: str):
                             skill_entry = skill
                             break
                     if skill_entry:
+                        # Bug fix (Nov 2026): catalog entry's real prompt
+                        # text lives under `entries` — shipping content=""
+                        # left the bound skill inert.
+                        from ..api.routers.agents import (
+                            _assemble_catalog_skill_content as _asm,
+                            _merge_catalog_skill_tags as _mrg,
+                        )
                         record = PromptPack(
                             skill_id=skill_entry.get("id", ""),
                             name=skill_entry.get("name", ""),
                             description=skill_entry.get("description", ""),
                             category=skill_entry.get("category", "general"),
-                            tags=skill_entry.get("tags", []),
-                            content="",
+                            tags=_mrg(skill_entry),
+                            content=_asm(skill_entry),
                             origin="catalog"
                         )
                         registry.store.add_skill(record)
@@ -2294,51 +2314,6 @@ def _do_post_inner(handler, path: str):
             agent.messages[0]["content"] = agent._build_system_prompt()
         hub._save_agents()
         handler._json({"ok": True, "agent_id": agent_id})
-
-    elif path.startswith("/api/portal/agent/") and path.endswith("/thinking/enable"):
-        agent_id = path.split("/")[4]
-        agent = hub.get_agent(agent_id)
-        if not agent:
-            handler._json({"error": "Agent not found"}, 404)
-            return
-        config = body or {}
-        stats = agent.enable_active_thinking(**config)
-        hub._save_agents()
-        handler._json({"ok": True, "stats": stats})
-
-    elif path.startswith("/api/portal/agent/") and path.endswith("/thinking/disable"):
-        agent_id = path.split("/")[4]
-        agent = hub.get_agent(agent_id)
-        if not agent:
-            handler._json({"error": "Agent not found"}, 404)
-            return
-        agent.disable_active_thinking()
-        hub._save_agents()
-        handler._json({"ok": True})
-
-    elif path.startswith("/api/portal/agent/") and path.endswith("/thinking/trigger"):
-        agent_id = path.split("/")[4]
-        agent = hub.get_agent(agent_id)
-        if not agent:
-            handler._json({"error": "Agent not found"}, 404)
-            return
-        trigger = body.get("trigger", "manual")
-        context = body.get("context", "")
-        result = agent.trigger_thinking(trigger=trigger, context=context)
-        hub._save_agents()
-        handler._json({"ok": True, "result": result})
-
-    elif path.startswith("/api/portal/agent/") and path.endswith("/thinking/history"):
-        agent_id = path.split("/")[4]
-        agent = hub.get_agent(agent_id)
-        if not agent:
-            handler._json({"error": "Agent not found"}, 404)
-            return
-        history = []
-        if agent.active_thinking:
-            history = [r.to_dict() for r in agent.active_thinking.history[-20:]]
-        stats = agent.active_thinking.get_stats() if agent.active_thinking else None
-        handler._json({"history": history, "stats": stats})
 
     elif path == "/api/portal/agent/workspace/authorize":
         agent_id = body.get("agent_id", "")

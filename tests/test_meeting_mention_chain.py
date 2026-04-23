@@ -162,6 +162,7 @@ def test_reply_loop_queues_mentioned_agent():
         agent_lookup_fn=agents.get,
         user_msg="kickoff",
         target_agent_ids=["a1"],  # user @s only a1
+        auto_promote_primary=False,  # test isolates @-chain, not Phase-2
     )
 
     # Both agents replied — a1 first, a2 queued by mention detection.
@@ -220,6 +221,7 @@ def test_reply_loop_allows_bounded_ping_pong():
         user_msg="kickoff",
         target_agent_ids=["a1"],
         max_replies_per_agent=3,
+        auto_promote_primary=False,
     )
     # a1 speaks 3 times, a2 speaks 3 times — per-agent cap holds.
     # Order: a1 a2 a1 a2 a1 a2.
@@ -274,6 +276,7 @@ def test_reply_loop_respects_max_total_replies():
         target_agent_ids=["a1"],
         max_replies_per_agent=10,   # high enough not to matter
         max_total_replies=4,         # hard cap hits first
+        auto_promote_primary=False,
     )
     assert len(invocations) == 4
 

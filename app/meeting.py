@@ -61,6 +61,13 @@ class MeetingMessage:
     # tool_call / tool_result / ui_block. See app.agent_event_capture.
     # Rendered by the meeting chat frontend for UX parity with agent chat.
     blocks: list = field(default_factory=list)
+    # P0-A: structured envelope fields for cross-agent handoff. Preferred
+    # when an agent is posting a decision / finding / artifact into the
+    # meeting — keeps the transcript compact when re-injected to peers.
+    # Any of these may be empty; content/detail fallback stays valid.
+    summary: str = ""                # 1-3 sentence conclusion
+    key_fields: dict = field(default_factory=dict)  # decisions / nums / names
+    artifact_refs: list = field(default_factory=list)  # paths / artifact IDs
     created_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict:
@@ -75,10 +82,50 @@ class MeetingMessage:
             role=d.get("role", "agent"),
             content=d.get("content", ""),
             attachments=list(d.get("attachments", []) or []),
-            # Backward-compat: older persisted messages lack this field.
+            # Backward-compat: older persisted messages lack these fields.
             blocks=list(d.get("blocks", []) or []),
+            summary=d.get("summary", "") or "",
+            key_fields=dict(d.get("key_fields", {}) or {}),
+            artifact_refs=list(d.get("artifact_refs", []) or []),
             created_at=d.get("created_at", time.time()),
         )
+
+    def compact_text(self, detail_preview_chars: int = 400) -> str:
+        """Render this message as a compact text for agent re-injection.
+
+        Prefers the envelope (summary / key_fields / artifact_refs)
+        when any is present; falls back to content. Used by the meeting
+        transcript rendering path so peers see structured summaries
+        instead of raw paragraphs.
+        """
+        parts: list[str] = []
+        if self.summary:
+            parts.append(f"📣 {self.summary}")
+        if self.key_fields:
+            try:
+                import json as _j
+                kf = _j.dumps(self.key_fields, ensure_ascii=False, default=str)
+            except Exception:
+                kf = str(self.key_fields)
+            if len(kf) > 400:
+                kf = kf[:400] + "…"
+            parts.append(f"🔑 {kf}")
+        if self.artifact_refs:
+            refs = self.artifact_refs
+            parts.append("📎 " + ", ".join(refs[:5])
+                         + (f" (+{len(refs)-5})" if len(refs) > 5 else ""))
+        if parts:
+            # Structured envelope present — optionally include a short
+            # detail preview so peers can still get a gist without
+            # read_file.
+            if self.content and self.content.strip():
+                c = self.content.strip()
+                if len(c) > detail_preview_chars:
+                    c = c[:detail_preview_chars] + "…"
+                parts.append(f"📄 {c}")
+            return "\n".join(parts)
+        # No envelope fields — legacy raw content.
+        return self.content or ""
 
 
 @dataclass
@@ -98,9 +145,22 @@ class MeetingAssignment:
     project_task_id: str = ""           # link if materialized to ProjectTask
     standalone_task_id: str = ""        # link if materialized to StandaloneTask
     status: AssignmentStatus = AssignmentStatus.OPEN
+    # P0 / Block 2 — the MeetingAssignment now has its own acceptance +
+    # verify. Before this, executor marked DONE iff `agent_chat_fn`
+    # returned a non-error reply — a catastrophically loose contract
+    # that silently passed "LLM responded with prose 'task complete'
+    # but didn't actually run bash to produce pptx and didn't send the
+    # email". acceptance is human-readable; verify is machine-runnable.
+    acceptance: str = ""
+    verify: dict = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     result: str = ""
+    # Re-execution tracking — when the user clicks "重新执行此任务",
+    # we bump this counter and append to result history. Helps the
+    # executor build a continuation prompt that avoids redoing work.
+    reexecute_count: int = 0
+    last_reexecute_at: float = 0.0
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -125,9 +185,13 @@ class MeetingAssignment:
             project_task_id=d.get("project_task_id", ""),
             standalone_task_id=d.get("standalone_task_id", ""),
             status=st,
+            acceptance=d.get("acceptance", ""),
+            verify=dict(d.get("verify") or {}),
             created_at=d.get("created_at", time.time()),
             updated_at=d.get("updated_at", time.time()),
             result=d.get("result", ""),
+            reexecute_count=int(d.get("reexecute_count", 0) or 0),
+            last_reexecute_at=float(d.get("last_reexecute_at", 0.0) or 0.0),
         )
 
 
@@ -184,14 +248,26 @@ class Meeting:
             return True
 
     # ── chat ──
-    def add_message(self, sender: str, content: str, role: str = "agent",
+    def add_message(self, sender: str, content: str = "", role: str = "agent",
                     sender_name: str = "", attachments: list | None = None,
-                    blocks: list | None = None) -> MeetingMessage:
+                    blocks: list | None = None,
+                    summary: str = "",
+                    key_fields: dict | None = None,
+                    artifact_refs: list | None = None) -> MeetingMessage:
+        # P0-A: auto-derive envelope from content if agent didn't supply
+        # one and the content is on the large side (>800 chars). Short
+        # messages stay as-is — no need for the structured wrapper on
+        # "good question" / "ack".
+        if not summary and content and len(content) > 800:
+            summary = content.replace("\n", " ")[:800].rstrip() + "…"
         m = MeetingMessage(
             sender=sender, sender_name=sender_name or sender,
             role=role, content=content,
             attachments=list(attachments or []),
             blocks=list(blocks or []),
+            summary=summary or "",
+            key_fields=dict(key_fields or {}),
+            artifact_refs=list(artifact_refs or []),
         )
         with self._lock:
             self.messages.append(m)
@@ -200,16 +276,96 @@ class Meeting:
     # ── assignments ──
     def add_assignment(self, title: str, assignee_agent_id: str = "",
                        description: str = "", due_hint: str = "",
-                       project_id: str = "") -> MeetingAssignment:
+                       project_id: str = "",
+                       acceptance: str = "",
+                       verify: Optional[dict] = None) -> MeetingAssignment:
         a = MeetingAssignment(
             title=title, description=description,
             assignee_agent_id=assignee_agent_id,
             due_hint=due_hint,
             project_id=project_id or self.project_id,
+            acceptance=acceptance,
+            verify=dict(verify) if verify else {},
         )
         with self._lock:
             self.assignments.append(a)
         return a
+
+    # ── P0 / Block 2 — verifier-gated DONE for meeting assignments ──
+
+    def verify_assignment(self, assignment_id: str,
+                           llm_call: "Callable | None" = None) -> dict:
+        """Run the assignment's declared verifier.
+
+        Called by ``execute_meeting_assignment`` before deciding DONE
+        status. Same shape as Project.verify_task — returns a dict so
+        caller can use it uniformly. Side effects:
+          - On failure (required=True): assignment status → OPEN
+            (can be re-picked by next turn / manual reexecute) and
+            verifier reason appended to result.
+
+        Returns {"ok": True, "verifier_kind": "none"} when no verify
+        is declared (no-op, backward compat with legacy assignments).
+        """
+        from .verifier import VerifyConfig, VerifyContext, run_verify
+        assignment = None
+        with self._lock:
+            for a in self.assignments:
+                if a.id == assignment_id:
+                    assignment = a
+                    break
+        if assignment is None:
+            return {"ok": False, "verifier_kind": "(missing)",
+                    "summary": f"assignment {assignment_id} not found",
+                    "error": "not_found"}
+        if not assignment.verify:
+            return {"ok": True, "verifier_kind": "none",
+                    "summary": "no verifier configured"}
+        cfg = VerifyConfig.from_dict(assignment.verify)
+        if cfg is None:
+            return {"ok": False, "verifier_kind": "(invalid)",
+                    "summary": "assignment.verify config malformed",
+                    "error": f"invalid verify dict: {assignment.verify!r}"}
+        ctx = VerifyContext(
+            workspace_dir=self.workspace_dir or "",
+            step_started_at=assignment.updated_at,
+            acceptance=assignment.acceptance,
+            result_summary=assignment.result,
+            agent_id=assignment.assignee_agent_id,
+            plan_id=self.id,
+            step_id=assignment.id,
+            llm_call=llm_call,
+        )
+        result = run_verify(cfg, ctx)
+        rd = result.to_dict()
+
+        if not result.ok and cfg.required:
+            assignment.status = AssignmentStatus.OPEN
+            reason = f"\n[verifier:{result.verifier_kind}] {result.summary}"
+            assignment.result = (assignment.result + reason)[:4000]
+            assignment.updated_at = time.time()
+
+        # Emit progress frame for UI
+        try:
+            from .progress_bus import get_bus, ProgressFrame
+            get_bus().publish(ProgressFrame(
+                kind="verify_result",
+                channel=f"meeting:{self.id}",
+                plan_id=self.id,
+                step_id=assignment.id,
+                agent_id=assignment.assignee_agent_id,
+                data={
+                    "ok": result.ok,
+                    "summary": result.summary,
+                    "verifier_kind": result.verifier_kind,
+                    "duration_s": round(result.duration_s, 2),
+                    "required": cfg.required,
+                    "assignment_title": assignment.title,
+                },
+            ))
+        except Exception:
+            pass
+        return rd
 
     def update_assignment(self, assignment_id: str, **kwargs) -> Optional[MeetingAssignment]:
         with self._lock:
@@ -635,6 +791,230 @@ class StandaloneTaskRegistry:
 #   Meeting auto-reply loop
 # ────────────────────────────────────────────────────────────
 
+def _count_prior_turns(meeting: "Meeting", agent_id: str) -> int:
+    """Count how many times ``agent_id`` has already replied in this meeting.
+
+    Used by the novelty-decay rule: each successive turn has stricter
+    anti-repetition constraints baked into the prompt.
+    """
+    if not meeting.messages:
+        return 0
+    n = 0
+    for m in meeting.messages:
+        if getattr(m, "role", "") != "assistant":
+            continue
+        if getattr(m, "sender", "") == agent_id:
+            n += 1
+    return n
+
+
+# Agents return these sentinels to signal "I have nothing new to add".
+# The meeting loop treats a PASS as a silent archive: message NOT appended,
+# @-chain NOT triggered, reply_counts NOT incremented. See _is_pass_reply.
+#
+# Matching is STRICT equality (after stripping decoration) — embedded
+# occurrences in longer prose are NOT treated as PASS. This avoids false
+# positives like "我认为 PASS 机制需要设计" being silenced.
+_PASS_EXACT_PHRASES = frozenset({
+    "PASS",        # English sentinel (case-insensitive match on exact-only)
+    "无新增",
+    "无补充",
+    "我与之前发言一致",
+    "我与之前发言一致无补充",
+    "无新增可补充",
+})
+
+
+def _extract_bullets(text: str) -> list[str]:
+    """Extract bullet points from an agent reply.
+
+    Matches:
+      - markdown bullets:  "- foo" / "* foo" / "+ foo"
+      - numbered lists:    "1. foo" / "1) foo" / "**1. foo**"
+      - CJK numbered:      "一、foo" / "（一）foo"
+      - **bold** first phrase at line start (often treated as bullet)
+
+    Returns bullet texts with leading markers stripped. If no bullets
+    found, falls back to sentence split so plain-prose replies still
+    participate in dedup.
+    """
+    import re as _re
+    if not text:
+        return []
+    bullets: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        # Strip decoration markers
+        m = _re.match(
+            r"^(?:[-*+•]\s+|\d+[.)]\s+|\*\*\d+[.)]\s*|一二三四五六七八九十][、.)\s]+|"
+            r"（[一二三四五六七八九十]+）\s*)(.+)$",
+            line,
+        )
+        if m:
+            content = m.group(1).strip()
+        else:
+            content = line
+        # Strip wrapping bold/italic
+        content = _re.sub(r"^\*\*(.+?)\*\*\s*[:：]?\s*", r"\1: ", content)
+        content = content.strip("*_ \t")
+        if content and len(content) >= 4:
+            bullets.append(content)
+    if bullets:
+        return bullets
+    # Fallback: sentence split on 。！？.!? and newline
+    parts = _re.split(r"[。！？\.!?\n]+", text)
+    return [p.strip() for p in parts if p.strip() and len(p.strip()) >= 4]
+
+
+def _char_bigrams(text: str) -> set[str]:
+    """Character bigrams for short-text similarity.
+
+    CJK-friendly: each char pair contributes one bigram, so "技术服务"
+    yields {"技术", "术服", "服务"}. English: lowercased before bigramming.
+    Short text (<2 chars) returns a single-char "unigram set" so exact
+    matches still compare.
+    """
+    if not text:
+        return set()
+    t = text.lower()
+    # Drop whitespace and low-signal punctuation so "a, b" bigrams to {"ab"}.
+    import re as _re
+    t = _re.sub(r"[\s，。,.:：；;！!？?\-—/()（）\[\]【】\"'\*_`]+", "", t)
+    if len(t) < 2:
+        return {t} if t else set()
+    return {t[i:i+2] for i in range(len(t) - 1)}
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    """Jaccard similarity of two sets."""
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    union = len(a | b)
+    return inter / union if union else 0.0
+
+
+def _containment(incoming: set[str], reference: set[str]) -> float:
+    """Containment coefficient — how much of `incoming` is covered by `reference`.
+
+    Defined as |incoming ∩ reference| / |incoming|. Asymmetric: asks the
+    question "is this new bullet mostly already stated in the corpus?"
+    which is exactly the dedup check we need. Unlike Jaccard this
+    doesn't penalize the reference for being much longer — useful when
+    comparing a short new bullet against a big corpus of prior bullets.
+    """
+    if not incoming:
+        return 0.0
+    if not reference:
+        return 0.0
+    inter = len(incoming & reference)
+    return inter / len(incoming)
+
+
+# Threshold above which a bullet is considered "already said". Uses
+# containment (how much of the new bullet is covered by prior bullets),
+# not Jaccard, because Jaccard under-fires on paraphrases where one
+# side is shorter. Tuned empirically:
+#   - 0.65 flags close paraphrases ("团队分层级 - 技术专家30%/方案顾问40%"
+#     restated as "分层级架构（技术专家30%、方案顾问40%）")
+#   - 0.65 does NOT flag genuinely-new bullets that share domain vocab
+# Adjust via TUDOU_MEETING_DEDUP_THRESHOLD env var if needed.
+_DEDUP_SIM_THRESHOLD = float(
+    os.environ.get("TUDOU_MEETING_DEDUP_THRESHOLD", "0.55")
+)
+
+
+def _is_reply_all_stale(reply: str, meeting: "Meeting",
+                        exclude_agent_id: str = "") -> tuple[bool, int, int]:
+    """Check if ``reply``'s bullets all overlap with prior meeting content.
+
+    Returns (is_all_stale, stale_count, total_count).
+
+    - For each bullet in the incoming reply, compute max similarity
+      against every bullet extracted from all prior meeting messages
+      (assistant + user). If max sim ≥ threshold → that bullet is stale.
+    - If ALL bullets are stale → treat the whole reply as noise.
+
+    Called AFTER the agent produces its reply but BEFORE we commit it.
+    Use exclude_agent_id = the current speaker so we don't count the
+    speaker's OWN prior bullets (self-overlap is a different problem
+    handled by novelty-decay constraints in the prompt).
+
+    Short replies (< 30 chars of real text after strip) bypass this
+    check entirely — they're usually "@name acked" / "ok" / clarifying
+    questions that don't warrant dedup. The opinion-loop problem only
+    shows up with substantive multi-bullet replies.
+    """
+    if not reply or len(reply.strip()) < 30:
+        return (False, 0, 0)
+    incoming = _extract_bullets(reply or "")
+    if not incoming:
+        return (False, 0, 0)
+
+    # Gather prior bullets across the meeting.
+    prior_bullets: list[set[str]] = []
+    for m in (meeting.messages or []):
+        if getattr(m, "role", "") not in ("user", "assistant"):
+            continue
+        content = getattr(m, "content", "") or ""
+        if not content:
+            continue
+        for b in _extract_bullets(content):
+            prior_bullets.append(_char_bigrams(b))
+
+    if not prior_bullets:
+        return (False, 0, len(incoming))
+
+    stale = 0
+    for bullet in incoming:
+        bg = _char_bigrams(bullet)
+        if not bg:
+            continue
+        max_sim = 0.0
+        for pg in prior_bullets:
+            s = _containment(bg, pg)  # "how much of incoming is in prior?"
+            if s > max_sim:
+                max_sim = s
+                if max_sim >= _DEDUP_SIM_THRESHOLD:
+                    break
+        if max_sim >= _DEDUP_SIM_THRESHOLD:
+            stale += 1
+
+    return (stale == len(incoming), stale, len(incoming))
+
+
+def _is_pass_reply(content: str) -> bool:
+    """True if the agent's reply is an explicit PASS (no-new-info signal).
+
+    Only triggers when the ENTIRE response (after stripping punctuation,
+    markdown, and wrapping quotes/brackets) exactly matches a sentinel
+    phrase. Embedded occurrences in longer text are NOT treated as PASS.
+    """
+    if not content:
+        return False
+    stripped = content.strip()
+    # Strip common decoration: markdown / quotes / brackets / punctuation.
+    for bad in ("```", '"', "'", "「", "」", "『", "』", "*", "_",
+                "。", "，", "：", ":", ".", ",", "(", ")", "（", "）",
+                "!", "?", "！", "？", "…"):
+        stripped = stripped.replace(bad, "")
+    stripped = stripped.strip()
+    if not stripped:
+        return False
+    # Case-insensitive exact match only.
+    upper = stripped.upper()
+    if upper in _PASS_EXACT_PHRASES:
+        return True
+    # Also accept the Chinese phrases without case-folding (they're case-neutral).
+    if stripped in _PASS_EXACT_PHRASES:
+        return True
+    return False
+
+
 def _build_meeting_prompt(meeting: "Meeting", agent, user_msg: str,
                            tail: int = 20) -> str:
     """Build an LLM prompt that gives a participant agent enough context
@@ -662,6 +1042,17 @@ def _build_meeting_prompt(meeting: "Meeting", agent, user_msg: str,
     ]
     if meeting.workspace_dir:
         lines.append(f"- 共享目录: {meeting.workspace_dir}")
+        # Tool-usage hint — without this agents call `glob_files **/*.pptx`
+        # which runs against THEIR OWN working_dir (empty) and returns
+        # "No files found", so they incorrectly tell the user the file
+        # doesn't exist. File sandbox is already set to allow this path;
+        # we just need to tell them to pass it as the base.
+        lines.append(
+            f"  · 读文件/查找用**绝对路径**从共享目录开始。例："
+            f"`glob_files('{meeting.workspace_dir}/**/*.pptx')`、"
+            f"`read_file('{meeting.workspace_dir}/<filename>')`。"
+            f"相对路径会落在你自己的 working_dir（空的），查不到会议附件。"
+        )
     # Inline MCP summary — avoids the "没有绑定 MCP" hallucination
     # where the agent forgets to consult its workspace/MCP.md.
     bound_mcp_names = _summarize_bound_mcps(agent)
@@ -676,19 +1067,62 @@ def _build_meeting_prompt(meeting: "Meeting", agent, user_msg: str,
             st = a.status.value if hasattr(a.status, "value") else str(a.status)
             lines.append(f"- [{st}] {a.title} → {a.assignee_agent_id or '待分配'}")
 
+    # ── Novelty-decay (sprint-collab C) ────────────────────────────
+    # Count how many times THIS agent has already spoken in the meeting
+    # and graduate the speech constraints. Empirical observation: when
+    # agents keep accumulating "one more point" on top of each other,
+    # the cumulative transcript balloons while signal-to-noise drops.
+    # The graduated constraint forces a PASS unless genuinely new info
+    # is on the table.
+    prior_turns = _count_prior_turns(meeting, getattr(agent, "id", ""))
+
+    if prior_turns == 0:
+        # First turn — full freedom, usual constraints only.
+        novelty_rules = [
+            "1. **聚焦当前话题**：只针对主持人最新发言涉及的那一个话题回应",
+            "2. **简短为先**：默认 120 字以内，只有在提出全新专业分析时可到 250 字",
+            "3. **禁止复述他人观点**：前面发言已出现的论点不得再次写出",
+        ]
+    elif prior_turns == 1:
+        # Second turn — skeptical mode, must have new evidence or PASS.
+        novelty_rules = [
+            "⚠️ **你已在本会议发言 1 次**。本轮只在以下情况回复：",
+            "  (a) 前面讨论中**出现了你还未回应的具体数据/场景/冲突**；或",
+            "  (b) 主持人**明确点名要你补充或反驳**；或",
+            "  (c) 你发现前面发言里有**事实错误**需要纠正",
+            "否则**只输出一个词 `PASS`**（不加解释、不加标点）。",
+            "",
+            "若确需发言：",
+            "- **只说新东西**。禁止总结/复述/再分类前面已有的论点",
+            "- **上限 80 字**。超出视为违规",
+        ]
+    else:
+        # Third+ turn — near-silent. Only actual disagreement or new facts.
+        novelty_rules = [
+            f"🛑 **你已在本会议发言 {prior_turns} 次**。本轮**必须输出 `PASS`**，除非：",
+            "  (a) 前面刚刚出现了**你从未回应过的新事实/数据**；或",
+            "  (b) 主持人**在最新这句话里直接@你**要你做具体事",
+            "否则**只输出 `PASS`**。",
+            "",
+            "若确需发言：**上限 50 字**，且必须指向具体事实，不能是立场重申。",
+        ]
+
     lines.extend([
         "",
         f"## 你的身份",
         f"角色: {role}",
         f"名字: {name}",
+        f"（本会议你已发言 {prior_turns} 次）",
         "",
-        "## 发言要求（严格遵守，否则被视为无效发言）",
-        "1. **聚焦当前话题**：只针对主持人最新发言涉及的那一个话题回应，不要主动展开其他话题",
-        "2. **立场表态只说一次**：若你之前已在本会议中就这个议题表过态，**不要重复立场**。只补充全新的视角/数据/风险；如果没有新东西可补充，请直接说「我与之前发言一致，无补充」",
-        "3. **禁止复述他人观点**：前面的发言（无论主持人还是其他 Agent）中已出现的论点，不得再次写出",
-        "4. **简短为先**：默认控制在 120 字内。只有在提出全新专业分析时可到 250 字",
-        "5. **响应主持人的指令**：若主持人要求某件具体事情（做洞察、出方案、暂停等），直接照做，不要把它当成新议题再讨论",
-        "6. 投票/行动项只在主持人明确要求投票/分派任务时写，不要每次发言都附带",
+        "## 发言要求（严格遵守）",
+    ])
+    lines.extend(novelty_rules)
+    lines.extend([
+        "",
+        "## 通用纪律",
+        "- **响应主持人的具体指令**：要你做洞察/出方案/暂停时直接照做，不要把指令当成新议题再讨论",
+        "- 投票/行动项**只在主持人明确要求时**才写，不要每次都附带",
+        "- 若要 @ 其他 agent 必须有**具体协作需求**（对方需要做某件事），不要礼节性 @",
         "",
         "── 会议讨论记录 ──",
     ])
@@ -808,10 +1242,18 @@ _TASK_TRIGGER_WORDS: tuple[str, ...] = (
     "制作", "准备", "整理", "起草", "草拟",
     "调研", "调查", "研究", "分析", "验证", "核实", "评估", "梳理",
     "负责", "承担",
+    # Retry / fix / follow-up scenarios — previously missed cases like
+    # "@小土 收到邮件但没有附件" where the moderator clearly wants the
+    # agent to redo something. Without these the detector returned []
+    # and Phase-2 never fired, so the agent would only say "我将重做..."
+    # in discussion prose and then stall.
+    "重新", "重发", "重做", "重试", "再发", "再次", "再做",
+    "修复", "补发", "补上", "补齐", "修正",
     # English
     "complete", "finish", "write a", "produce", "prepare", "draft",
     "investigate", "research", "analyze", "analyse", "verify",
     "review", "summarize", "compile",
+    "retry", "resend", "redo", "fix", "correct",
 )
 
 
@@ -852,6 +1294,37 @@ def _detect_task_assignment(
     title = content.strip().replace("\n", " ")[:80]
     return [{"assignee_agent_id": aid, "title": title}
             for aid in mentioned_ids]
+
+
+# ── Self-commitment detection ───────────────────────────────────────
+# Separate from _detect_task_assignment: that one fires when a user /
+# moderator @-mentions an agent with a task verb. THIS one fires when
+# an agent's OWN reply commits to follow-up work without anyone
+# re-prompting them. Previously those commits died in discussion-phase
+# prose (user saw "我将重新发送邮件" and then nothing happens).
+_SELF_COMMIT_PATTERNS: tuple[str, ...] = (
+    "我将", "我会", "我来", "让我", "马上", "立即",
+    "i'll", "i will", "let me", "going to",
+)
+
+
+def _detect_self_commitment(content: str) -> bool:
+    """True if the agent's own message commits to follow-up work.
+
+    Must match both a self-commit pronoun ("我将" / "I'll") AND a task
+    trigger word ("重新发送" / "resend"). Either alone is ambiguous
+    (agent philosophizing vs. agent promising). Combination is a
+    reliable signal that a concrete action is about to be taken — or,
+    crucially, WILL NOT be taken without intervention.
+    """
+    if not content:
+        return False
+    low = content.lower()
+    has_commit = any(p in content or p in low for p in _SELF_COMMIT_PATTERNS)
+    if not has_commit:
+        return False
+    has_task = any(w in content for w in _TASK_TRIGGER_WORDS)
+    return has_task
 
 
 def _find_at_mentioned_agents(
@@ -931,6 +1404,40 @@ def _find_at_mentioned_agents(
     return found
 
 
+def _extract_prior_handoffs(meeting: "Meeting",
+                            exclude_agent_id: str = "",
+                            max_items: int = 4) -> list[dict]:
+    """Scan meeting messages for prior emit_handoff event payloads.
+
+    Returns the most-recent ``max_items`` handoff payloads (newest last
+    so they appear in chronological order in the prompt). Excludes
+    handoffs emitted by ``exclude_agent_id`` so an agent doesn't see its
+    own old handoff as "incoming context".
+    """
+    out: list[dict] = []
+    msgs = list(meeting.messages or [])
+    for m in msgs:
+        blocks = getattr(m, "blocks", None) or []
+        for blk in blocks:
+            if not isinstance(blk, dict):
+                continue
+            if blk.get("kind") != "handoff":
+                continue
+            data = blk.get("data") or {}
+            from_aid = str(data.get("from_agent") or "")
+            if exclude_agent_id and from_aid == exclude_agent_id:
+                continue
+            payload = data.get("handoff") or {}
+            if not isinstance(payload, dict) or not payload.get("summary"):
+                continue
+            out.append({
+                "from_agent": from_aid,
+                "from_name": getattr(m, "sender_name", "") or "",
+                "payload": payload,
+            })
+    return out[-max_items:] if len(out) > max_items else out
+
+
 def _build_execution_prompt(
     meeting: "Meeting",
     agent,
@@ -987,6 +1494,49 @@ def _build_execution_prompt(
         "- 调用 `submit_deliverable` 注册产出，让用户在会议 Deliverables "
         "栏看到。",
     ])
+    # Prior handoffs — baton passed from earlier-executing agents. Show
+    # the next agent exactly what came before so they can build on it
+    # instead of re-doing work or losing context.
+    prior_handoffs = _extract_prior_handoffs(
+        meeting, exclude_agent_id=getattr(agent, "id", "") or "", max_items=4,
+    )
+    if prior_handoffs:
+        lines.append("")
+        lines.append("## 上一棒 —— 之前 agent 的交接")
+        lines.append(
+            "下面是在你之前完成任务的 agent 留下的结构化交接。**先读这个**，"
+            "然后再决定你要产出什么。如果交接里已经有你这次任务要的东西，"
+            "你的工作就是补充/推进，不是重做。"
+        )
+        for h in prior_handoffs:
+            payload = h["payload"]
+            from_label = h["from_name"] or h["from_agent"][:8] or "上一位"
+            lines.append("")
+            lines.append(f"**来自 {from_label}**")
+            lines.append(f"- 摘要: {payload.get('summary', '')}")
+            dpath = payload.get("deliverable_path") or ""
+            if dpath:
+                lines.append(f"- 产出: `{dpath}`（用 read_file 打开）")
+            hls = payload.get("highlights") or []
+            if hls:
+                lines.append("- 要点:")
+                for hl in hls[:6]:
+                    lines.append(f"  - {hl}")
+            fus = payload.get("followups") or []
+            # Filter follow-ups to ones addressed to THIS agent, if any match.
+            my_name = (getattr(agent, "name", "") or "").strip()
+            my_role = (getattr(agent, "role", "") or "").strip()
+            mine = [
+                fu for fu in fus if (
+                    fu.get("for", "").strip() == my_name
+                    or fu.get("for", "").strip() == my_role
+                )
+            ]
+            if mine:
+                lines.append("- 给你的待办:")
+                for fu in mine:
+                    lines.append(f"  - {fu.get('task', '')}")
+
     if bound_mcps:
         lines.extend([
             "",
@@ -1010,7 +1560,12 @@ def _build_execution_prompt(
         "`submit_deliverable` 注册。纯文本回复视为未完成。",
         "4. **完成后简短总结** —— 工具跑完后给一条简短的完成说明"
         "（200 字内），指向 deliverable 路径 / 链接，不要把文件内容原文粘回来。",
-        "5. **不要再 @ 其他 agent** —— 这是你单独执行的阶段，需要协作就在"
+        "5. **完成时调用 `emit_handoff`** —— 把你的产出用结构化 payload "
+        "交接给下一位 agent：`summary` 一段话说你做了什么，`deliverable_path` "
+        "指向产出文件，`highlights` 列关键结论/数据，`followups` 点名下一位"
+        "（role 或 name）该做什么。这会在聊天里显示一张交接卡片，并自动注入"
+        "下一个 agent 的 system prompt，他们就不用翻整个讨论记录。",
+        "6. **不要再 @ 其他 agent** —— 这是你单独执行的阶段，需要协作就在"
         "讨论阶段做；执行阶段保持独立。",
         "",
         "── 会议讨论记录（背景上下文，只读）──",
@@ -1029,6 +1584,113 @@ def _build_execution_prompt(
     return "\n".join(lines)
 
 
+def _build_resume_prompt(meeting: "Meeting", agent,
+                          assignment: "MeetingAssignment") -> str:
+    """Compose a token-efficient continuation prompt.
+
+    Key insight: the agent's `_current_plan` is already persisted. We
+    read its per-step status to tell the LLM exactly which parts are
+    DONE (don't redo) vs remaining (your job). Also scan the meeting
+    workspace for artifacts newer than assignment.created_at — those
+    are prior work the LLM should reuse, not regenerate.
+
+    This prompt is MUCH shorter than `_build_execution_prompt`'s
+    full re-briefing; it assumes the agent recently worked on this
+    task and just needs a focused nudge on what's left.
+    """
+    lines: list[str] = []
+    lines.append(f"你之前在执行这个任务被中断了，现在**继续**（第 "
+                 f"{assignment.reexecute_count} 次重试）。不要从头开始。")
+    lines.append("")
+    lines.append(f"## 原任务")
+    lines.append(f"**{assignment.title}**")
+    if assignment.description:
+        lines.append(f"详情：{assignment.description}")
+    if assignment.acceptance:
+        lines.append(f"**验收标准**：{assignment.acceptance}")
+    lines.append("")
+
+    # ── 1. 已完成的 plan steps（权威来源）─────────────────────
+    plan = getattr(agent, "_current_plan", None)
+    if plan is not None and plan.steps:
+        completed = [s for s in plan.steps
+                      if s.status.value in ("completed", "skipped")]
+        unfinished = [s for s in plan.steps
+                       if s.status.value in ("in_progress", "failed", "pending")]
+        if completed:
+            lines.append("## ✅ 已完成的步骤（不要重做）")
+            for s in completed:
+                bullet = f"- [{s.order}] {s.title}"
+                if s.result_summary:
+                    bullet += f" — \"{s.result_summary[:100]}\""
+                lines.append(bullet)
+            lines.append("")
+        if unfinished:
+            lines.append("## ⏳ 待完成的步骤（你要做的）")
+            for s in unfinished:
+                bullet = f"- [{s.order}] **{s.title}** ({s.status.value})"
+                if s.acceptance:
+                    bullet += f"\n      acceptance: {s.acceptance}"
+                if s.result_summary:
+                    bullet += f"\n      上次状态: {s.result_summary[:150]}"
+                lines.append(bullet)
+            lines.append("")
+
+    # ── 2. 工作区已有文件（直接复用，不要重新生成）─────────────
+    ws = meeting.workspace_dir or ""
+    if ws and os.path.isdir(ws):
+        import glob as _glob
+        existing: list[tuple[str, int, float]] = []
+        # Only files created since this assignment started — earlier
+        # files belong to unrelated work.
+        threshold = assignment.created_at
+        for path in _glob.glob(os.path.join(ws, "**/*"), recursive=True):
+            try:
+                if not os.path.isfile(path):
+                    continue
+                st = os.stat(path)
+                if st.st_mtime < threshold:
+                    continue
+                rel = os.path.relpath(path, ws)
+                existing.append((rel, st.st_size, st.st_mtime))
+            except OSError:
+                continue
+        # Show top 10 by mtime desc
+        existing.sort(key=lambda x: x[2], reverse=True)
+        if existing:
+            lines.append("## 📂 工作区已有产物（可以直接用，不要重新生成）")
+            for rel, size, mtime in existing[:10]:
+                size_s = (f"{size} B" if size < 1024
+                          else f"{size//1024} KB" if size < 1024*1024
+                          else f"{size//(1024*1024)} MB")
+                lines.append(f"- `{rel}` ({size_s})")
+            if len(existing) > 10:
+                lines.append(f"- ... 还有 {len(existing)-10} 个（用 glob_files 查完整列表）")
+            lines.append("")
+
+    # ── 3. 如果之前的中断原因有线索（比如 verifier 失败），带上
+    if assignment.result and "[verifier:" in assignment.result:
+        lines.append("## ⚠️ 上次中断原因")
+        # Extract the last [verifier:...] line
+        for line in assignment.result.split("\n")[::-1]:
+            if "[verifier:" in line:
+                lines.append(line.strip())
+                break
+        lines.append("")
+
+    # ── 4. 指令，短 ──────────────────────────────────────
+    lines.extend([
+        "## 你现在要做的",
+        "1. 先用 `glob_files` / `read_file` 快速确认工作区现状（已有的产物是什么、脚本是否能跑）",
+        "2. 从上面**待完成的步骤**开始，按顺序推进",
+        "3. 每完成一步都调 `plan_update(complete_step)`，standard 流程",
+        "4. 全部完成后给出简短总结（≤200 字）+ 邮件/附件送达的证据（message_id / 文件路径）",
+        "",
+        "记住：**不要重新生成已经存在的文件**，读它们，在上面改。",
+    ])
+    return "\n".join(lines)
+
+
 def execute_meeting_assignment(
     meeting: "Meeting",
     registry: "MeetingRegistry",
@@ -1036,6 +1698,8 @@ def execute_meeting_assignment(
     agent_lookup_fn: Callable[[str], object],
     assignment: "MeetingAssignment",
     gen: Optional[int] = None,
+    *,
+    resume: bool = False,
 ) -> None:
     """Run the background execution phase for a single assignment.
 
@@ -1091,18 +1755,37 @@ def execute_meeting_assignment(
     except Exception:
         pass
 
+    # Re-execute bookkeeping — bump counter + timestamp so continuation
+    # prompt + audit can show "this is try #N".
+    if resume:
+        try:
+            assignment.reexecute_count += 1
+            assignment.last_reexecute_at = time.time()
+        except Exception:
+            pass
+
     try:
+        status_banner = (f"🚧 开始执行任务：{assignment.title}"
+                         if not resume
+                         else f"🔁 重新执行任务（第 {assignment.reexecute_count} 次）："
+                              f"{assignment.title}")
         meeting.add_message(
             sender=aid,
             sender_name=sender_label,
             role="system",
-            content=f"🚧 开始执行任务：{assignment.title}",
+            content=status_banner,
         )
         registry.save()
     except Exception:
         pass
 
-    prompt = _build_execution_prompt(meeting, ag, assignment)
+    # Build the prompt. Resume mode scans the agent's persisted plan +
+    # meeting workspace to compose a continuation prompt that tells the
+    # LLM what's already done — saving tokens and preventing re-work.
+    if resume:
+        prompt = _build_resume_prompt(meeting, ag, assignment)
+    else:
+        prompt = _build_execution_prompt(meeting, ag, assignment)
 
     # Execution-mode thread-local: NOT meeting context, so tool handlers
     # that route based on get_meeting_context (e.g. task_update routing
@@ -1158,25 +1841,101 @@ def execute_meeting_assignment(
             pass
         return
 
-    success = bool(reply) and not reply.startswith("❌")
+    # ── New completion contract (P0 + P1) ─────────────────────────
+    # Previous logic: success = bool(reply) and not reply.startswith("❌")
+    # That was too loose — LLM returning prose ("task complete") with no
+    # actual tool work also passed. Now we gate DONE on:
+    #   (1) reply is non-empty and not an error
+    #   (2) agent's plan (if any) has no in_progress/failed steps left
+    #   (3) assignment's declared verifier (if any) passes
+    # If ANY of these fails, assignment stays OPEN (will be picked up by
+    # next turn or manual re-execute).
+    reply_ok = bool(reply) and not (reply or "").startswith("❌")
+    plan_ok = True
+    plan_reason = ""
+    try:
+        plan = getattr(ag, "_current_plan", None)
+        if plan is not None and plan.steps:
+            unfinished = [s for s in plan.steps
+                           if s.status.value in ("in_progress", "failed", "pending")]
+            if unfinished:
+                plan_ok = False
+                plan_reason = (
+                    f"{len(unfinished)} plan step(s) unfinished: "
+                    + ", ".join(f"{s.title}[{s.status.value}]"
+                                 for s in unfinished[:3])
+                    + ("..." if len(unfinished) > 3 else "")
+                )
+    except Exception:
+        pass
+
+    # Verifier gate — only runs if reply_ok + plan_ok (no point verifying
+    # artifacts when LLM errored or plan is clearly not done).
+    verify_result = None
+    if reply_ok and plan_ok and assignment.verify:
+        try:
+            def _llm_call(messages, _opts):
+                try:
+                    from . import llm as _llm
+                    prov, mdl = ag._resolve_effective_provider_model()
+                    return _llm.chat_no_stream(
+                        messages, tools=None, provider=prov, model=mdl,
+                        temperature=(ag._effective_temperature()
+                                      if hasattr(ag, "_effective_temperature")
+                                      else None),
+                    )
+                except Exception as _e:
+                    logger.debug("verify llm_call failed: %s", _e)
+                    return {"message": {"content": ""}}
+            verify_result = meeting.verify_assignment(
+                assignment.id, llm_call=_llm_call,
+            )
+        except Exception as _verr:
+            logger.warning(
+                "meeting %s: verifier failed for assignment %s: %s",
+                meeting.id, assignment.id, _verr,
+            )
+            verify_result = {"ok": False, "verifier_kind": "(error)",
+                             "summary": str(_verr)[:200]}
+
+    verify_ok = (verify_result is None) or verify_result.get("ok", False)
+    overall_done = reply_ok and plan_ok and verify_ok
+
+    # Compose the assistant message — append a one-line status the user
+    # can read in the meeting transcript without opening execution logs.
+    final_content = reply or "(no output)"
+    if not overall_done:
+        reasons = []
+        if not reply_ok:
+            reasons.append("agent returned error or empty reply")
+        if not plan_ok:
+            reasons.append(plan_reason)
+        if verify_result is not None and not verify_result.get("ok", False):
+            reasons.append(
+                f"verifier:{verify_result.get('verifier_kind','?')} "
+                f"{verify_result.get('summary','')}"
+            )
+        final_content += ("\n\n⚠️ 任务尚未完成:\n  - " +
+                          "\n  - ".join(reasons) +
+                          "\n(task stays OPEN — click 重新执行 to continue from where it stopped)")
 
     try:
         meeting.add_message(
             sender=aid,
             sender_name=sender_label,
             role="assistant",
-            content=reply or "(no output)",
+            content=final_content,
             blocks=captured_blocks,
         )
         if hasattr(assignment, "status"):
             try:
                 assignment.status = (
-                    AssignmentStatus.DONE if success else AssignmentStatus.OPEN
+                    AssignmentStatus.DONE if overall_done
+                    else AssignmentStatus.OPEN
                 )
             except Exception:
                 pass
-            if success:
-                assignment.result = (reply or "")[:2000]
+            assignment.result = final_content[:2000]
             assignment.updated_at = time.time()
         registry.save()
     except Exception as e:
@@ -1196,6 +1955,7 @@ def meeting_agent_reply(meeting: "Meeting",
                           max_replies_per_agent: int = 3,
                           max_total_replies: int = 12,
                           multimodal_parts: Optional[list[dict]] = None,
+                          auto_promote_primary: bool = True,
                           gen: Optional[int] = None) -> None:
     """Trigger each participant agent to reply in the meeting.
 
@@ -1257,6 +2017,20 @@ def meeting_agent_reply(meeting: "Meeting",
                 meeting.id, gen, current_meeting_reply_gen(meeting.id),
             )
             return
+        # Centralized abort registry — triggered by the global
+        # /api/*/abort endpoint. Complementary to the gen-counter
+        # check (which only responds to a NEW user message); this one
+        # responds to an explicit "stop" button with no replacement.
+        try:
+            from . import abort_registry as _ar
+            if _ar.is_aborted(_ar.meeting_key(meeting.id)):
+                logger.info(
+                    "meeting %s reply sequence aborted — registry signal",
+                    meeting.id,
+                )
+                return
+        except Exception:
+            pass
         if meeting.status in (MeetingStatus.CLOSED, MeetingStatus.CANCELLED):
             return
         ag = None
@@ -1286,10 +2060,26 @@ def meeting_agent_reply(meeting: "Meeting",
             # tool_call / ui_block events emitted during THIS reply for
             # render in the meeting chat (UX parity with agent chat).
             events_cursor = snapshot_event_count(ag)
+            # Mount the meeting's shared workspace on the agent for the
+            # duration of this turn so read_file / glob_files / edit_file
+            # can reach artifacts other participants already produced
+            # (PPT attachments, prior handoff drafts, etc.). Without this
+            # the sandbox rejects the meeting workspace path as "escapes
+            # jail root" — which is exactly the error users saw with
+            # Sandbox violation on cloud_delivery_insights.pptx.
+            #
+            # Same pattern as execute_meeting_assignment: mutate, then
+            # restore in finally so the agent's usual workspace isn't
+            # permanently changed.
+            _prior_shared_ws = getattr(ag, "shared_workspace", "") or ""
+            _meeting_ws = getattr(meeting, "workspace_dir", "") or ""
+            if _meeting_ws:
+                ag.shared_workspace = _meeting_ws
             try:
                 reply = agent_chat_fn(aid, chat_msg)
             finally:
                 set_meeting_context("")
+                ag.shared_workspace = _prior_shared_ws
             captured_blocks = capture_events_since(ag, events_cursor)
         except Exception as e:
             reply = f"❌ 回复失败: {e}"
@@ -1302,6 +2092,71 @@ def meeting_agent_reply(meeting: "Meeting",
                 meeting.id, aid,
             )
             return
+
+        # ── Sprint-collab C: PASS handling ─────────────────────────
+        # The novelty-decay prompt instructs the agent to output "PASS"
+        # when it has nothing new to add. We detect this and:
+        #   - NOT append to meeting.messages (no log pollution)
+        #   - NOT increment reply_counts / total_replies (keeps the
+        #     cap for agents who DO have something to say)
+        #   - NOT scan for @-mentions (no chain from a pass)
+        #   - Log a single system bubble so the user still sees "小安
+        #     passed"; this is UX, not content.
+        if _is_pass_reply(reply or ""):
+            try:
+                role = getattr(ag, "role", "") or "agent"
+                aname = getattr(ag, "name", "") or aid
+                meeting.add_message(
+                    sender=aid,
+                    sender_name=f"{role}-{aname}",
+                    role="system",
+                    content=f"（{aname} pass — 无新增）",
+                )
+                registry.save()
+            except Exception:
+                pass
+            logger.info(
+                "meeting %s: %s returned PASS — not counted, not chained",
+                meeting.id, aid[:8] if aid else "?",
+            )
+            continue
+
+        # ── Sprint-collab A: semantic dedup ────────────────────────
+        # Belt-and-suspenders against the novelty-decay rule in the
+        # prompt: even when the LLM ignores the "output PASS" instruction
+        # and produces a reply that's 100% restatement of prior bullets,
+        # we detect it on the backend and silence it. This is the
+        # infrastructure-level protection that doesn't depend on model
+        # compliance.
+        try:
+            all_stale, stale_n, total_n = _is_reply_all_stale(
+                reply or "", meeting, exclude_agent_id=aid,
+            )
+            if all_stale and total_n > 0:
+                try:
+                    role = getattr(ag, "role", "") or "agent"
+                    aname = getattr(ag, "name", "") or aid
+                    meeting.add_message(
+                        sender=aid,
+                        sender_name=f"{role}-{aname}",
+                        role="system",
+                        content=f"（{aname} 的发言 {total_n}/{total_n} 点已在前文出现 — 自动归档）",
+                    )
+                    registry.save()
+                except Exception:
+                    pass
+                logger.info(
+                    "meeting %s: %s reply is all-stale (%d/%d bullets overlap ≥%.2f) — silenced",
+                    meeting.id, aid[:8] if aid else "?",
+                    stale_n, total_n, _DEDUP_SIM_THRESHOLD,
+                )
+                continue
+        except Exception as _dedup_err:
+            # Dedup is a soft guard — on any error, fall through to the
+            # normal append path so we never lose replies.
+            logger.debug("meeting %s: dedup check failed: %s",
+                         meeting.id, _dedup_err)
+
         try:
             role = getattr(ag, "role", "") or "agent"
             aname = getattr(ag, "name", "") or aid
@@ -1360,6 +2215,39 @@ def meeting_agent_reply(meeting: "Meeting",
             logger.warning("meeting %s: @-mention scan failed: %s",
                            meeting.id, _mention_err)
 
+        # Self-commitment detection: if the agent promised to do
+        # follow-up work ("我将重新发送..." / "I'll resend..."), auto-
+        # create an OPEN assignment for them. Without this the agent
+        # just drops a promise in discussion prose and Phase-2 never
+        # fires, leaving the user staring at "I will..." with no
+        # further action — which is exactly the stall reported by
+        # users. Guarded so we don't double-create when the incoming
+        # message already spawned an assignment for this agent.
+        try:
+            if _detect_self_commitment(reply or ""):
+                already_has_open = any(
+                    getattr(a, "assignee_agent_id", "") == aid
+                    and str(getattr(a.status, "value", a.status)).lower() == "open"
+                    for a in (meeting.assignments or [])
+                )
+                if not already_has_open:
+                    title = (reply or "").strip().replace("\n", " ")[:80]
+                    meeting.add_assignment(
+                        title=title,
+                        assignee_agent_id=aid,
+                        description="（自承诺跟进的任务 — 由 _detect_self_commitment 识别）",
+                    )
+                    logger.info(
+                        "meeting %s: self-commit detected from %s — "
+                        "queued phase-2 assignment",
+                        meeting.id, aid[:8] if aid else "?",
+                    )
+        except Exception as _commit_err:
+            logger.warning(
+                "meeting %s: self-commit detection failed: %s",
+                meeting.id, _commit_err,
+            )
+
     # ── Phase 2: Execution ──────────────────────────────────────────
     # Discussion round is done. For every assignment that is still
     # OPEN (i.e. auto-created from the user message on post, or added
@@ -1380,6 +2268,70 @@ def meeting_agent_reply(meeting: "Meeting",
             if str(status_val).lower() != "open":
                 continue
             open_assignments.append(assignment)
+
+        # ── Continuous execution (user rule: "所有回合走完后，主 Agent
+        #    要继续往下执行") ──────────────────────────────────────
+        # If the discussion finished without producing a single open
+        # assignment (host's message wasn't task-shaped, no agent
+        # self-committed, etc.), we still want the primary agent to
+        # carry the conversation into execution — otherwise the whole
+        # meeting dead-ends at "we talked about it".
+        #
+        # Primary agent = first item in the original targets list (the
+        # first agent the host addressed). When host @'d nobody (broadcast
+        # round), targets == all participants → we take the one that
+        # actually replied first in this round (first assistant message
+        # after the user message). Fallback: skip promotion if we can't
+        # identify a primary agent or discussion had no substance.
+        if not open_assignments and auto_promote_primary:
+            if gen is None or current_meeting_reply_gen(meeting.id) == gen:
+                primary_aid = ""
+                # Priority 1: host's explicit target list.
+                if target_agent_ids:
+                    for t in target_agent_ids:
+                        if t:
+                            primary_aid = t
+                            break
+                # Priority 2: first agent who actually replied this round.
+                if not primary_aid:
+                    for m_ in reversed(meeting.messages or []):
+                        if getattr(m_, "role", "") == "assistant":
+                            sender = getattr(m_, "sender", "")
+                            if sender:
+                                primary_aid = sender
+                                break
+                # Only promote if we have substantive content — avoid
+                # firing Phase-2 for meetings that just had a PASS / noise.
+                has_real_discussion = any(
+                    getattr(m_, "role", "") == "assistant"
+                    and len((getattr(m_, "content", "") or "").strip()) > 30
+                    for m_ in (meeting.messages or [])
+                )
+                if primary_aid and has_real_discussion:
+                    title = (user_msg or "基于讨论继续推进工作").strip()\
+                                .replace("\n", " ")[:80]
+                    try:
+                        new_asg = meeting.add_assignment(
+                            title=title,
+                            assignee_agent_id=primary_aid,
+                            description=(
+                                "（讨论结束自动创建 — "
+                                "主持人的指令未触发任务关键词，"
+                                "但讨论已有实质内容，主 agent 继续执行。）"
+                            ),
+                        )
+                        registry.save()
+                        open_assignments.append(new_asg)
+                        logger.info(
+                            "meeting %s: auto-promoted discussion → Phase-2 "
+                            "for primary agent %s",
+                            meeting.id, primary_aid[:8] if primary_aid else "?",
+                        )
+                    except Exception as _auto_err:
+                        logger.warning(
+                            "meeting %s: auto-promote failed: %s",
+                            meeting.id, _auto_err,
+                        )
 
         for assignment in open_assignments:
             if gen is not None and current_meeting_reply_gen(meeting.id) != gen:
@@ -1411,15 +2363,61 @@ def spawn_meeting_reply(meeting, registry, agent_chat_fn, agent_lookup_fn,
     Bumps the meeting's reply generation so that any previously-running
     sequence for this meeting aborts at its next iteration — giving the
     user priority to interrupt the discussion.
+
+    The thread runs inside an AbortScope bound to meeting_key(id) so:
+      - The centralized /api/*/abort endpoint can flip the abort flag
+      - bash tool calls made by agents during the reply auto-register
+        their subprocess pids under this key → SIGTERM on user stop
+      - Registry state is cleared when the thread exits normally
     """
+    from . import abort_registry
     gen = bump_meeting_reply_gen(meeting.id)
-    t = threading.Thread(
-        target=meeting_agent_reply,
-        args=(meeting, registry, agent_chat_fn, agent_lookup_fn, user_msg),
-        kwargs={"target_agent_ids": target_agent_ids,
-                "multimodal_parts": multimodal_parts,
-                "gen": gen},
-        daemon=True,
-    )
+
+    def _run():
+        with abort_registry.AbortScope(
+            abort_registry.meeting_key(meeting.id),
+            thread=threading.current_thread(),
+        ):
+            meeting_agent_reply(
+                meeting, registry, agent_chat_fn, agent_lookup_fn, user_msg,
+                target_agent_ids=target_agent_ids,
+                multimodal_parts=multimodal_parts,
+                gen=gen,
+            )
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return t
+
+
+def spawn_meeting_assignment_reexecute(meeting, registry,
+                                         agent_chat_fn, agent_lookup_fn,
+                                         assignment):
+    """Fire-and-forget wrapper to re-execute a single assignment in resume mode.
+
+    Unlike spawn_meeting_reply, this doesn't drive the discussion loop —
+    it goes straight to Phase-2 execution with resume=True so the agent
+    gets a continuation prompt listing what's already done. Used by the
+    "重新执行此任务" UI button.
+    """
+    from . import abort_registry
+    gen = bump_meeting_reply_gen(meeting.id)
+
+    def _run():
+        with abort_registry.AbortScope(
+            abort_registry.meeting_key(meeting.id),
+            thread=threading.current_thread(),
+        ):
+            execute_meeting_assignment(
+                meeting=meeting,
+                registry=registry,
+                agent_chat_fn=agent_chat_fn,
+                agent_lookup_fn=agent_lookup_fn,
+                assignment=assignment,
+                gen=gen,
+                resume=True,
+            )
+
+    t = threading.Thread(target=_run, daemon=True)
     t.start()
     return t

@@ -10,28 +10,171 @@
 .material-symbols-outlined {
   font-variation-settings: 'FILL' 0, 'wght' 300, 'GRAD' 0, 'opsz' 24;
 }
+/* ============================================================
+ * Three-layer design token architecture (inspired by Clowder).
+ *
+ * Layer 1  — raw palette (never used directly in components)
+ * Layer 2  — semantic tokens (components reference these: --bg,
+ *            --surface, --text, --primary, etc.)
+ * Layer 3  — theme overrides ([data-theme="light"] on <html>
+ *            remaps the Layer-2 tokens to light values)
+ *
+ * Default is DARK (matches existing behavior). Setting
+ * data-theme="light" on <html> swaps to a warm cream palette.
+ * Setting data-theme="dark" explicitly does the same as default.
+ * ========================================================== */
 :root {
-  --bg: #0e141b;
-  --bg2: #1a2027;
-  --surface: #161c23;
-  --surface2: #242a32;
-  --surface3: #2f353d;
-  --border: #474651;
-  --border-light: rgba(255,255,255,0.05);
-  --text: #dde3ed;
-  --text2: #8b949e;
-  --text3: #6e7681;
-  --primary: #cbc9ff;
-  --primary-container: #acaaff;
-  --secondary: #ffb4aa;
-  --error: #f85149;
-  --success: #3fb950;
-  --warning: #d29922;
-  --warning-bg: #2a2017;
-  --error-bg: #2d1114;
-  --success-bg: #12261e;
-  --radius: 8px;
-  --radius-lg: 12px;
+  /* ── Layer 1 — raw dark palette ── */
+  --raw-dark-bg:         #0e141b;
+  --raw-dark-bg2:        #1a2027;
+  --raw-dark-surface:    #161c23;
+  --raw-dark-surface2:   #242a32;
+  --raw-dark-surface3:   #2f353d;
+  --raw-dark-border:     #474651;
+  --raw-dark-border-fade: var(--overlay-5);
+  --raw-dark-text:       #dde3ed;
+  --raw-dark-text2:      #8b949e;
+  --raw-dark-text3:      #6e7681;
+
+  /* Shared accents (same hue across themes, different saturation tuned per-theme) */
+  --raw-primary-dark:    #cbc9ff;
+  --raw-primary-container-dark: #acaaff;
+  --raw-secondary-dark:  #ffb4aa;
+  --raw-error-dark:      #f85149;
+  --raw-success-dark:    #3fb950;
+  --raw-warning-dark:    #d29922;
+  --raw-warning-bg-dark: #2a2017;
+  --raw-error-bg-dark:   #2d1114;
+  --raw-success-bg-dark: #12261e;
+
+  /* ── Layer 1 — raw light palette (Clowder-inspired warm cream) ── */
+  --raw-light-bg:         #fdf8f3;  /* cream white */
+  --raw-light-bg2:        #f5ede3;  /* light sand */
+  --raw-light-surface:    #ffffff;
+  --raw-light-surface2:   #f0e8dd;  /* sunken */
+  --raw-light-surface3:   #ebe3d9;  /* deeper sunken */
+  --raw-light-border:     #e0d5c7;  /* border tan */
+  --raw-light-border-fade: rgba(30,30,36,0.06);
+  --raw-light-text:       #1e1e24;  /* deep ink */
+  --raw-light-text2:      #4a4a52;
+  --raw-light-text3:      #888888;
+
+  /* Light-theme primary: warm brown (not purple). Clowder's
+     --cat-warm-brown / --cafe-interactive palette — reads well on
+     cream bg without the dark-theme lavender clashing against it. */
+  --raw-primary-light:    #85655a;  /* cafe-interactive / warm stone */
+  --raw-primary-container-light: #6d4c41;  /* deeper brown for hover/filled */
+  --raw-secondary-light:  #e29578;  /* warm coral — only used as accent */
+  --raw-error-light:      #c93838;
+  --raw-success-light:    #2d7a39;
+  --raw-warning-light:    #b45309;
+  --raw-warning-bg-light: #fef3c7;
+  --raw-error-bg-light:   #fee2e2;
+  --raw-success-bg-light: #dcfce7;
+
+  /* ── Layer 2 — semantic tokens (default = dark) ── */
+  --bg:              var(--raw-dark-bg);
+  --bg2:             var(--raw-dark-bg2);
+  --surface:         var(--raw-dark-surface);
+  --surface2:        var(--raw-dark-surface2);
+  --surface3:        var(--raw-dark-surface3);
+  --border:          var(--raw-dark-border);
+  --border-light:    var(--raw-dark-border-fade);
+  --text:            var(--raw-dark-text);
+  --text2:           var(--raw-dark-text2);
+  --text3:           var(--raw-dark-text3);
+  --primary:         var(--raw-primary-dark);
+  --primary-container: var(--raw-primary-container-dark);
+  --secondary:       var(--raw-secondary-dark);
+  --error:           var(--raw-error-dark);
+  --success:         var(--raw-success-dark);
+  --warning:         var(--raw-warning-dark);
+  --warning-bg:      var(--raw-warning-bg-dark);
+  --error-bg:        var(--raw-error-bg-dark);
+  --success-bg:      var(--raw-success-bg-dark);
+  /* Text color to use ON TOP of primary (e.g. filled buttons).
+     Dark theme primary is pale lavender → dark text reads well.
+     Light theme primary is deep warm brown → needs light text. */
+  --primary-text:    #0e141b;
+  --radius:          8px;
+  --radius-lg:       12px;
+
+  /* ── Utility mix-tokens (theme-aware replacements for rgba(...) ── */
+  /* Primary-tinted overlays — replaces rgba(203,201,255,N) literals.
+     Opacity scale matches the most common levels found in the codebase. */
+  --primary-tint-6:  color-mix(in srgb, var(--primary) 6%,  transparent);
+  --primary-tint-8:  color-mix(in srgb, var(--primary) 8%,  transparent);
+  --primary-tint-10: color-mix(in srgb, var(--primary) 10%, transparent);
+  --primary-tint-12: color-mix(in srgb, var(--primary) 12%, transparent);
+  --primary-tint-15: color-mix(in srgb, var(--primary) 15%, transparent);
+  --primary-tint-20: color-mix(in srgb, var(--primary) 20%, transparent);
+  --primary-tint-30: color-mix(in srgb, var(--primary) 30%, transparent);
+  /* Neutral surface overlays — replaces rgba(255,255,255,N) literals.
+     On dark theme these brighten (text is near-white); on light theme
+     they darken (text is near-black), which is exactly what you want
+     for hover/divider layers to keep contrast both ways. */
+  --overlay-2:       color-mix(in srgb, var(--text) 2%,  transparent);
+  --overlay-4:       color-mix(in srgb, var(--text) 4%,  transparent);
+  --overlay-5:       color-mix(in srgb, var(--text) 5%,  transparent);
+  --overlay-6:       color-mix(in srgb, var(--text) 6%,  transparent);
+  --overlay-8:       color-mix(in srgb, var(--text) 8%,  transparent);
+  --overlay-10:      color-mix(in srgb, var(--text) 10%, transparent);
+  --overlay-12:      color-mix(in srgb, var(--text) 12%, transparent);
+  --overlay-15:      color-mix(in srgb, var(--text) 15%, transparent);
+  /* Aliases kept for older callsites — same semantics as overlay-4/8. */
+  --overlay-subtle:  var(--overlay-4);
+  --overlay-medium:  var(--overlay-8);
+}
+
+/* Primary-text overrides live in each [data-theme] block below.
+   Defaults here (dark) = dark text on pale-lavender primary. */
+
+/* ── Layer 3 — explicit dark (same as default, for completeness) ── */
+[data-theme="dark"] {
+  --bg:              var(--raw-dark-bg);
+  --bg2:             var(--raw-dark-bg2);
+  --surface:         var(--raw-dark-surface);
+  --surface2:        var(--raw-dark-surface2);
+  --surface3:        var(--raw-dark-surface3);
+  --border:          var(--raw-dark-border);
+  --border-light:    var(--raw-dark-border-fade);
+  --text:            var(--raw-dark-text);
+  --text2:           var(--raw-dark-text2);
+  --text3:           var(--raw-dark-text3);
+  --primary:         var(--raw-primary-dark);
+  --primary-container: var(--raw-primary-container-dark);
+  --secondary:       var(--raw-secondary-dark);
+  --error:           var(--raw-error-dark);
+  --success:         var(--raw-success-dark);
+  --warning:         var(--raw-warning-dark);
+  --warning-bg:      var(--raw-warning-bg-dark);
+  --error-bg:        var(--raw-error-bg-dark);
+  --success-bg:      var(--raw-success-bg-dark);
+  --primary-text:    #0e141b;  /* dark text on pale primary */
+}
+
+/* ── Layer 3 — light theme (Clowder-style warm cream) ── */
+[data-theme="light"] {
+  --bg:              var(--raw-light-bg);
+  --bg2:             var(--raw-light-bg2);
+  --surface:         var(--raw-light-surface);
+  --surface2:        var(--raw-light-surface2);
+  --surface3:        var(--raw-light-surface3);
+  --border:          var(--raw-light-border);
+  --border-light:    var(--raw-light-border-fade);
+  --text:            var(--raw-light-text);
+  --text2:           var(--raw-light-text2);
+  --text3:           var(--raw-light-text3);
+  --primary:         var(--raw-primary-light);
+  --primary-container: var(--raw-primary-container-light);
+  --secondary:       var(--raw-secondary-light);
+  --error:           var(--raw-error-light);
+  --success:         var(--raw-success-light);
+  --warning:         var(--raw-warning-light);
+  --warning-bg:      var(--raw-warning-bg-light);
+  --error-bg:        var(--raw-error-bg-light);
+  --success-bg:      var(--raw-success-bg-light);
+  --primary-text:    #fdf8f3;  /* cream text on deep-brown primary */
 }
 * { margin:0; padding:0; box-sizing:border-box; }
 body {
@@ -125,7 +268,7 @@ body {
 .nav-item .badge {
   margin-left: auto;
   background: var(--primary);
-  color: #0e141b;
+  color: var(--primary-text);
   font-size: 10px;
   padding: 3px 7px;
   border-radius: 10px;
@@ -155,7 +298,7 @@ body {
 @keyframes robotBubblePulse { 0%,100%{opacity:1} 50%{opacity:0.6} }
 .working-indicator {
   display:flex;align-items:center;gap:8px;padding:8px 14px;
-  background:linear-gradient(90deg,rgba(203,201,255,0.06),rgba(203,201,255,0.12),rgba(203,201,255,0.06));
+  background:linear-gradient(90deg,var(--primary-tint-6),var(--primary-tint-12),var(--primary-tint-6));
   background-size:200% 100%;animation:shimmer 2.5s ease-in-out infinite;
   border-radius:10px;margin-top:4px;
 }
@@ -188,11 +331,14 @@ body {
 .main { flex:1; display: flex; flex-direction: column; overflow: hidden; }
 .topbar {
   padding: 14px 24px;
-  border-bottom: 1px solid rgba(255,255,255,0.05);
+  border-bottom: 1px solid var(--overlay-5);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: rgba(14,20,27,0.8);
+  /* Theme-aware: 80%-opaque bg so the blur still reads through.
+     Was hard-coded rgba(14,20,27,0.8) → on light theme it looked
+     dirty/gray because the dark overlay bled through the cream bg. */
+  background: color-mix(in srgb, var(--bg) 80%, transparent);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
 }
@@ -230,13 +376,13 @@ body {
 }
 .btn-primary {
   background: linear-gradient(135deg, var(--primary), var(--primary-container));
-  color: #0e141b;
+  color: var(--primary-text);
   font-weight: 700;
   border: none;
-  box-shadow: 0 2px 12px rgba(203, 201, 255, 0.25);
+  box-shadow: 0 2px 12px color-mix(in srgb, var(--primary) 25%, transparent);
 }
 .btn-primary:hover {
-  box-shadow: 0 4px 16px rgba(203, 201, 255, 0.4);
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--primary) 40%, transparent);
   transform: translateY(-1px);
 }
 .btn-primary:active { transform: translateY(0); }
@@ -299,9 +445,13 @@ body {
 }
 .chat-msg.user {
   align-self: flex-end;
-  background: linear-gradient(135deg, #1a2332, #243447);
-  color: #e0e6ed;
-  border: 1px solid rgba(255,255,255,0.08);
+  /* Theme-aware: on dark, bg2→surface2 gives a gentle lift from the
+     chat background; on light, the same tokens render as sand→sunken
+     cream so user bubbles read as a soft beige pillow on the cream
+     backdrop instead of a jarring black block. */
+  background: linear-gradient(135deg, var(--bg2), var(--surface2));
+  color: var(--text);
+  border: 1px solid var(--overlay-8);
   border-bottom-right-radius: 4px;
 }
 .chat-msg.assistant {
@@ -323,6 +473,21 @@ body {
   flex: 1;
   min-width: 0;
 }
+/* Consecutive same-role bubbles (within ~2 min) visually merge:
+   hide the repeated avatar and tighten the gap so they read as one
+   thread. The DOM stays as separate rows so timestamps + action bars
+   on each message still work. */
+.chat-msg-row.merged-follow { margin-top: -10px; }
+.chat-msg-row.merged-follow .chat-msg-avatar { visibility: hidden; }
+.chat-msg-row.merged-follow .chat-msg { border-top-left-radius: 6px; }
+.chat-msg.user.merged-follow { margin-top: -10px; border-top-right-radius: 6px; }
+/* Timestamp visibility — was 11px/text3 (too faint). Nudge a shade darker. */
+.chat-msg-time {
+  font-size: 10px;
+  color: var(--text3);
+  opacity: 0.75;
+  letter-spacing: 0.2px;
+}
 .chat-msg-content {
   color: var(--text);
   /* markdown renderer converts \n → <br>, so we don't need pre-wrap
@@ -333,28 +498,52 @@ body {
   min-height: 1em;
 }
 .chat-msg-content br + br { display: none; }  /* collapse double <br> */
+/* ---- Rendered GFM tables inside chat bubbles ---- */
+.chat-md-table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 12px;
+  max-width: 100%;
+  display: block;
+  overflow-x: auto;
+}
+.chat-md-table th,
+.chat-md-table td {
+  border: 1px solid var(--border-light, var(--overlay-15));
+  padding: 6px 10px;
+  vertical-align: top;
+  text-align: left;
+}
+.chat-md-table th {
+  background: var(--surface3, var(--overlay-4));
+  font-weight: 600;
+  color: var(--text2, #d0d0d0);
+}
+.chat-md-table tr:nth-child(even) td {
+  background: var(--overlay-2);
+}
 /* ---- Collapsible file content blocks ---- */
-.chat-file-block { margin: 6px 0; border: 1px solid var(--border-light, rgba(255,255,255,0.1)); border-radius: 8px; overflow: hidden; }
-.chat-file-block-header { display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: var(--surface3, rgba(255,255,255,0.04)); font-size: 12px; font-weight: 600; color: var(--text2, #aaa); cursor: pointer; user-select: none; }
+.chat-file-block { margin: 6px 0; border: 1px solid var(--border-light, var(--overlay-10)); border-radius: 8px; overflow: hidden; }
+.chat-file-block-header { display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: var(--surface3, var(--overlay-4)); font-size: 12px; font-weight: 600; color: var(--text2, #aaa); cursor: pointer; user-select: none; }
 .chat-file-block-header .material-symbols-outlined { font-size: 16px; }
-.chat-file-block-header:hover { background: var(--surface2, rgba(255,255,255,0.06)); }
+.chat-file-block-header:hover { background: var(--surface2, var(--overlay-6)); }
 .chat-file-block-body { padding: 8px 10px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; max-height: 160px; overflow: hidden; position: relative; }
 .chat-file-block-body.collapsed::after { content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 40px; background: linear-gradient(transparent, var(--surface2, #1e1e2e)); pointer-events: none; }
-.chat-file-block-toggle { display: block; padding: 4px 10px; font-size: 11px; color: var(--primary, #5b8def); cursor: pointer; text-align: center; border-top: 1px solid var(--border-light, rgba(255,255,255,0.06)); }
-.chat-file-block-toggle:hover { background: var(--surface3, rgba(255,255,255,0.04)); }
+.chat-file-block-toggle { display: block; padding: 4px 10px; font-size: 11px; color: var(--primary, #5b8def); cursor: pointer; text-align: center; border-top: 1px solid var(--border-light, var(--overlay-6)); }
+.chat-file-block-toggle:hover { background: var(--surface3, var(--overlay-4)); }
 .chat-file-block-body.expanded { max-height: none; }
 .chat-file-block-body.expanded::after { display: none; }
-.chat-msg.user .chat-file-block-body.collapsed::after { background: linear-gradient(transparent, #1a2332); }
-.chat-msg.user .chat-file-block { border-color: rgba(255,255,255,0.12); }
-.chat-msg.user .chat-file-block-header { background: rgba(255,255,255,0.06); }
-.chat-msg.user .chat-file-block-toggle { border-color: rgba(255,255,255,0.08); }
+.chat-msg.user .chat-file-block-body.collapsed::after { background: linear-gradient(transparent, var(--bg2)); }
+.chat-msg.user .chat-file-block { border-color: var(--overlay-12); }
+.chat-msg.user .chat-file-block-header { background: var(--overlay-6); }
+.chat-msg.user .chat-file-block-toggle { border-color: var(--overlay-8); }
 .chat-msg-content .chat-inline-img {
   display: block;
   max-width: 100%;
   max-height: 420px;
   margin: 6px 0;
   border-radius: 8px;
-  border: 1px solid var(--border-light, rgba(255,255,255,0.08));
+  border: 1px solid var(--border-light, var(--overlay-8));
   cursor: zoom-in;
   background: rgba(0,0,0,0.15);
 }
@@ -362,8 +551,8 @@ body {
   display: inline-block;
   padding: 6px 10px;
   color: var(--text3, #888);
-  background: rgba(255,255,255,0.04);
-  border: 1px dashed var(--border-light, rgba(255,255,255,0.08));
+  background: var(--overlay-4);
+  border: 1px dashed var(--border-light, var(--overlay-8));
   cursor: default;
   max-height: none;
   font-size: 0.85em;
@@ -379,7 +568,7 @@ body {
   border-radius: 8px; box-shadow: 0 12px 40px rgba(0,0,0,0.6);
 }
 .chat-msg-content code {
-  background: rgba(255,255,255,0.06);
+  background: var(--overlay-6);
   padding: 1px 5px;
   border-radius: 4px;
   font-family: 'Fira Code', 'Cascadia Code', monospace;
@@ -418,7 +607,7 @@ body {
   align-items: center;
   gap: 10px;
   padding: 8px 10px;
-  background: rgba(203, 201, 255, 0.06);
+  background: var(--primary-tint-6);
   border: 1px solid rgba(203, 201, 255, 0.18);
   border-radius: 8px;
   text-decoration: none;
@@ -428,8 +617,8 @@ body {
   cursor: pointer;
 }
 .chat-file-card:hover {
-  background: rgba(203, 201, 255, 0.12);
-  border-color: rgba(203, 201, 255, 0.35);
+  background: var(--primary-tint-12);
+  border-color: color-mix(in srgb, var(--primary) 35%, transparent);
 }
 .chat-file-card-icon {
   width: 40px;
@@ -490,8 +679,8 @@ body {
   color: var(--text3);
 }
 .rich-msg-body table { border-collapse: collapse; width: 100%; margin: 6px 0; }
-.rich-msg-body th, .rich-msg-body td { padding: 5px 8px; border: 1px solid rgba(255,255,255,0.1); text-align: left; font-size: 12px; }
-.rich-msg-body th { background: rgba(203,201,255,0.1); font-weight: 700; }
+.rich-msg-body th, .rich-msg-body td { padding: 5px 8px; border: 1px solid var(--overlay-10); text-align: left; font-size: 12px; }
+.rich-msg-body th { background: var(--primary-tint-10); font-weight: 700; }
 .rich-msg-body pre { margin: 6px 0; }
 .rich-msg-body img { max-width: 100%; border-radius: 6px; }
 .rich-msg-body audio { max-width: 100%; }
@@ -514,7 +703,7 @@ body {
   gap: 4px;
   margin-top: 6px;
   padding-top: 6px;
-  border-top: 1px solid rgba(255,255,255,0.05);
+  border-top: 1px solid var(--overlay-5);
   opacity: 0;
   transition: opacity 0.2s;
 }
@@ -523,7 +712,7 @@ body {
 }
 .chat-action-btn {
   background: none;
-  border: 1px solid rgba(255,255,255,0.1);
+  border: 1px solid var(--overlay-10);
   color: var(--text3);
   cursor: pointer;
   font-size: 11px;
@@ -546,7 +735,7 @@ body {
   padding: 10px 14px;
   background: var(--surface2);
   border-radius: 12px;
-  border: 1px solid rgba(255,255,255,0.05);
+  border: 1px solid var(--overlay-5);
 }
 .chat-progress-phase {
   font-size: 12px;
@@ -559,7 +748,7 @@ body {
 }
 .chat-progress-abort {
   background: none;
-  border: 1px solid rgba(255,255,255,0.15);
+  border: 1px solid var(--overlay-15);
   color: var(--error, #ef4444);
   cursor: pointer;
   font-size: 10px;
@@ -631,7 +820,7 @@ body {
   left: 0;
   right: 0;
   background: var(--surface);
-  border: 1px solid rgba(255,255,255,0.12);
+  border: 1px solid var(--overlay-12);
   border-radius: 10px;
   max-height: 200px;
   overflow-y: auto;
@@ -650,7 +839,7 @@ body {
   transition: background 0.1s;
 }
 .mention-item:hover, .mention-item.active {
-  background: rgba(203,201,255,0.1);
+  background: var(--primary-tint-10);
 }
 .mention-item .mention-name {
   font-weight: 700;
@@ -804,7 +993,7 @@ body {
 .tag-green { background: var(--success-bg); color: var(--success); }
 .tag-yellow { background: var(--warning-bg); color: var(--warning); }
 .tag-red { background: var(--error-bg); color: var(--error); }
-.tag-blue { background: rgba(203, 201, 255, 0.15); color: var(--primary); }
+.tag-blue { background: var(--primary-tint-15); color: var(--primary); }
 /* ---- Approvals ---- */
 .approval-card {
   background: var(--surface);
@@ -930,6 +1119,23 @@ body {
 .prompt-panel input:focus { border-color: var(--primary, #2563eb); }
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 </style>
+<script>
+/* Applied BEFORE body renders to prevent light-flash-on-dark (FOUC)
+   AND to stamp the chosen language so text in data-i18n attributes
+   reads the right side on first paint. Same trick used by theme. */
+(function() {
+  try {
+    var t = localStorage.getItem('tudou_theme');
+    if (t === 'light' || t === 'dark') {
+      document.documentElement.setAttribute('data-theme', t);
+    }
+    var l = localStorage.getItem('tudou_lang');
+    if (l === 'en' || l === 'zh') {
+      document.documentElement.setAttribute('data-lang', l);
+    }
+  } catch (e) { /* private mode / old browser — stay default */ }
+})();
+</script>
 </head>
 <body>
 
@@ -959,39 +1165,36 @@ body {
     <!-- Primary navigation: 7 high-frequency entry points -->
     <div class="nav-section">
       <div class="nav-item active" data-view="dashboard" onclick="showView('dashboard',this)">
-        <span class="icon">space_dashboard</span> <span>工作台</span>
+        <span class="icon">space_dashboard</span> <span data-i18n="nav.dashboard">工作台</span>
         <span class="badge notification hidden" id="dashboard-badge">0</span>
       </div>
       <div class="nav-item" data-view="projects" onclick="showView('projects',this)">
-        <span class="icon">folder_special</span> <span>项目与任务</span>
+        <span class="icon">folder_special</span> <span data-i18n="nav.projects">项目与任务</span>
         <span class="badge" id="project-count">0</span>
       </div>
       <div class="nav-item" data-view="agents-list" onclick="showView('agents-list',this)">
-        <span class="icon">smart_toy</span> <span>智能体</span>
+        <span class="icon">smart_toy</span> <span data-i18n="nav.agents">智能体</span>
         <span class="badge" id="agent-count-badge">0</span>
       </div>
       <div class="nav-item" data-view="knowledge-memory" onclick="showView('knowledge-memory',this)">
-        <span class="icon">psychology_alt</span> <span>知识与记忆</span>
+        <span class="icon">psychology_alt</span> <span data-i18n="nav.knowledge">知识与记忆</span>
       </div>
       <div class="nav-item" data-view="roles-skills" onclick="showView('roles-skills',this)">
-        <span class="icon">workspace_premium</span> <span>角色与技能</span>
+        <span class="icon">workspace_premium</span> <span data-i18n="nav.rolesSkills">角色与技能</span>
       </div>
       <div class="nav-item" data-view="tools-approvals" onclick="showView('tools-approvals',this)">
-        <span class="icon">build_circle</span> <span>工具与审批</span>
+        <span class="icon">build_circle</span> <span data-i18n="nav.toolsApprovals">工具与审批</span>
         <span class="badge notification hidden" id="approval-badge">0</span>
       </div>
       <div class="nav-item" data-view="integrations" onclick="showView('integrations',this)">
-        <span class="icon">hub</span> <span>集成与通知</span>
+        <span class="icon">hub</span> <span data-i18n="nav.integrations">集成与通知</span>
       </div>
     </div>
 
     <!-- Bottom section: low-frequency admin items grouped -->
     <div class="nav-section" style="margin-top:auto">
       <div class="nav-item" data-view="settings-hub" onclick="showView('settings-hub',this)">
-        <span class="icon">settings</span> <span>系统设置</span>
-      </div>
-      <div class="nav-item" data-view="admin-manage" id="nav-admin-manage" onclick="showView('admin-manage',this)" style="display:none">
-        <span class="icon">admin_panel_settings</span> <span>管理员</span>
+        <span class="icon">settings</span> <span data-i18n="nav.settings">系统设置</span>
       </div>
     </div>
   </div>
@@ -999,11 +1202,11 @@ body {
     <div id="sidebar-footer" style="display:flex;align-items:center;gap:8px">
       <span class="material-symbols-outlined" style="font-size:16px;color:var(--text3)">person</span>
       <span id="footer-username" style="font-size:12px;color:var(--text2)">admin</span>
-      <span id="footer-role" style="font-size:10px;padding:2px 6px;border-radius:4px;background:rgba(203,201,255,0.1);color:var(--primary);margin-left:auto">superAdmin</span>
+      <span id="footer-role" style="font-size:10px;padding:2px 6px;border-radius:4px;background:var(--primary-tint-10);color:var(--primary);margin-left:auto">superAdmin</span>
     </div>
     <div class="sidebar-footer-user">
-      <a href="#" onclick="showChangePasswordModal();return false" id="btn-change-pw" style="display:none">Change Password</a>
-      <a href="#" onclick="logout();return false">Logout</a>
+      <a href="#" onclick="showChangePasswordModal();return false" id="btn-change-pw" style="display:none" data-i18n="user.changePassword">Change Password</a>
+      <a href="#" onclick="logout();return false" data-i18n="user.logout">Logout</a>
     </div>
   </div>
 </div>
@@ -1013,16 +1216,19 @@ body {
   <div class="topbar">
     <h2 id="view-title">Dashboard</h2>
     <div style="display:flex;align-items:center;gap:10px;margin-left:auto">
-    <div class="topbar-actions" id="topbar-actions"></div>
-    <div class="topbar-global" id="topbar-global" style="display:flex;align-items:center;gap:8px;margin-left:12px;padding-left:12px;border-left:1px solid rgba(255,255,255,0.06)">
-      <select id="global-node-switcher" onchange="onNodeSwitch(this.value)" title="切换节点视图" style="background:var(--surface);color:var(--text);border:1px solid rgba(255,255,255,0.08);border-radius:6px;padding:5px 10px;font-size:11px;cursor:pointer">
-        <option value="">所有节点</option>
-      </select>
-      <button class="btn btn-ghost btn-sm" id="global-notif-btn" onclick="showView('dashboard',null)" title="通知中心" style="padding:4px 8px;position:relative">
-        <span class="material-symbols-outlined" style="font-size:18px">notifications</span>
-        <span class="badge notification hidden" id="global-notif-badge" style="position:absolute;top:-2px;right:-2px">0</span>
+      <div class="topbar-actions" id="topbar-actions"></div>
+      <!-- Single global switch: dark / light theme, with clear Chinese
+           labels. Everything else in the old top-right cluster (node
+           switcher, notification bell) was moved into their dedicated
+           pages where they actually belong. -->
+      <button id="global-theme-btn" onclick="_toggleTheme()" class="btn btn-ghost btn-sm" style="display:inline-flex;align-items:center;gap:6px;padding:6px 12px">
+        <span class="material-symbols-outlined" id="global-theme-icon" style="font-size:16px">dark_mode</span>
+        <span id="global-theme-label" style="font-size:12px;font-weight:600">深色主题</span>
       </button>
-    </div>
+      <button id="global-lang-btn" onclick="_toggleLang()" class="btn btn-ghost btn-sm" title="切换中文 / English" style="display:inline-flex;align-items:center;gap:6px;padding:6px 12px">
+        <span class="material-symbols-outlined" style="font-size:16px">translate</span>
+        <span id="global-lang-label" style="font-size:12px;font-weight:600"><b>中</b> / EN</span>
+      </button>
     </div>
   </div>
   <div class="content" id="content"></div>
@@ -1302,7 +1508,7 @@ body {
 </div>
 
 <div class="modal-overlay hidden" id="modal-edit-agent">
-  <div class="modal">
+  <div class="modal" style="width:880px;max-width:95vw">
     <h3>Edit Agent</h3>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
       <div class="form-group">
@@ -1383,58 +1589,14 @@ body {
       </div>
       <div id="ea-llm-panel" style="display:none">
         <div style="font-size:11px;color:var(--text3);margin-bottom:8px;line-height:1.5">
-          上面的 Provider/Model 是这个 agent 的<b>默认</b>模型。<br>
-          下面可以为学习、多模态、以及任意命名用途另配模型 —— 不配就一律走默认。
+          上面的 Provider/Model 是这个 agent 的<b>默认（主）</b>模型。<br>
+          下面配一组"额外 LLM"，开启自动路由后，系统会按输入类型
+          （tool-heavy / multimodal / reasoning / analysis / default）
+          从主模型 + 额外 slot 里挑最合适的那个。每个 slot 下方会显示其公共 benchmark 评分，
+          可手动改写做用户 override。
         </div>
 
-        <!-- 甲: 学习/多模态专用 slot -->
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-          <div class="form-group">
-            <label style="font-size:12px">Learning Provider · 学习</label>
-            <select id="ea-learning-provider" onchange="updateModelSelect('ea-learning-provider','ea-learning-model')">
-              <option value="">（使用默认）</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label style="font-size:12px">Learning Model</label>
-            <select id="ea-learning-model">
-              <option value="">（使用默认）</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label style="font-size:12px">Multimodal Provider · 多模态</label>
-            <select id="ea-multimodal-provider" onchange="updateModelSelect('ea-multimodal-provider','ea-multimodal-model')">
-              <option value="">（使用默认）</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label style="font-size:12px">Multimodal Model</label>
-            <select id="ea-multimodal-model">
-              <option value="">（使用默认）</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label style="font-size:12px">Coding Provider · 编码</label>
-            <select id="ea-coding-provider" onchange="updateModelSelect('ea-coding-provider','ea-coding-model')">
-              <option value="">（使用默认）</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label style="font-size:12px">Coding Model</label>
-            <select id="ea-coding-model">
-              <option value="">（使用默认）</option>
-            </select>
-          </div>
-          <div class="form-group" style="margin-top:4px">
-            <label style="font-size:12px;display:flex;align-items:center;gap:6px;cursor:pointer">
-              <input type="checkbox" id="ea-mm-supports-tools">
-              <span>支持工具调用 (Tools)</span>
-            </label>
-            <div id="ea-mm-tools-hint" style="font-size:11px;margin-top:3px;padding:4px 8px;border-radius:4px;display:none"></div>
-          </div>
-        </div>
-
-        <!-- 乙(a): extra_llms 任意命名 slot -->
+        <!-- Extra LLM Slots (唯一的多卡槽来源) -->
         <div style="margin-top:12px;padding:10px;background:var(--surface3);border-radius:8px">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
             <div style="font-size:12px;color:var(--text2)">额外 LLM 插槽 · Extra LLM Slots</div>
@@ -1442,43 +1604,21 @@ body {
               <span class="material-symbols-outlined" style="font-size:14px">add</span> 添加
             </button>
           </div>
-          <div style="font-size:11px;color:var(--text3);margin-bottom:8px;line-height:1.4">
-            每行一个具名 slot，例如 <code>big_model</code> / <code>vision_model</code> / <code>code_review</code>。
-            Task 可以通过 <code>llm_label</code> 显式命中某个 slot，或由下方「自动路由」按输入类型挑选。
-          </div>
           <div id="ea-extra-llms-rows"></div>
         </div>
 
-        <!-- 乙(b): auto_route 启发式 -->
+        <!-- Auto-route (score-based) -->
         <div style="margin-top:12px;padding:10px;background:var(--surface3);border-radius:8px">
           <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;margin-bottom:8px">
             <input type="checkbox" id="ea-ar-enabled">
-            <span>启用自动路由 · Auto-route by input type</span>
+            <span>启用自动路由 · Auto-route by score</span>
           </label>
           <div style="font-size:11px;color:var(--text3);margin-bottom:8px;line-height:1.4">
-            没显式指定 llm_label 时，按输入类型自动挑 extra_llms 里的某个 slot（填 label 即可，留空 = 用默认 Provider/Model）。
+            每一次 LLM 调用前，按消息信号判 category，然后挑评分最高的 slot。详细决策会写入后端日志。
           </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-            <div class="form-group" style="margin-bottom:6px">
-              <label style="font-size:12px">日常 default →</label>
-              <input id="ea-ar-default" placeholder="留空 = 默认模型" style="font-size:12px">
-            </div>
-            <div class="form-group" style="margin-bottom:6px">
-              <label style="font-size:12px">复杂 complex →</label>
-              <input id="ea-ar-complex" placeholder="slot label 例如 big_model" style="font-size:12px">
-            </div>
-            <div class="form-group" style="margin-bottom:6px">
-              <label style="font-size:12px">图片/多模态 →</label>
-              <input id="ea-ar-multimodal" placeholder="slot label 例如 vision_model" style="font-size:12px">
-            </div>
-            <div class="form-group" style="margin-bottom:6px">
-              <label style="font-size:12px">编码 coding →</label>
-              <input id="ea-ar-coding" placeholder="slot label 例如 code_model" style="font-size:12px">
-            </div>
-            <div class="form-group" style="margin-bottom:6px">
-              <label style="font-size:12px">复杂阈值 (字符数)</label>
-              <input id="ea-ar-threshold" type="number" min="1" value="2000" style="font-size:12px">
-            </div>
+          <div class="form-group" style="margin-bottom:0;max-width:260px">
+            <label style="font-size:12px">复杂阈值（字符数，超过则归类 complex）</label>
+            <input id="ea-ar-threshold" type="number" min="1" value="2000" style="font-size:12px">
           </div>
         </div>
       </div>
@@ -1523,6 +1663,26 @@ body {
     <div class="form-group">
       <label>Custom Instructions</label>
       <textarea id="ea-prompt" rows="3" placeholder="Additional instructions..."></textarea>
+    </div>
+    <!-- RAG Knowledge Base Configuration -->
+    <div id="ea-rag-section" style="margin:12px 0;padding:14px;background:var(--surface2);border-radius:10px;border:1px solid var(--border-light)">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <span class="material-symbols-outlined" style="font-size:18px;color:var(--primary)">library_books</span>
+        <span style="font-weight:600;font-size:13px">知识库配置 RAG Knowledge Base</span>
+      </div>
+      <div class="form-group" style="margin-bottom:10px">
+        <label>RAG 模式</label>
+        <select id="ea-rag-mode" onchange="_eaOnRagModeChange(this.value)">
+          <option value="shared">共享知识库 Shared (企业通用)</option>
+          <option value="private">独立知识库 Private (专属领域)</option>
+          <option value="both">双库模式 Both (独立+共享)</option>
+          <option value="none">无 RAG None</option>
+        </select>
+      </div>
+      <div id="ea-rag-domain-kb-area" style="display:none">
+        <div style="font-size:12px;color:var(--text2);margin-bottom:6px">绑定专业领域知识库（可多选）</div>
+        <div id="ea-rag-domain-kb-list" style="max-height:180px;overflow-y:auto;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px"></div>
+      </div>
     </div>
     <div style="margin:12px 0;padding:12px;background:var(--surface2);border-radius:8px">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
@@ -1899,6 +2059,11 @@ body {
 <div id="toast-container"></div>
 
 <!-- Portal main application scripts (bundled) -->
+<!-- i18n dictionaries MUST load before portal_bundle.js because some
+     startup code paths (theme button, language button) call window.t()
+     during their initial render. Order: zh → en → bundle. -->
+<script src="/static/js/i18n/zh.js?v={{ bundle_v | default(0) }}"></script>
+<script src="/static/js/i18n/en.js?v={{ bundle_v | default(0) }}"></script>
 <script src="/static/js/portal_bundle.js?v={{ bundle_v | default(0) }}"></script>
 <script src="/static/js/portal_v2.js?v={{ v2_v | default(0) }}"></script>
 </body>

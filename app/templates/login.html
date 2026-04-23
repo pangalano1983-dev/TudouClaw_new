@@ -7,6 +7,8 @@
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/icon?family=Material+Symbols+Outlined" rel="stylesheet">
 <style>
+/* Token values mirrored from portal.html to keep login visually
+   consistent with the main app under both themes. Default is dark. */
 :root {
   --bg: #0e141b;
   --bg2: #1a2027;
@@ -19,10 +21,28 @@
   --text3: #6e7681;
   --primary: #cbc9ff;
   --primary-container: #acaaff;
+  --primary-text: #0e141b;
   --secondary: #ffb4aa;
   --error: #f85149;
   --success: #3fb950;
   --radius: 12px;
+}
+[data-theme="light"] {
+  --bg: #fdf8f3;
+  --bg2: #f5ede3;
+  --surface: #ffffff;
+  --surface2: #f0e8dd;
+  --surface3: #ebe3d9;
+  --border: #e0d5c7;
+  --text: #1e1e24;
+  --text2: #4a4a52;
+  --text3: #888888;
+  --primary: #85655a;
+  --primary-container: #6d4c41;
+  --primary-text: #fdf8f3;
+  --secondary: #e29578;
+  --error: #c93838;
+  --success: #2d7a39;
 }
 * { margin:0; padding:0; box-sizing:border-box; }
 body {
@@ -108,13 +128,42 @@ body {
   transition: all 0.2s;
 }
 .btn-primary {
-  background: linear-gradient(135deg, #cbc9ff, #acaaff);
-  color: #0e141b;
-  box-shadow: 0 4px 12px rgba(203, 201, 255, 0.3);
+  background: linear-gradient(135deg, var(--primary), var(--primary-container));
+  color: var(--primary-text);
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--primary) 30%, transparent);
 }
 .btn-primary:hover {
-  box-shadow: 0 6px 20px rgba(203, 201, 255, 0.4);
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--primary) 40%, transparent);
   transform: translateY(-1px);
+}
+/* Corner toggles — theme + language. Positioned absolutely so they
+   don't disturb the centered login card. */
+.login-top-toggles {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  gap: 6px;
+  z-index: 100;
+}
+.login-top-toggles button {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text2);
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-family: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.15s;
+}
+.login-top-toggles button:hover {
+  background: var(--surface2);
+  color: var(--text);
 }
 .btn-primary:active {
   transform: translateY(0);
@@ -137,35 +186,66 @@ body {
 }
 </style>
 </head>
+<script>
+/* Preload theme + lang BEFORE body renders — same pattern as portal.html
+   to avoid FOUC (flash of wrong theme / wrong language on first paint). */
+(function() {
+  try {
+    var t = localStorage.getItem('tudou_theme');
+    if (t === 'light' || t === 'dark') {
+      document.documentElement.setAttribute('data-theme', t);
+    }
+    var l = localStorage.getItem('tudou_lang');
+    if (l === 'en' || l === 'zh') {
+      document.documentElement.setAttribute('data-lang', l);
+    }
+  } catch (e) {}
+})();
+</script>
+</head>
 <body>
+
+<!-- Top-right toggles: theme + language. Login page is standalone
+     so it gets its own copies, but they read/write the same
+     localStorage keys the main portal uses — stays in sync. -->
+<div class="login-top-toggles">
+  <button id="login-theme-btn" onclick="_loginToggleTheme()" title="切换 Light / Dark 主题">
+    <span class="material-symbols-outlined" id="login-theme-icon" style="font-size:14px">dark_mode</span>
+    <span id="login-theme-label">深色主题</span>
+  </button>
+  <button id="login-lang-btn" onclick="_loginToggleLang()" title="切换中文 / English">
+    <span class="material-symbols-outlined" style="font-size:14px">translate</span>
+    <span id="login-lang-label"><b>中</b> / EN</span>
+  </button>
+</div>
 
 <div class="login-container">
   <div class="login-header">
     <h1>🥔 Tudou Claws</h1>
-    <p>Multi-Agent AI Coordination Hub</p>
+    <p data-i18n="login.tagline">Multi-Agent AI Coordination Hub</p>
   </div>
   <div id="error-msg" class="error hidden"></div>
 
   <!-- Tab switcher -->
   <div style="display:flex;gap:0;margin-bottom:24px;border-bottom:1px solid var(--border)">
-    <button id="tab-admin" style="flex:1;padding:10px;background:none;border:none;border-bottom:2px solid var(--primary);color:var(--primary);font-size:13px;font-weight:600;cursor:pointer;font-family:inherit" onclick="switchLoginTab('admin')">管理员登录</button>
-    <button id="tab-token" style="flex:1;padding:10px;background:none;border:none;border-bottom:2px solid transparent;color:var(--text3);font-size:13px;font-weight:600;cursor:pointer;font-family:inherit" onclick="switchLoginTab('token')">Token 登录</button>
+    <button id="tab-admin" style="flex:1;padding:10px;background:none;border:none;border-bottom:2px solid var(--primary);color:var(--primary);font-size:13px;font-weight:600;cursor:pointer;font-family:inherit" onclick="switchLoginTab('admin')" data-i18n="login.adminTab">管理员登录</button>
+    <button id="tab-token" style="flex:1;padding:10px;background:none;border:none;border-bottom:2px solid transparent;color:var(--text3);font-size:13px;font-weight:600;cursor:pointer;font-family:inherit" onclick="switchLoginTab('token')" data-i18n="login.tokenTab">Token 登录</button>
   </div>
 
   <!-- Admin login form -->
   <div id="form-admin">
     <div class="form-group">
-      <label>用户名</label>
-      <input id="admin-username" type="text" placeholder="输入管理员用户名" autocomplete="username"
+      <label data-i18n="login.username">用户名</label>
+      <input id="admin-username" type="text" data-i18n-placeholder="login.usernamePh" placeholder="输入管理员用户名" autocomplete="username"
              onkeydown="if(event.key==='Enter'&&!event.isComposing){document.getElementById('admin-password').focus()}">
     </div>
     <div class="form-group">
-      <label>密码</label>
-      <input id="admin-password" type="password" placeholder="输入密码" autocomplete="current-password"
+      <label data-i18n="login.password">密码</label>
+      <input id="admin-password" type="password" data-i18n-placeholder="login.passwordPh" placeholder="输入密码" autocomplete="current-password"
              onkeydown="if(event.key==='Enter'&&!event.isComposing){loginAdmin()}">
     </div>
     <div class="login-actions">
-      <button class="btn btn-primary" onclick="loginAdmin()">登录</button>
+      <button class="btn btn-primary" onclick="loginAdmin()" data-i18n="login.signIn">登录</button>
     </div>
   </div>
 
@@ -177,10 +257,10 @@ body {
              onkeydown="if(event.key==='Enter'&&!event.isComposing){login()}">
     </div>
     <div class="login-actions">
-      <button class="btn btn-primary" onclick="login()">Sign In</button>
+      <button class="btn btn-primary" onclick="login()" data-i18n="login.signIn">登录</button>
     </div>
     <div style="text-align:center;margin-top:20px">
-      <button style="background:none;border:none;color:var(--text3);font-size:12px;cursor:pointer;text-decoration:underline" onclick="showTokenHelp()">忘记 Token？</button>
+      <button style="background:none;border:none;color:var(--text3);font-size:12px;cursor:pointer;text-decoration:underline" onclick="showTokenHelp()" data-i18n="login.forgotToken">忘记 Token？</button>
     </div>
   </div>
 
@@ -205,6 +285,86 @@ body {
   </div>
 </div>
 
+<!-- i18n dictionaries (same files the portal loads) + login page
+     script. Order matters — dictionaries must load before login.js
+     references window.t. -->
+<script src="/static/js/i18n/zh.js"></script>
+<script src="/static/js/i18n/en.js"></script>
+<script>
+// Lightweight standalone i18n + theme toggle for the login page.
+// Can't pull in portal_bundle.js here — login is pre-auth, bundle is
+// 20k+ lines of admin UI — but we reuse the same dictionary files and
+// localStorage keys so preferences carry over after login.
+
+window._currentLang = (function() {
+  try {
+    var v = localStorage.getItem('tudou_lang');
+    return (v === 'en') ? 'en' : 'zh';
+  } catch (e) { return 'zh'; }
+})();
+
+window.t = function(key, fallback) {
+  var dict = (window.TUDOU_I18N || {})[window._currentLang];
+  if (dict && Object.prototype.hasOwnProperty.call(dict, key)) return dict[key];
+  if (window._currentLang !== 'zh') {
+    var zh = (window.TUDOU_I18N || {}).zh;
+    if (zh && Object.prototype.hasOwnProperty.call(zh, key)) return zh[key];
+  }
+  return (fallback != null) ? fallback : key;
+};
+
+function _loginApplyI18n() {
+  document.querySelectorAll('[data-i18n]').forEach(function(el) {
+    var key = el.getAttribute('data-i18n');
+    if (key) el.textContent = window.t(key);
+  });
+  document.querySelectorAll('[data-i18n-placeholder]').forEach(function(el) {
+    var key = el.getAttribute('data-i18n-placeholder');
+    if (key) el.setAttribute('placeholder', window.t(key));
+  });
+}
+
+function _loginApplyThemeLabel() {
+  var icon = document.getElementById('login-theme-icon');
+  var label = document.getElementById('login-theme-label');
+  var isLight = document.documentElement.getAttribute('data-theme') === 'light';
+  if (icon) icon.textContent = isLight ? 'light_mode' : 'dark_mode';
+  if (label) label.textContent = window.t(
+    isLight ? 'theme.light' : 'theme.dark',
+    isLight ? '浅色主题' : '深色主题');
+}
+
+function _loginApplyLangLabel() {
+  var label = document.getElementById('login-lang-label');
+  if (label) {
+    label.innerHTML = (window._currentLang === 'en')
+      ? '中 / <b>EN</b>' : '<b>中</b> / EN';
+  }
+}
+
+function _loginToggleTheme() {
+  var cur = document.documentElement.getAttribute('data-theme');
+  var next = cur === 'light' ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', next);
+  try { localStorage.setItem('tudou_theme', next); } catch (e) {}
+  _loginApplyThemeLabel();
+}
+
+function _loginToggleLang() {
+  window._currentLang = (window._currentLang === 'en') ? 'zh' : 'en';
+  try { localStorage.setItem('tudou_lang', window._currentLang); } catch (e) {}
+  document.documentElement.setAttribute('data-lang', window._currentLang);
+  _loginApplyI18n();
+  _loginApplyThemeLabel();  // theme label text is locale-dependent
+  _loginApplyLangLabel();
+}
+
+// Initial sync
+document.documentElement.setAttribute('data-lang', window._currentLang);
+_loginApplyI18n();
+_loginApplyThemeLabel();
+_loginApplyLangLabel();
+</script>
 <script src="/static/js/portal_login.js"></script>
 
 </body>

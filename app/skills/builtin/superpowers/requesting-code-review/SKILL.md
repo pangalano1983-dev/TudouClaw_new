@@ -1,6 +1,12 @@
 ---
 name: requesting-code-review
 description: Use when completing tasks, implementing major features, or before merging to verify work meets requirements
+applicable_roles:
+  - "coder"
+scenarios:
+  - "提交前自审"
+  - "发起 code review"
+  - "合并前验证"
 metadata:
   source: obra/superpowers
   license: MIT

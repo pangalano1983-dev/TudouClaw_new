@@ -502,6 +502,45 @@ async def send_project_message(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/projects/{project_id}/abort")
+async def project_abort(
+    project_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Hard abort: stop any in-flight project chat / workflow step AND
+    SIGTERM any bash subprocesses spawned by agents working on this
+    project.
+
+    Uses the centralized abort_registry:
+      - Flips abort flag so agent loops exit between turns
+      - Kills tracked OS processes (python scripts, compilers, etc.)
+      - Appends a system note to project chat so members see it
+    """
+    try:
+        project = _get_project_or_404(hub, project_id)
+        from ... import abort_registry as _ar
+        result = _ar.abort(_ar.project_key(project.id))
+        try:
+            killed_n = len(result.get("killed_pids") or [])
+            note = "🛑 项目执行已强制终止"
+            if killed_n:
+                note += f"（已停止 {killed_n} 个子进程）"
+            project.post_message(
+                sender="system", sender_name="系统",
+                content=note, msg_type="system",
+            )
+            hub._save_projects()
+        except Exception:
+            pass
+        return {"ok": True, "abort": result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("project_abort failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/projects/{project_id}/chat")
 async def get_project_chat(
     project_id: str,

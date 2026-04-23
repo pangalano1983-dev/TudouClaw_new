@@ -86,19 +86,32 @@ async def create_admin(
     hub=Depends(get_hub),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Create a new admin user (superAdmin only)."""
+    """Create a new admin / user account. SuperAdmin-only.
+
+    Body also accepts an optional ``role`` field ("admin" or "user") —
+    default "admin" for backward compat. Regular users are created via
+    the same flow but with role="user"; they land in admin_mgr alongside
+    admins and share the login path. Their permissions are gated by
+    ``app.permissions`` at API call time.
+    """
+    from ...permissions import require, Permission
+    require(user, Permission.MANAGE_ADMINS)
     try:
         auth = _get_auth()
         username = body.get("username", "").strip()
         password = body.get("password", "").strip()
         display_name = body.get("display_name", "").strip()
         agent_ids = body.get("agent_ids", [])
+        role = str(body.get("role") or "admin")
+        if role not in ("admin", "user", "superAdmin"):
+            raise HTTPException(400, f"invalid role: {role}")
         if not username or not password:
             raise HTTPException(400, "username and password required")
         admin = auth.admin_mgr.create_admin(
             username=username,
             password=password,
             display_name=display_name or username,
+            role=role,
             agent_ids=agent_ids,
         )
         return {"ok": True, "admin": admin.to_dict(include_secrets=False)}
@@ -119,6 +132,8 @@ async def update_admin(
     user: CurrentUser = Depends(get_current_user),
 ):
     """Update an admin user (superAdmin only)."""
+    from ...permissions import require, Permission
+    require(user, Permission.MANAGE_ADMINS)
     try:
         auth = _get_auth()
         user_id = body.get("user_id", "")
@@ -131,6 +146,10 @@ async def update_admin(
             kwargs["display_name"] = body["display_name"]
         if "agent_ids" in body:
             kwargs["agent_ids"] = body["agent_ids"]
+        if "node_ids" in body:
+            kwargs["node_ids"] = body["node_ids"]
+        if "role" in body:
+            kwargs["role"] = body["role"]
         if "active" in body:
             kwargs["active"] = body["active"]
         admin = auth.admin_mgr.update_admin(user_id, **kwargs)
@@ -149,7 +168,9 @@ async def delete_admin(
     hub=Depends(get_hub),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Delete an admin user (superAdmin only)."""
+    """Delete (soft by default) an admin user. SuperAdmin-only."""
+    from ...permissions import require, Permission
+    require(user, Permission.MANAGE_ADMINS)
     try:
         auth = _get_auth()
         user_id = body.get("user_id", "")
@@ -173,7 +194,10 @@ async def bind_agents_to_admin(
     hub=Depends(get_hub),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Bind agents to an admin user (superAdmin only)."""
+    """Bind (or re-bind) agents to an admin user. SuperAdmin-only —
+    delegation management is a privileged operation."""
+    from ...permissions import require, Permission
+    require(user, Permission.MANAGE_ADMINS)
     try:
         auth = _get_auth()
         user_id = body.get("user_id", "")
@@ -181,6 +205,34 @@ async def bind_agents_to_admin(
         if not user_id:
             raise HTTPException(400, "user_id required")
         admin = auth.admin_mgr.bind_agents(user_id, agent_ids)
+        if not admin:
+            raise HTTPException(404, "Admin not found")
+        return {"ok": True, "admin": admin.to_dict(include_secrets=False)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/admins/bind-nodes")
+async def bind_nodes_to_admin(
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Bind (or re-bind) the set of remote nodes this admin can manage.
+    SuperAdmin-only. Body: {user_id, node_ids: [str, ...]}."""
+    from ...permissions import require, Permission
+    require(user, Permission.MANAGE_ADMINS)
+    try:
+        auth = _get_auth()
+        user_id = body.get("user_id", "")
+        node_ids = body.get("node_ids", [])
+        if not user_id:
+            raise HTTPException(400, "user_id required")
+        if not isinstance(node_ids, list):
+            raise HTTPException(400, "node_ids must be a list")
+        admin = auth.admin_mgr.bind_nodes(user_id, [str(n) for n in node_ids])
         if not admin:
             raise HTTPException(404, "Admin not found")
         return {"ok": True, "admin": admin.to_dict(include_secrets=False)}

@@ -1193,6 +1193,27 @@ def _do_get_inner(handler, path: str):
                 _enrich_meeting_messages_with_refs(hub, full.get("messages") or [])
             except Exception as _e:
                 logger.debug("meeting detail enrich failed: %s", _e)
+            # Expose currently-busy participants so the UI can show
+            # typing bubbles for agents that got re-queued mid-chain
+            # via @-mention (not only for agents that the moderator
+            # explicitly targeted). See meetings.py router for details.
+            try:
+                active = []
+                for pid in (m.participants or []):
+                    try:
+                        ag = hub.get_agent(pid) if hasattr(hub, "get_agent") else None
+                    except Exception:
+                        ag = None
+                    if ag is None:
+                        continue
+                    status_val = getattr(ag, "status", None)
+                    sv = getattr(status_val, "value", status_val)
+                    if sv in ("busy", "waiting_approval"):
+                        active.append(pid)
+                full["active_speakers"] = active
+            except Exception as _e:
+                logger.debug("active_speakers scan failed: %s", _e)
+                full["active_speakers"] = []
             handler._json(full)
 
     # --- Standalone (non-project) tasks ---
@@ -1941,18 +1962,6 @@ def _do_get_inner(handler, path: str):
         handler.send_header("Cache-Control", "private, max-age=60")
         handler.end_headers()
         handler.wfile.write(data)
-
-    elif path.startswith("/api/portal/agent/") and path.endswith("/thinking"):
-        agent_id = path.split("/")[4]
-        agent = hub.get_agent(agent_id)
-        if not agent:
-            handler._json({"error": "Agent not found"}, 404)
-            return
-        stats = agent.active_thinking.get_stats() if agent.active_thinking else {"enabled": False}
-        history = []
-        if agent.active_thinking:
-            history = [r.to_dict() for r in agent.active_thinking.history[-10:]]
-        handler._json({"stats": stats, "history": history})
 
     elif path == "/api/portal/audio/events":
         # Audio events endpoint: TTS speak / STT listen events

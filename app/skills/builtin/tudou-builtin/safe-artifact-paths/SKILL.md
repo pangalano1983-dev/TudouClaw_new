@@ -1,6 +1,14 @@
 ---
 name: safe-artifact-paths
 description: Use whenever a tool produces a file (screenshot, PDF, recording, download, generated asset). All artifacts MUST land under $AGENT_WORKSPACE before being reported as deliverables. TudouClaw's sandbox rejects paths outside deliverable_dir — this skill prevents that failure at the source.
+applicable_roles:
+  - "coder"
+  - "researcher"
+  - "general-agent"
+scenarios:
+  - "产出物归档"
+  - "文件落盘验证"
+  - "沙箱路径合规"
 metadata:
   source: tudou-builtin
   license: Apache-2.0

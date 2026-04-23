@@ -1,6 +1,12 @@
 ---
 name: verification-before-completion
 description: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always
+applicable_roles:
+  - "coder"
+scenarios:
+  - "任务收尾验证"
+  - "提交前自查"
+  - "PR 前回归"
 metadata:
   source: obra/superpowers
   license: MIT

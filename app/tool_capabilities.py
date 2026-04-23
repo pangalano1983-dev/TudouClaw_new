@@ -69,6 +69,9 @@ CORE_TOOLS: frozenset[str] = frozenset({
     "read_file", "search_files", "glob_files",
     # Filesystem write + shell exec (core dev capability)
     "write_file", "edit_file", "bash",
+    # Quality gate primitive — every agent should be able to verify its
+    # work. Block 2 Review loop depends on this being universally callable.
+    "run_tests",
     # Data processing utilities
     "datetime_calc", "json_process", "text_process",
     # Web basics (search + read)
@@ -78,6 +81,10 @@ CORE_TOOLS: frozenset[str] = frozenset({
     "share_knowledge", "learn_from_peers",
     # UI visibility
     "plan_update", "emit_ui_block",
+    # Structured baton-pass between agents (sprint-collab B). Core
+    # because every agent may finish a task and hand off — not a skill
+    # to opt into.
+    "emit_handoff",
     # User scheduling interface ("remind me in 5 min")
     "task_update",
     # Inter-agent messaging (communication primitive)

@@ -1,6 +1,12 @@
 ---
 name: executing-plans
 description: Use when you have a written implementation plan to execute in a separate session with review checkpoints
+applicable_roles:
+  - "coder"
+scenarios:
+  - "按既定计划分步实施"
+  - "计划驱动的开发执行"
+  - "带检查点的里程碑推进"
 metadata:
   source: obra/superpowers
   license: MIT

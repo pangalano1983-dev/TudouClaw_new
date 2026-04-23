@@ -1,6 +1,13 @@
 ---
 name: writing-plans
 description: Use when you have a spec or requirements for a multi-step task, before touching code
+applicable_roles:
+  - "coder"
+  - "architect"
+scenarios:
+  - "多步任务规划"
+  - "上下文缺失的交接文档"
+  - "新功能实施计划"
 metadata:
   source: obra/superpowers
   license: MIT

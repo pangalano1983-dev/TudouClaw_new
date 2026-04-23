@@ -1,6 +1,12 @@
 ---
 name: finishing-a-development-branch
 description: Use when implementation is complete, all tests pass, and you need to decide how to integrate the work - guides completion of development work by presenting structured options for merge, PR, or cleanup
+applicable_roles:
+  - "coder"
+scenarios:
+  - "合并前决策"
+  - "PR 准备"
+  - "分支收尾与清理"
 metadata:
   source: obra/superpowers
   license: MIT

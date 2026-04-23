@@ -10,6 +10,87 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from ..deps.hub import get_hub
 from ..deps.auth import CurrentUser, get_current_user
 
+
+# ── Prompt Pack catalog helpers ──────────────────────────────────────
+# Shared between `import_from_catalog` paths (agents.py + skills.py
+# legacy + portal_routes_post.py). The community catalog stores actual
+# prompt text under each skill's `entries` list; old code dropped it.
+
+def _assemble_catalog_skill_content(skill_entry: dict) -> str:
+    """Build a Markdown body for a PromptPack from a catalog entry's
+    nested ``entries`` list.
+
+    Higher-priority entries render first. Each entry contributes:
+        ## {title}
+
+        {content}
+
+    Returns "" if the entry has no sub-entries (degrades gracefully).
+    """
+    entries = skill_entry.get("entries") or []
+    if not entries or not isinstance(entries, list):
+        return ""
+    try:
+        entries_sorted = sorted(
+            entries,
+            key=lambda e: -int(e.get("priority", 5) or 5),
+        )
+    except Exception:
+        entries_sorted = list(entries)
+
+    parts: list[str] = []
+    # Brief frontmatter so downstream summary extraction has context.
+    fm_lines: list[str] = []
+    if skill_entry.get("name"):
+        fm_lines.append(f"name: {skill_entry['name']}")
+    if skill_entry.get("description"):
+        desc = (skill_entry.get("description") or "").replace("\n", " ")
+        fm_lines.append(f"description: {desc}")
+    if skill_entry.get("category"):
+        fm_lines.append(f"category: {skill_entry['category']}")
+    if fm_lines:
+        parts.append("---\n" + "\n".join(fm_lines) + "\n---")
+
+    for e in entries_sorted:
+        if not isinstance(e, dict):
+            continue
+        body = (e.get("content") or "").strip()
+        if not body:
+            continue
+        title = (e.get("title") or "").strip()
+        # If the body already starts with a heading, don't double-stack.
+        if title and not body.lstrip().startswith("#"):
+            parts.append(f"## {title}\n\n{body}")
+        else:
+            parts.append(body)
+    return "\n\n".join(parts)
+
+
+def _merge_catalog_skill_tags(skill_entry: dict) -> list[str]:
+    """Merge top-level tags with every entry's tags, de-duped while
+    preserving first-seen order. None / empty strings are dropped."""
+    seen: set[str] = set()
+    out: list[str] = []
+
+    def _push(tag):
+        if tag is None:
+            return
+        s = str(tag).strip()
+        if not s:
+            return
+        if s in seen:
+            return
+        seen.add(s); out.append(s)
+
+    for tag in (skill_entry.get("tags") or []):
+        _push(tag)
+    for e in (skill_entry.get("entries") or []):
+        if not isinstance(e, dict):
+            continue
+        for tag in (e.get("tags") or []):
+            _push(tag)
+    return out
+
 logger = logging.getLogger("tudouclaw.api.agents")
 
 router = APIRouter(prefix="/api/portal", tags=["agents"])
@@ -32,7 +113,16 @@ async def list_agents(
     hub=Depends(get_hub),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """List all agents visible to current user."""
+    """List all agents visible to current user.
+
+    Visibility rules (see app/permissions.py):
+      * superAdmin    → sees everything
+      * admin         → sees agents they own OR that are delegated
+                        to them via AdminUser.agent_ids, plus legacy
+                        unowned agents (no owner_id) so nothing from
+                        before the migration disappears silently.
+      * user (role=user) → sees only agents they own.
+    """
     agents_raw = hub.list_agents() if hasattr(hub, "list_agents") else []
     agents_list = [a.to_dict() if hasattr(a, "to_dict") else a for a in agents_raw]
 
@@ -44,12 +134,188 @@ async def list_agents(
         if a.get("location") == "local" and not a.get("node_id"):
             a["node_id"] = hub.node_id
 
+    # Filter by viewer permission. We do the filtering HERE (not in
+    # user_can one-at-a-time) because the list-view path is hot and
+    # we want a single pass with the user's delegation set.
+    from ...permissions import Role, _role_enum
+    role = _role_enum(getattr(user, "role", ""))
+    if role is not Role.SUPER_ADMIN:
+        uid = getattr(user, "user_id", "") or ""
+        delegated = set(getattr(user, "delegated_agent_ids", []) or [])
+        def _can_see(a):
+            owner = str(a.get("owner_id") or "")
+            if role is Role.USER:
+                return bool(uid) and owner == uid
+            # admin: owner OR delegated OR legacy (no owner recorded)
+            if not owner:
+                return True
+            return owner == uid or a.get("id") in delegated
+        agents_list = [a for a in agents_list if _can_see(a)]
+
     return {"agents": agents_list}
 
 
 # ---------------------------------------------------------------------------
 # Single agent endpoints
 # ---------------------------------------------------------------------------
+
+@router.get("/agent/{agent_id}/plan/stale")
+async def agent_plan_stale(
+    agent_id: str,
+    threshold_s: float = 120.0,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Return any stale plan steps for this agent (IDLE + in_progress, or
+    BUSY with no recent activity past threshold).
+
+    Purely informational — UI polls this to render yellow warning. Does
+    NOT mutate state. Three separate POST endpoints below let the human
+    resolve: mark_failed / mark_skipped / resume.
+    """
+    agent = _get_agent_or_404(hub, agent_id)
+    try:
+        stale = agent._detect_stale_plan_steps(
+            threshold_s=float(threshold_s), emit_frames=False,
+        )
+    except Exception as e:
+        logger.exception("stale scan failed")
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"ok": True, "stale": stale}
+
+
+@router.post("/agent/{agent_id}/plan/step/{step_id}/mark_failed")
+async def agent_step_mark_failed(
+    agent_id: str,
+    step_id: str,
+    body: dict = Body(default={}),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Human-initiated failure of a stuck step.
+
+    Body: {"reason": "..."}  (optional)
+    """
+    agent = _get_agent_or_404(hub, agent_id)
+    reason = str(body.get("reason") or "").strip() or "human-marked failed"
+    step = agent.mark_step_failed(step_id, reason=reason)
+    if step is None:
+        raise HTTPException(404, f"step {step_id} not found or no active plan")
+    # Notify the bus so other tabs / dashboards see the resolution
+    try:
+        from ... import progress_bus as _pb
+        _pb.emit_step_failed(
+            plan_id=agent._current_plan.id if agent._current_plan else "",
+            step_id=step_id, agent_id=agent.id,
+            error=f"manually marked FAILED: {reason}",
+            will_retry=False,
+        )
+    except Exception:
+        pass
+    return {"ok": True, "step": step.to_dict()}
+
+
+@router.post("/agent/{agent_id}/plan/step/{step_id}/mark_skipped")
+async def agent_step_mark_skipped(
+    agent_id: str,
+    step_id: str,
+    body: dict = Body(default={}),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    agent = _get_agent_or_404(hub, agent_id)
+    reason = str(body.get("reason") or "").strip() or "human-skipped"
+    step = agent.mark_step_skipped(step_id, reason=reason)
+    if step is None:
+        raise HTTPException(404, f"step {step_id} not found or no active plan")
+    try:
+        from ... import progress_bus as _pb
+        _pb.emit_step_completed(
+            plan_id=agent._current_plan.id if agent._current_plan else "",
+            step_id=step_id, agent_id=agent.id, duration_s=0.0,
+            summary=f"[SKIPPED] {reason}",
+        )
+    except Exception:
+        pass
+    return {"ok": True, "step": step.to_dict()}
+
+
+@router.post("/agent/{agent_id}/plan/step/{step_id}/resume")
+async def agent_step_resume(
+    agent_id: str,
+    step_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Reset the step's started_at clock so the stale detector gives
+    it a fresh grace period. Human should then type a message to the
+    agent to actually drive it forward (step still in_progress; this
+    endpoint just extends the leash)."""
+    agent = _get_agent_or_404(hub, agent_id)
+    step = agent.resume_step(step_id)
+    if step is None:
+        raise HTTPException(404, f"step {step_id} not found or no active plan")
+    return {"ok": True, "step": step.to_dict()}
+
+
+@router.post("/agent/{agent_id}/abort")
+async def agent_abort(
+    agent_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Hard abort: stop the agent's current chat turn and SIGTERM any
+    bash subprocesses it spawned.
+
+    This endpoint flips BOTH abort signals so no matter which polling
+    layer runs first, the chat loop stops:
+
+      * ``abort_registry`` — process-level abort flag + SIGTERM any
+        tracked bash/mcp subprocesses this agent spawned.
+      * ``chat_task.aborted`` — the per-chat-task flag the running
+        ``agent.chat()`` loop polls between LLM iterations and tool
+        calls. Without this, a long-running LLM response (20-60s for
+        Qwen3.5-35B) leaves the user staring at a stuck progress bar.
+    """
+    try:
+        agent = _get_agent_or_404(hub, agent_id)
+        from ...permissions import require, Permission
+        require(user, Permission.MANAGE_AGENT, resource=agent)
+        from ... import abort_registry as _ar
+        result = _ar.abort(_ar.agent_key(agent.id))
+
+        # Also flip the chat-task aborted flag for every active task
+        # owned by this agent. Idempotent — already-aborted / completed
+        # tasks just stay where they are.
+        tasks_aborted = []
+        try:
+            from ...chat_task import get_chat_task_manager, ChatTaskStatus
+            mgr = get_chat_task_manager()
+            for task in mgr.get_agent_tasks(agent.id):
+                if task.status in (ChatTaskStatus.COMPLETED,
+                                   ChatTaskStatus.FAILED,
+                                   ChatTaskStatus.ABORTED):
+                    continue
+                try:
+                    task.abort()
+                    tasks_aborted.append(task.id)
+                except Exception as te:
+                    logger.debug("agent_abort: task.abort(%s) failed: %s",
+                                 task.id, te)
+        except Exception as me:
+            logger.debug("agent_abort: chat_task sweep failed: %s", me)
+
+        return {
+            "ok": True,
+            "abort": result,
+            "chat_tasks_aborted": tasks_aborted,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("agent_abort failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/agent/{agent_id}/events")
 async def get_agent_events(
@@ -215,10 +481,32 @@ async def get_agent_soul(
     hub=Depends(get_hub),
     user: CurrentUser = Depends(get_current_user),
 ):
+    """Return the agent's persisted SOUL markdown + avatar + role.
+
+    Two bugs fixed here (Nov 2026):
+      1. The old code called ``agent.get_soul()`` which doesn't exist on
+         Agent — hasattr always returned False, so soul was permanently
+         blank.
+      2. Returned the field as ``soul`` but the portal JS reads
+         ``resp.soul_md`` (matching the POST body shape). Result: edits
+         saved, but the next open always showed the default template.
+
+    Now: read directly from ``agent.soul_md`` and return it under the
+    expected key. Role is included too so the JS "Load Default Template"
+    button works without a second round-trip.
+    """
     agent = _get_agent_or_404(hub, agent_id)
-    soul = agent.get_soul() if hasattr(agent, "get_soul") else ""
-    robot_avatar = getattr(agent, "robot_avatar", "")
-    return {"soul": soul, "robot_avatar": robot_avatar}
+    soul_md = getattr(agent, "soul_md", "") or ""
+    robot_avatar = getattr(agent, "robot_avatar", "") or ""
+    role = getattr(agent, "role", "general") or "general"
+    return {
+        "soul_md": soul_md,
+        "robot_avatar": robot_avatar,
+        "role": role,
+        # Back-compat: keep the legacy key too so any older client that
+        # reads ``soul`` still gets the real value rather than "".
+        "soul": soul_md,
+    }
 
 
 @router.post("/agent/{agent_id}/soul")
@@ -371,6 +659,8 @@ async def update_agent_profile(
 ):
     """Update agent profile — matches legacy handlers/agents.py _handle_profile."""
     agent = _get_agent_or_404(hub, agent_id)
+    from ...permissions import require, Permission
+    require(user, Permission.MANAGE_AGENT, resource=agent)
     try:
         from ...agent import AgentProfile
         # Update core fields if provided
@@ -431,13 +721,31 @@ async def update_agent_profile(
                 if not isinstance(s, dict):
                     continue
                 label = str(s.get("label") or "").strip()
-                if not label:
+                provider = str(s.get("provider") or "").strip()
+                model = str(s.get("model") or "").strip()
+                purpose = str(s.get("purpose") or "").strip()
+                # Accept if ANY signal is present — label is no longer
+                # required since the UI uses purpose as the primary field
+                # (dropdown). Fully-empty slots are still dropped.
+                if not (label or provider or model or purpose):
                     continue
+                # Preserve per-slot user-override scores (new in v2 UI).
+                raw_scores = s.get("scores")
+                scores_clean: dict = {}
+                if isinstance(raw_scores, dict):
+                    for k, v in raw_scores.items():
+                        try:
+                            vf = float(v)
+                        except (TypeError, ValueError):
+                            continue
+                        if 0.0 <= vf <= 10.0:
+                            scores_clean[str(k)] = vf
                 cleaned.append({
                     "label": label,
-                    "provider": str(s.get("provider") or "").strip(),
-                    "model": str(s.get("model") or "").strip(),
-                    "purpose": str(s.get("purpose") or "").strip(),
+                    "provider": provider,
+                    "model": model,
+                    "purpose": purpose,
+                    "scores": scores_clean,
                     "note": str(s.get("note") or "").strip(),
                 })
             agent.extra_llms = cleaned
@@ -502,6 +810,8 @@ async def send_chat(
     import time as _time
 
     agent = _get_agent_or_404(hub, agent_id)
+    from ...permissions import require, Permission
+    require(user, Permission.CHAT_WITH_AGENT, resource=agent)
 
     # Hard-gate: no LLM → no chat. Surface a distinct 409 with a stable
     # error code so the frontend can disable the input box and prompt
@@ -643,6 +953,22 @@ async def send_chat(
     except Exception as _e:
         logger.debug("chat complexity classification skipped: %s", _e)
 
+    # ── RAG-only toggle (chat-header switch) ─────────────────
+    # When the frontend toggles "🔍 RAG" ON, restrict this turn's tool
+    # offering to knowledge_lookup only — hard-route to the KB, no
+    # bash/read_file side quests. Flag lives on the agent so the LLM
+    # call's tool-filter sees it. Re-stamped (including False) every
+    # chat request, so turns never inherit stale state.
+    agent._rag_only_mode = bool(body.get("rag_only", False))
+
+    # ── /new slash flag: skip chat history for THIS turn ──
+    # Frontend's `/new <msg>` sets skip_history=true. Backend stashes it
+    # on the agent as a transient flag (re-stamped every request — NEVER
+    # sticky) so the LLM loop's message-builder can strip self.messages.
+    # Persistent chat record is unaffected — this only changes what goes
+    # into the outbound LLM request for this one turn.
+    agent._skip_history_once = bool(body.get("skip_history", False))
+
     # Route through supervisor (handles both isolated and in-process)
     task = hub.supervisor.chat_async(agent.id, chat_content, source="admin")
     resp: dict = {
@@ -675,6 +1001,8 @@ async def clear_agent(
     user: CurrentUser = Depends(get_current_user),
 ):
     agent = _get_agent_or_404(hub, agent_id)
+    from ...permissions import require, Permission
+    require(user, Permission.MANAGE_AGENT, resource=agent)
     if hasattr(agent, "clear"):
         agent.clear()
     return {"ok": True}
@@ -780,46 +1108,172 @@ async def manage_enhancement(
         raise HTTPException(400, f"Unknown action: {action}")
 
 
-@router.get("/agent/{agent_id}/thinking")
-async def get_thinking(
+@router.get("/agent/{agent_id}/growth-stats")
+async def get_growth_stats(
     agent_id: str,
     hub=Depends(get_hub),
     user: CurrentUser = Depends(get_current_user),
 ):
+    """Read-only asset aggregates — what the agent has accumulated.
+
+    Intended for the Growth panel. Pure counters over existing modules;
+    no new computation / no scheduling. Safe to call frequently.
+    """
     agent = _get_agent_or_404(hub, agent_id)
-    stats = agent.active_thinking.get_stats() if agent.active_thinking else {"enabled": False}
-    history = []
-    if agent.active_thinking:
-        history = [r.to_dict() for r in agent.active_thinking.history[-10:]]
-    return {"stats": stats, "history": history}
+    stats: dict = {
+        "agent_id": agent.id,
+        "agent_name": agent.name,
+        "role": agent.role,
+    }
+
+    # Experience library (per-role)
+    try:
+        from ...experience_library import _get_global_library
+        lib = _get_global_library()
+        stats["experience_count"] = int(
+            lib.get_experience_count(agent.role) or 0)
+        try:
+            stats["experience_roles"] = {
+                r: int(c) for r, c in (lib.get_all_role_counts() or {}).items()
+            }
+        except Exception:
+            stats["experience_roles"] = {}
+    except Exception:
+        stats["experience_count"] = 0
+        stats["experience_roles"] = {}
+
+    # L3 long-term memory facts (per-agent)
+    try:
+        from ...core.memory import get_memory_manager
+        mm = get_memory_manager()
+        stats["memory_facts"] = int(mm.count_facts(agent.id) or 0)
+    except Exception:
+        stats["memory_facts"] = 0
+
+    # Granted skills + bound prompt packs
+    try:
+        stats["granted_skills"] = len(getattr(agent, "granted_skills", []) or [])
+        stats["bound_prompt_packs"] = len(
+            getattr(agent, "bound_prompt_packs", []) or [])
+    except Exception:
+        stats["granted_skills"] = 0
+        stats["bound_prompt_packs"] = 0
+
+    # RAG — domain KBs bound to this agent + total chunks
+    try:
+        from ...rag_provider import get_domain_kb_store
+        coll_ids = getattr(agent.profile, "rag_collection_ids", []) or []
+        dkb_store = get_domain_kb_store()
+        bound_kbs = []
+        total_chunks = 0
+        for kid in coll_ids:
+            kb = dkb_store.get(kid)
+            if kb:
+                bound_kbs.append({
+                    "id": kid,
+                    "name": kb.name,
+                    "doc_count": int(kb.doc_count or 0),
+                })
+                total_chunks += int(kb.doc_count or 0)
+        stats["domain_kbs"] = bound_kbs
+        stats["domain_kb_chunks_total"] = total_chunks
+        stats["rag_mode"] = getattr(agent.profile, "rag_mode", "shared")
+    except Exception:
+        stats["domain_kbs"] = []
+        stats["domain_kb_chunks_total"] = 0
+        stats["rag_mode"] = "shared"
+
+    # Shared knowledge contributions — entries tagged with this role
+    try:
+        from ... import knowledge as _kb
+        role_lc = (agent.role or "").lower()
+        contribs = 0
+        for e in (_kb.list_entries() or []):
+            tags = [str(t).lower() for t in (e.get("tags") or [])]
+            if "shared-by-agent" in tags and role_lc in tags:
+                contribs += 1
+        stats["shared_knowledge_contributions"] = contribs
+    except Exception:
+        stats["shared_knowledge_contributions"] = 0
+
+    # Think-button statistics — aggregate every prior Think invocation
+    # preserved in the event log:
+    #   - think_count: how many times Think has run for this agent
+    #   - think_experiences_saved: total experience entries that
+    #     those Think calls persisted (parsed from the summary's
+    #     "已沉淀 N 条经验" suffix — injected by Agent.think_now)
+    #   - last_self_summary_at / preview: most recent Think result
+    try:
+        import re as _re_parse
+        last_summary_at = 0.0
+        last_summary_preview = ""
+        think_count = 0
+        exp_saved = 0
+        # Walk the whole preserved event ring buffer so counts are
+        # cumulative — users click Think over many sessions.
+        for ev in list(getattr(agent, "events", []) or []):
+            data = getattr(ev, "data", {}) or {}
+            if not (getattr(ev, "kind", "") == "message"
+                    and data.get("role") == "assistant"
+                    and data.get("source") == "think_now"):
+                continue
+            think_count += 1
+            content = str(data.get("content") or "")
+            m = _re_parse.search(r"已沉淀\s*\*?\*?\s*(\d+)\s*\*?\*?\s*条经验", content)
+            if m:
+                try:
+                    exp_saved += int(m.group(1))
+                except ValueError:
+                    pass
+            # Newest one wins for preview fields
+            ts = float(getattr(ev, "ts", 0) or 0)
+            if ts >= last_summary_at:
+                last_summary_at = ts
+                last_summary_preview = content[:140].replace("\n", " ")
+        stats["think_count"] = think_count
+        stats["think_experiences_saved"] = exp_saved
+        stats["last_self_summary_at"] = last_summary_at
+        stats["last_self_summary_preview"] = last_summary_preview
+    except Exception:
+        stats["think_count"] = 0
+        stats["think_experiences_saved"] = 0
+        stats["last_self_summary_at"] = 0.0
+        stats["last_self_summary_preview"] = ""
+
+    return stats
 
 
-@router.post("/agent/{agent_id}/thinking/enable")
-async def enable_thinking(
+@router.post("/agent/{agent_id}/think-now")
+async def think_now(
     agent_id: str,
     body: dict = Body(default={}),
     hub=Depends(get_hub),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Enable active thinking — matches legacy handlers/agents.py."""
-    agent = _get_agent_or_404(hub, agent_id)
-    config = body or {}
-    stats = agent.enable_active_thinking(**config)
-    hub._save_agents()
-    return {"ok": True, "stats": stats}
+    """Think-button endpoint: on-demand self-summary.
 
-
-@router.post("/agent/{agent_id}/thinking/disable")
-async def disable_thinking(
-    agent_id: str,
-    hub=Depends(get_hub),
-    user: CurrentUser = Depends(get_current_user),
-):
-    """Disable active thinking — matches legacy handlers/agents.py."""
+    Replaces the old Active Thinking panel. Summarizes the agent's last
+    N turns, attempts to persist any reusable experience, and returns
+    the summary (also appended to the agent's event stream as an
+    assistant-kind message).
+    """
     agent = _get_agent_or_404(hub, agent_id)
-    agent.disable_active_thinking()
+    from ...permissions import require, Permission
+    require(user, Permission.CHAT_WITH_AGENT, resource=agent)
+    if not (agent.provider or "").strip() or not (agent.model or "").strip():
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "NO_LLM_CONFIGURED",
+                "message": "该 Agent 还没有配置 LLM。",
+            },
+        )
+    turns_window = int(body.get("turns_window", 15) or 15)
+    result = agent.think_now(turns_window=turns_window)
+    if not result.get("ok"):
+        return {"ok": False, "error": result.get("error", "unknown")}
     hub._save_agents()
-    return {"ok": True}
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -838,6 +1292,12 @@ async def create_agent(
     "New Agent" are rejected because those are the default placeholders
     that a runaway client loop produces — they don't identify anything.
     """
+    # Permission gate: anyone with CREATE_AGENT (superAdmin / admin /
+    # user) may create. The resulting agent is owned by the caller
+    # (superAdmin creations stay "unowned" and implicitly-global).
+    from ...permissions import require, Permission, assign_owner_on_create
+    require(user, Permission.CREATE_AGENT)
+
     name = (body.get("name") or "").strip()
     if not name:
         raise HTTPException(400, "name is required (non-empty)")
@@ -858,6 +1318,9 @@ async def create_agent(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    # Stamp ownership so MANAGE_AGENT scopes correctly later.
+    assign_owner_on_create(user, agent)
 
     # Apply profile if provided
     if agent and body.get("profile"):
@@ -919,6 +1382,11 @@ async def delete_agent(
     user: CurrentUser = Depends(get_current_user),
 ):
     """Delete an agent permanently."""
+    # 404-before-403 — so a user probing random ids can't tell which
+    # ones exist but belong to someone else.
+    agent = _get_agent_or_404(hub, agent_id)
+    from ...permissions import require, Permission
+    require(user, Permission.MANAGE_AGENT, resource=agent)
     ok = hub.remove_agent(agent_id)
     if not ok:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
@@ -1177,13 +1645,20 @@ async def manage_prompt_packs(
                         skill_entry = skill
                         break
                 if skill_entry:
+                    # Bug fix (Nov 2026): the catalog entry's real prompt
+                    # text lives in its `entries` sub-list, not at the
+                    # top level. Old code shipped the pack with an empty
+                    # ``content`` — "imported + bound" looked OK but the
+                    # agent never got any prompt injected.
+                    assembled = _assemble_catalog_skill_content(skill_entry)
+                    merged_tags = _merge_catalog_skill_tags(skill_entry)
                     record = PromptPack(
                         skill_id=skill_entry.get("id", ""),
                         name=skill_entry.get("name", ""),
                         description=skill_entry.get("description", ""),
                         category=skill_entry.get("category", "general"),
-                        tags=skill_entry.get("tags", []),
-                        content="",
+                        tags=merged_tags,
+                        content=assembled,
                         origin="catalog"
                     )
                     registry.store.add_skill(record)
@@ -1274,22 +1749,6 @@ async def trigger_thinking(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/agent/{agent_id}/thinking/history")
-async def get_thinking_history(
-    agent_id: str,
-    body: dict = Body(default={}),
-    hub=Depends(get_hub),
-    user: CurrentUser = Depends(get_current_user),
-):
-    """Get thinking history (POST variant for filtered queries)."""
-    agent = _get_agent_or_404(hub, agent_id)
-    history = []
-    if agent.active_thinking:
-        history = [r.to_dict() for r in agent.active_thinking.history[-20:]]
-    stats = agent.active_thinking.get_stats() if agent.active_thinking else None
-    return {"history": history, "stats": stats}
 
 
 # ---------------------------------------------------------------------------
@@ -1583,6 +2042,20 @@ async def get_agent_engine(
 ):
     """Get agent engine state summary."""
     return hub.get_agent_engine_info(agent_id) or {}
+
+
+# ---------------------------------------------------------------------------
+# LLM router — model capability scores (for Edit Agent UI slot panel)
+# ---------------------------------------------------------------------------
+
+@router.get("/llm_router/scores")
+async def get_llm_router_scores(
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Return the bundled model_scores.json so the Edit Agent UI can show
+    per-category benchmark scores next to each Extra LLM Slot row."""
+    from ...llm_router import load_scores
+    return load_scores()
 
 
 @router.get("/agent/{agent_id}/transcript")

@@ -1,6 +1,13 @@
 ---
 name: web-automator
 description: Use when the agent needs to drive a real browser — open a page, read DOM, click/fill/submit, take a screenshot, or save a page as PDF. Wraps the `agent-browser` Node CLI (invoked via Bash). Covers the accessibility-tree + ref-based workflow that makes scripted browsing reliable, and calls out two recurring pitfalls — (1) deliverables landing outside $AGENT_WORKSPACE and (2) multi-URL PDFs with identical pages.
+applicable_roles:
+  - "coder"
+  - "researcher"
+scenarios:
+  - "动态页面自动化"
+  - "表单自动填写"
+  - "页面截图/PDF 存档"
 metadata:
   source: tudou-builtin
   license: Apache-2.0

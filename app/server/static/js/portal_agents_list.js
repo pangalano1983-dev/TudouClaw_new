@@ -117,7 +117,13 @@ async function _loadRagProviders() {
 function _renderAgentCard(a) {
   var statusColor = a.status === 'idle' ? '#3fb950' : a.status === 'busy' ? '#f0883e' : a.status === 'error' ? '#f85149' : 'var(--text3)';
   var statusLabel = a.status === 'idle' ? 'Idle' : a.status === 'busy' ? 'Busy' : a.status === 'error' ? 'Error' : (a.status || 'Unknown');
-  var modelShort = (a.model || 'default').split('/').pop().substring(0, 20);
+  // Shared helper across chat header, info cards, dashboard — keeps
+  // every surface showing the same clean label for the same raw ID.
+  var _pp = window._prettyModelLabel || function(x){
+    return (x||'default').split('/').pop().substring(0,20);
+  };
+  var modelShort = _pp(a.model) || 'default';
+  if (modelShort.length > 20) modelShort = modelShort.substring(0,18) + '..';
   var roleBadge = a.role ? '<span style="padding:2px 6px;border-radius:4px;font-size:9px;font-weight:700;background:rgba(203,201,255,0.12);color:var(--primary);text-transform:uppercase;letter-spacing:0.3px">'+esc(a.role)+'</span>' : '';
   return '<div onclick="showAgentView(\''+a.id+'\')" style="background:var(--surface);border-radius:12px;padding:14px 16px;border:1px solid var(--border-light);cursor:pointer;transition:all 0.15s;display:flex;align-items:center;gap:14px" onmouseenter="this.style.borderColor=\'var(--primary)\';this.style.transform=\'translateY(-1px)\'" onmouseleave="this.style.borderColor=\'var(--border-light)\';this.style.transform=\'none\'">' +
     '<div style="width:40px;height:40px;border-radius:10px;background:var(--surface3);display:flex;align-items:center;justify-content:center;flex-shrink:0"><span class="material-symbols-outlined" style="font-size:22px;color:var(--primary)">smart_toy</span></div>' +

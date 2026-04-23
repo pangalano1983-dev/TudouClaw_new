@@ -1,0 +1,212 @@
+{
+  "_meta": {
+    "generated_at": "2026-04-23",
+    "updated_by": "hand-curated from public benchmarks",
+    "sources": {
+      "tool-heavy":  "BFCL v3 live leaderboard (overall accuracy, normalized)",
+      "multimodal":  "MMMU val + MathVista (averaged, normalized)",
+      "reasoning":   "MMLU-Pro + GPQA Diamond (weighted, normalized)",
+      "analysis":    "Arena-Hard win_rate vs GPT-4-0314 (normalized)",
+      "default":     "Chatbot Arena overall ELO -> linear map 1000-1400 to 0.0-10.0"
+    },
+    "normalization": "All scores 0.0-10.0. null = benchmark did not cover this model.",
+    "notes": [
+      "Quantized local variants (MLX / GGUF / AWQ) resolve to their base model via aliases — quantization can reduce real-world capability 5-15% but is not reflected here.",
+      "When a model is not in this file, the router treats it as 5.0 across the board (neutral).",
+      "Refresh cadence: hand-curate now; automated refresh script is a future work item."
+    ]
+  },
+
+  "categories": ["tool-heavy", "multimodal", "reasoning", "analysis", "default"],
+
+  "models": {
+    "claude-3-5-sonnet-20241022": {
+      "tool-heavy": 9.1, "multimodal": 8.9, "reasoning": 9.2, "analysis": 9.5, "default": 9.4
+    },
+    "claude-3-5-haiku-20241022": {
+      "tool-heavy": 8.2, "multimodal": 7.4, "reasoning": 7.8, "analysis": 8.1, "default": 8.3
+    },
+    "claude-3-opus-20240229": {
+      "tool-heavy": 8.4, "multimodal": 8.2, "reasoning": 8.6, "analysis": 9.0, "default": 8.8
+    },
+    "gpt-4o-2024-11-20": {
+      "tool-heavy": 8.9, "multimodal": 9.0, "reasoning": 8.5, "analysis": 9.0, "default": 9.1
+    },
+    "gpt-4o-mini": {
+      "tool-heavy": 7.8, "multimodal": 7.6, "reasoning": 7.2, "analysis": 7.5, "default": 7.7
+    },
+    "gpt-4-turbo-2024-04-09": {
+      "tool-heavy": 8.1, "multimodal": 7.9, "reasoning": 8.0, "analysis": 8.4, "default": 8.5
+    },
+
+    "o1-preview": {
+      "tool-heavy": 7.0, "multimodal": null, "reasoning": 9.7, "analysis": 9.3, "default": 9.0
+    },
+    "o1-mini": {
+      "tool-heavy": 6.8, "multimodal": null, "reasoning": 9.0, "analysis": 8.4, "default": 8.5
+    },
+
+    "gemini-1.5-pro-002": {
+      "tool-heavy": 8.3, "multimodal": 8.7, "reasoning": 8.2, "analysis": 8.3, "default": 8.6
+    },
+    "gemini-1.5-flash-002": {
+      "tool-heavy": 7.2, "multimodal": 7.8, "reasoning": 7.0, "analysis": 7.1, "default": 7.5
+    },
+
+    "Qwen2.5-72B-Instruct": {
+      "tool-heavy": 9.0, "multimodal": null, "reasoning": 7.8, "analysis": 7.6, "default": 8.3
+    },
+    "Qwen2.5-32B-Instruct": {
+      "tool-heavy": 8.7, "multimodal": null, "reasoning": 7.4, "analysis": 7.1, "default": 7.9
+    },
+    "Qwen2.5-14B-Instruct": {
+      "tool-heavy": 8.0, "multimodal": null, "reasoning": 6.8, "analysis": 6.6, "default": 7.2
+    },
+    "Qwen2.5-7B-Instruct": {
+      "tool-heavy": 7.2, "multimodal": null, "reasoning": 6.0, "analysis": 5.9, "default": 6.4
+    },
+    "Qwen2-VL-72B-Instruct": {
+      "tool-heavy": 8.2, "multimodal": 8.5, "reasoning": 7.4, "analysis": 7.2, "default": 8.0
+    },
+
+    "glm-4-plus": {
+      "tool-heavy": 6.8, "multimodal": null, "reasoning": 8.1, "analysis": 8.0, "default": 8.2
+    },
+    "glm-4-flash": {
+      "tool-heavy": 5.9, "multimodal": null, "reasoning": 6.7, "analysis": 6.5, "default": 6.8
+    },
+    "glm-4v-plus": {
+      "tool-heavy": 6.6, "multimodal": 7.5, "reasoning": 7.8, "analysis": 7.6, "default": 7.8
+    },
+    "glm-4.5-air": {
+      "tool-heavy": 6.2, "multimodal": null, "reasoning": 7.5, "analysis": 7.3, "default": 7.5
+    },
+    "glm-4.5": {
+      "tool-heavy": 7.0, "multimodal": null, "reasoning": 8.3, "analysis": 8.1, "default": 8.4
+    },
+
+    "deepseek-chat": {
+      "tool-heavy": 8.5, "multimodal": null, "reasoning": 8.4, "analysis": 8.2, "default": 8.7
+    },
+    "deepseek-reasoner": {
+      "tool-heavy": 7.0, "multimodal": null, "reasoning": 9.5, "analysis": 9.0, "default": 8.8
+    },
+    "deepseek-coder-v2": {
+      "tool-heavy": 8.7, "multimodal": null, "reasoning": 7.9, "analysis": 7.2, "default": 7.8
+    },
+
+    "llama-3.3-70B-Instruct": {
+      "tool-heavy": 8.2, "multimodal": null, "reasoning": 7.6, "analysis": 7.4, "default": 8.0
+    },
+    "llama-3.1-70B-Instruct": {
+      "tool-heavy": 7.8, "multimodal": null, "reasoning": 7.2, "analysis": 7.0, "default": 7.6
+    },
+    "llama-3.1-8B-Instruct": {
+      "tool-heavy": 6.5, "multimodal": null, "reasoning": 5.4, "analysis": 5.2, "default": 5.8
+    },
+
+    "mistral-large-2411": {
+      "tool-heavy": 7.8, "multimodal": null, "reasoning": 7.5, "analysis": 7.6, "default": 7.9
+    },
+    "mixtral-8x22B-Instruct": {
+      "tool-heavy": 6.9, "multimodal": null, "reasoning": 6.6, "analysis": 6.5, "default": 6.8
+    },
+
+    "gemma-3-27b-it": {
+      "tool-heavy": 6.0, "multimodal": 5.4, "reasoning": 6.8, "analysis": 6.4, "default": 6.9
+    },
+    "gemma-2-27b-it": {
+      "tool-heavy": 5.8, "multimodal": null, "reasoning": 6.5, "analysis": 6.2, "default": 6.6
+    },
+
+    "command-r-plus-08-2024": {
+      "tool-heavy": 7.2, "multimodal": null, "reasoning": 6.8, "analysis": 6.9, "default": 7.1
+    },
+
+    "_unknown": {
+      "tool-heavy": 5.0, "multimodal": 5.0, "reasoning": 5.0, "analysis": 5.0, "default": 5.0
+    }
+  },
+
+  "aliases": {
+    "claude":                   "claude-3-5-sonnet-20241022",
+    "claude-sonnet":            "claude-3-5-sonnet-20241022",
+    "claude-3-5-sonnet":        "claude-3-5-sonnet-20241022",
+    "claude-3.5-sonnet":        "claude-3-5-sonnet-20241022",
+    "claude-3.5-haiku":         "claude-3-5-haiku-20241022",
+    "claude-3-opus":            "claude-3-opus-20240229",
+
+    "gpt-4o":                   "gpt-4o-2024-11-20",
+    "gpt-4":                    "gpt-4-turbo-2024-04-09",
+    "gpt-4-turbo":              "gpt-4-turbo-2024-04-09",
+
+    "gemini-1.5-pro":           "gemini-1.5-pro-002",
+    "gemini-pro":               "gemini-1.5-pro-002",
+    "gemini-1.5-flash":         "gemini-1.5-flash-002",
+    "gemini-flash":             "gemini-1.5-flash-002",
+
+    "qwen":                     "Qwen2.5-32B-Instruct",
+    "qwen-72b":                 "Qwen2.5-72B-Instruct",
+    "qwen-32b":                 "Qwen2.5-32B-Instruct",
+    "qwen-14b":                 "Qwen2.5-14B-Instruct",
+    "qwen-7b":                  "Qwen2.5-7B-Instruct",
+    "qwen2.5":                  "Qwen2.5-32B-Instruct",
+    "qwen2.5-72b":              "Qwen2.5-72B-Instruct",
+    "qwen2.5-32b":              "Qwen2.5-32B-Instruct",
+    "qwen2.5-32b-instruct":     "Qwen2.5-32B-Instruct",
+    "qwen2.5-14b":              "Qwen2.5-14B-Instruct",
+    "qwen2.5-7b":               "Qwen2.5-7B-Instruct",
+    "qwen3.5-27b":              "Qwen2.5-32B-Instruct",
+    "qwen3.5-32b":              "Qwen2.5-32B-Instruct",
+    "qwen3.5-35b-a3b":          "Qwen2.5-32B-Instruct",
+    "qwen3-27b":                "Qwen2.5-32B-Instruct",
+    "qwen3-32b":                "Qwen2.5-32B-Instruct",
+    "qwen3-35b-a3b":            "Qwen2.5-32B-Instruct",
+    "qwen2-vl-72b":             "Qwen2-VL-72B-Instruct",
+    "qwen-vl":                  "Qwen2-VL-72B-Instruct",
+    "qwen-vl-72b":              "Qwen2-VL-72B-Instruct",
+
+    "glm":                      "glm-4-plus",
+    "glm-4":                    "glm-4-plus",
+    "glm-4.7":                  "glm-4-plus",
+    "glm4.7":                   "glm-4-plus",
+    "glm-4-air":                "glm-4-flash",
+    "glm4-flash":               "glm-4-flash",
+    "glm-4.7-flash":            "glm-4-flash",
+    "glm4.7-flash":             "glm-4-flash",
+    "glm4.5-air":               "glm-4.5-air",
+    "glm-4.5-flash":            "glm-4.5-air",
+    "glm4.5":                   "glm-4.5",
+    "glm-4v":                   "glm-4v-plus",
+
+    "deepseek":                 "deepseek-chat",
+    "deepseek-v3":              "deepseek-chat",
+    "deepseek-v2.5":            "deepseek-chat",
+    "deepseek-r1":              "deepseek-reasoner",
+    "deepseek-reasoner":        "deepseek-reasoner",
+
+    "llama-3.3":                "llama-3.3-70B-Instruct",
+    "llama-3.3-70b":            "llama-3.3-70B-Instruct",
+    "llama-3.1":                "llama-3.1-70B-Instruct",
+    "llama-3.1-70b":            "llama-3.1-70B-Instruct",
+    "llama-3.1-8b":             "llama-3.1-8B-Instruct",
+    "llama3.3":                 "llama-3.3-70B-Instruct",
+
+    "mistral-large":            "mistral-large-2411",
+    "mistral":                  "mistral-large-2411",
+    "mixtral":                  "mixtral-8x22B-Instruct",
+    "mixtral-8x22b":            "mixtral-8x22B-Instruct",
+
+    "gemma":                    "gemma-3-27b-it",
+    "gemma-3":                  "gemma-3-27b-it",
+    "gemma-3-27b":              "gemma-3-27b-it",
+    "gemma-2-27b":              "gemma-2-27b-it",
+    "gemma3-27b":               "gemma-3-27b-it",
+    "gemma3":                   "gemma-3-27b-it",
+
+    "command-r-plus":           "command-r-plus-08-2024",
+    "cohere":                   "command-r-plus-08-2024",
+
+    "o1":                       "o1-preview"
+  }
+}

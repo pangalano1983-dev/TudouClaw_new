@@ -1,0 +1,259 @@
+// English dictionary — mirrors zh.js key-for-key.
+// Missing a key? Fallback logic in window.t() returns zh value,
+// not undefined. But add it here when you add it to zh.js so the
+// parity test stays green (tests/test_i18n_parity.py).
+window.TUDOU_I18N = window.TUDOU_I18N || {};
+window.TUDOU_I18N.en = {
+  // ── Top bar ─────────────────────────────────────────────
+  "theme.dark":            "Dark",
+  "theme.light":           "Light",
+  "theme.tooltip.toDark":  "Currently Light — click for Dark",
+  "theme.tooltip.toLight": "Currently Dark — click for Light",
+  "lang.switch":           "中 / EN",
+  "lang.tooltip":          "Switch 中文 / English",
+
+  // ── Sidebar nav ─────────────────────────────────────────
+  "nav.dashboard":        "Dashboard",
+  "nav.projects":         "Projects & Tasks",
+  "nav.agents":           "Agents",
+  "nav.knowledge":        "Knowledge & Memory",
+  "nav.rolesSkills":      "Roles & Skills",
+  "nav.toolsApprovals":   "Tools & Approvals",
+  "nav.integrations":     "Integrations",
+  "nav.settings":         "Settings",
+  "nav.admins":           "Admins",
+
+  // ── Sidebar footer ──────────────────────────────────────
+  "user.changePassword":  "Change Password",
+  "user.logout":          "Logout",
+
+  // ── Generic action verbs ────────────────────────────────
+  "action.save":          "Save",
+  "action.cancel":        "Cancel",
+  "action.delete":        "Delete",
+  "action.create":        "Create",
+  "action.edit":          "Edit",
+  "action.confirm":       "Confirm",
+  "action.close":         "Close",
+  "action.refresh":       "Refresh",
+  "action.search":        "Search",
+  "action.import":        "Import",
+  "action.export":        "Export",
+  "action.add":           "Add",
+  "action.remove":        "Remove",
+  "action.copy":          "Copy",
+  "action.send":          "Send",
+  "action.retry":         "Retry",
+
+  // ── Chat header (per-agent) ─────────────────────────────
+  "chat.soul":            "SOUL",
+  "chat.think":           "Think",
+  "chat.think.tooltip":   "Self-summary: the agent reflects on recent turns and saves reusable rules to its experience library",
+  "chat.wake":            "Wake",
+  "chat.wake.tooltip":    "Wake up — scan all projects for tasks assigned to this agent and continue execution",
+  "chat.rag":             "RAG",
+  "chat.rag.on":          "RAG-only mode is ON: only knowledge_lookup is exposed. Click to allow full tool set.",
+  "chat.rag.off":         "RAG-only mode: only knowledge_lookup is exposed. Click to turn ON.",
+  "chat.settings":        "Settings",
+  "chat.inbox":           "Inbox",
+  "chat.checkpoints":     "Checkpoints",
+  "chat.clear":           "Clear Chat",
+  "chat.delete":          "Delete",
+  "chat.placeholder":     "Direct Agent Tasking...",
+  "chat.online":          "Online",
+  "chat.thinking":        "Responding…",
+  "chat.slashNewBadge":   "⟲ Fresh context (/new — chat history not sent)",
+  "chat.slashNewArmed":   "Next message will use fresh context (no history)",
+  "chat.slashNewDismiss": "Click to cancel / next message uses fresh context",
+
+  // ── Chat actions on message bubble ──────────────────────
+  "bubble.speak":         "Read aloud",
+  "bubble.saveFile":      "Save to file",
+  "bubble.copy":          "Copy",
+
+  // ── Status labels ───────────────────────────────────────
+  "status.idle":          "Idle",
+  "status.busy":          "Busy",
+  "status.error":         "Error",
+  "status.online":        "Online",
+  "status.offline":       "Offline",
+  "status.enabled":       "Enabled",
+  "status.disabled":      "Disabled",
+
+  // ── Common panels / card titles ─────────────────────────
+  "panel.runtime":         "Runtime",
+  "panel.modelAndDomain":  "Model & Domain",
+  "panel.capabilities":    "Capabilities",
+  "panel.growthAnalysis":  "Growth & Analysis",
+  "panel.taskQueue":       "Task Queue",
+  "panel.executionLog":    "Execution Log",
+  "panel.executionSteps":  "Execution Steps",
+  "panel.todos":           "TODOs",
+  "panel.agentMessages":   "Agent Messages",
+  "panel.domain":          "Domain",
+  "panel.loaded":          "loaded",
+  "panel.off":             "Off",
+
+  // ── Think stats card (on agent chat page) ─────────────
+  "think.reviewCount":     "Reviews",
+  "think.savedExperience": "Lessons",
+  "think.latest":          "Latest",
+
+  // ── Task queue (right panel on chat page) ─────────────
+  "tasks.noneActive":      "No active tasks",
+  "tasks.allDone":         "All done",
+  "tasks.archivedSuffix":  "archived",
+
+  // ── Create / Edit Agent dialogs ─────────────────────────
+  "agent.createTitle":    "Create New Agent",
+  "agent.editTitle":      "Edit Agent",
+  "agent.name":           "Name",
+  "agent.role":           "Role",
+  "agent.class":          "Agent Class",
+  "agent.model":          "Model",
+  "agent.provider":       "Provider",
+  "agent.workdir":        "Working directory",
+
+  // ── Knowledge ───────────────────────────────────────────
+  "kb.sharedTitle":        "Shared Knowledge Base",
+  "kb.domainTitle":        "Domain Knowledge Base",
+  "kb.newEntry":           "New Entry",
+  "kb.searchPlaceholder":  "Search…",
+  "kb.noResults":          "No direct answer found in the KB",
+
+  // ── Page titles (top bar "view-title") ─────────────────
+  "page.dashboard":        "Overview",
+  "page.nodes":            "Nodes",
+  "page.messages":         "Messages",
+  "page.channels":         "Channels",
+  "page.auditLog":         "Audit Log",
+  "page.llmProviders":     "LLM Providers",
+  "page.apiTokens":        "API Tokens",
+  "page.config":           "Configuration",
+  "page.nodeConfig":       "Node Configuration",
+  "page.scheduled":        "Scheduled Tasks",
+  "page.mcpConfig":        "MCP Configuration",
+  "page.workflows":        "Workflows",
+  "page.selfImprove":      "Agent Self-Improvement",
+  "page.adminManage":      "Admin Management",
+
+  // ── Project-area tabs + strings ────────────────────────
+  "tab.projectList":        "Projects",
+  "tab.meetings":           "Meetings",
+  "tab.taskCenter":         "Task Center",
+  "tab.orchestration":      "Orchestration",
+  "tab.workflowTemplates":  "Workflow Templates",
+  "project.subtitle":       "Organize multi-agent collaborative projects and tasks",
+  "project.new":            "New Project",
+  "project.create":         "Create Project",
+  "project.none":           "No Projects Yet",
+  "project.noneHint":       "Create a project to organize agents into collaborative teams",
+
+  // ── Knowledge & Memory sub-tabs ────────────────────────
+  "tab.km.shared":          "Shared KB",
+  "tab.km.private":         "Domain KB",
+  "tab.km.rag":             "RAG Providers",
+  "tab.km.memory":          "Agent Memory",
+
+  // ── Roles & Skills sub-tabs ────────────────────────────
+  "tab.rs.templates":       "Roles / Domains",
+  "tab.rs.skillStore":      "Skill Store",
+  "tab.rs.skillForge":      "Skill Forge",
+  "tab.rs.selfImprove":     "Learning Loop",
+
+  // ── Tools & Approvals sub-tabs ─────────────────────────
+  "tab.tools.approvals":    "Pending / History",
+  "tab.tools.denylist":     "Tool Denylist",
+  "tab.tools.mcpServers":   "MCP Servers",
+
+  // ── Settings sub-tabs ──────────────────────────────────
+  "tab.settings.globalConfig": "Global Config",
+  "tab.settings.providers":    "LLM Providers",
+  "tab.settings.llmTiers":     "LLM Tiers",
+  "tab.settings.nodeConfig":   "Node Config",
+  "tab.settings.nodes":        "Nodes",
+  "tab.settings.apiTokens":    "API Tokens",
+  "tab.settings.auditLog":     "Audit Log",
+  "tab.settings.mcp":          "MCP",
+  "tab.settings.channels":     "Channels",
+  "tab.settings.domains":      "Domains",
+  "tab.settings.policy":       "Approval Policy",
+  "tab.settings.permissions":  "Permissions",
+
+  // ── Permissions panel ─────────────────────────────────
+  "perm.title":                "Permissions",
+  "perm.subtitle":             "superAdmin manages all users. Delegate specific Agents / Nodes to admins; regular users can only manage agents they created themselves.",
+  "perm.onlySuper":             "This page is only accessible to superAdmin",
+  "perm.pickUser":              "← Select an account on the left to edit permissions",
+  "perm.superNote":             "Has all permissions, no per-resource checkboxes needed.",
+  "perm.delegatedAgents":       "Manageable Agents",
+  "perm.delegatedNodes":        "Manageable Nodes",
+  "perm.resetPassword":         "Reset Password",
+  "perm.resetPasswordPrompt":   "Enter new password (min 6 chars):",
+  "perm.passwordReset":         "Password reset",
+  "perm.saved":                 "Permissions updated",
+  "perm.saveFailed":             "Save failed",
+  "perm.disable":               "Disable",
+  "perm.enable":                "Enable",
+  "perm.disabled":              "Disabled",
+  "perm.enabled":               "Enabled",
+  "perm.confirmDisable":        "Disable this account? The user will be unable to log in.",
+  "perm.confirmEnable":         "Enable this account?",
+  "perm.newUser":               "New User",
+  "perm.role":                  "Role",
+  "perm.roleUserHint":          "(can only use agents)",
+  "perm.roleAdminHint":         "(manages agents + configs on delegated nodes)",
+  "perm.roleSuperHint":         "(manages everything)",
+  "perm.userNote":              "User role can only use agents. Node delegation is not needed.",
+  "perm.nodeScopeHint":         "admin has full management rights over agents and configs on their delegated nodes.",
+  "perm.userCreated":           "User created",
+  "perm.userDeleted":           "User deleted",
+  "perm.createFailed":          "Create failed",
+  "perm.deleteFailed":          "Delete failed",
+  "perm.confirmDelete":         "Delete user \"{name}\"? This cannot be undone.",
+  "perm.usernamePasswordRequired": "Username and password are required",
+  "perm.passwordTooShort":      "Password must be at least 6 characters",
+
+  // ── Destructive confirm dialogs ───────────────────────
+  "abort.title":              "Stop current conversation?",
+  "abort.message":            "Halts the LLM loop and SIGTERMs any running subprocesses. The current turn's progress won't be saved.",
+  "abort.meetingTitle":       "Stop the meeting discussion?",
+  "abort.meetingMessage":     "Halts the discussion loop and SIGTERMs any running subprocesses.",
+  "abort.projectTitle":       "Stop agents running under this project?",
+  "abort.projectMessage":     "Halts the response loop and SIGTERMs any running subprocesses.",
+  "abort.confirm":            "Stop",
+
+  // ── Login page ───────────────────────────────────────
+  "login.tagline":             "Multi-Agent AI Coordination Hub",
+  "login.adminTab":            "Admin Login",
+  "login.tokenTab":            "Token Login",
+  "login.username":            "Username",
+  "login.password":            "Password",
+  "login.usernamePh":          "Enter admin username",
+  "login.passwordPh":          "Enter password",
+  "login.signIn":              "Sign In",
+  "login.forgotToken":         "Forgot token?",
+
+  // ── System / generic ────────────────────────────────────
+  "common.loading":        "Loading…",
+  "common.noData":         "No data",
+  "common.empty":          "Empty",
+  "common.error":          "Error",
+  "common.success":        "Success",
+  "common.unknown":        "Unknown",
+
+  // ── Inbox modal ────────────────────────────────────────
+  "inbox.showRead":        "Show read",
+  "inbox.showAcked":       "Show acknowledged",
+  "inbox.summary":         "{n} messages ({u} unread)",
+  "inbox.noMessages":      "No agent available — cannot view inbox.",
+
+  // ── Checkpoints modal ─────────────────────────────────
+  "ckpt.scope":            "Scope",
+  "ckpt.status":           "Status",
+  "ckpt.pickAgent":        "← Select an agent in the top-left to view its checkpoints",
+  "ckpt.totalCount":       "{n} checkpoints",
+  "ckpt.confirmRestore":   "Restore this checkpoint? The digest will be injected into the agent's next turn.",
+  "ckpt.confirmArchive":   "Archive this checkpoint? Archived checkpoints are hidden from the default list.",
+  "ckpt.anyStatus":        "(all)",
+};

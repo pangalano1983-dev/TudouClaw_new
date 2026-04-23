@@ -4,6 +4,13 @@ description: >
   Use this skill whenever you are asked to review code changes, a diff, or a
   pull request. Produces structured, actionable review comments focused on
   correctness, security, readability, and test coverage — not stylistic nits.
+applicable_roles:
+  - "coder"
+  - "code-reviewer"
+scenarios:
+  - "PR 审查"
+  - "diff review"
+  - "代码质量把关"
 metadata:
   source: maintainer
   tags: "code-review, quality, pull-request"

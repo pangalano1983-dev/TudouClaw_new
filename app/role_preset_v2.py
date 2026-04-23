@@ -266,6 +266,19 @@ class RolePresetV2:
     # 8) Playbook（做事逻辑 —— 条件触发 + 机器验收的结构化容器）
     playbook: Playbook = field(default_factory=Playbook)
 
+    # 9) 执行门禁 (通用门禁 Day 2)
+    # execution_mode 枚举语义：
+    #   "full_exec"  — 默认，工具调用照常
+    #   "plan_only"  — 危险写操作命令被拦；拦下的命令内容作为交付产物落盘
+    #   "dry_run"    — 仅放行可 dry-run 的命令 (plan / diff / validate)
+    #                  写操作仍拦 (与 plan_only 的区别：对 dry-run 命令明确放行)
+    # 空字符串 = 未指定，按 agent.profile 默认。
+    execution_mode: str = ""
+    # 角色自带的 command_patterns，形同 ToolPolicy.add_command_pattern 入参。
+    # Agent 实例化时自动用 scope=f"role:{role_id}" 注册到 ToolPolicy。
+    # 每项：{pattern, verdict, reason, label, tags}
+    command_patterns: list[dict] = field(default_factory=list)
+
     # 遗留桥
     legacy_profile_overrides: dict = field(default_factory=dict)
 
@@ -314,6 +327,11 @@ class RolePresetV2:
             kpi_definitions=kpi_definitions,
             experience_bootstrap=list(d.get("experience_bootstrap") or []),
             playbook=Playbook.from_dict(d.get("playbook")),
+            execution_mode=str(d.get("execution_mode") or ""),
+            command_patterns=[
+                dict(cp) for cp in (d.get("command_patterns") or [])
+                if isinstance(cp, dict)
+            ],
             legacy_profile_overrides=dict(d.get("legacy_profile_overrides") or {}),
         )
 

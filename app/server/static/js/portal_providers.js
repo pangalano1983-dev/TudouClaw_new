@@ -6,7 +6,10 @@ function renderProviders(container) {
   if (!container) c.style.padding = '24px';
   var epoch = _renderEpoch;
   // Show header immediately
-  c.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:28px"><div><h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:28px;font-weight:800;letter-spacing:-0.5px">LLM Providers</h2><p style="color:var(--text2);font-size:14px;margin-top:4px">Manage external compute endpoints and local model integrations.</p></div><button class="btn btn-primary" onclick="showModal(\'add-provider\')" style="flex-shrink:0"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle;margin-right:4px">add</span>Add Provider</button></div><div id="providers-grid" style="display:grid;grid-template-columns:repeat(2,1fr);gap:20px"><div style="color:var(--text3);padding:20px">Loading...</div></div>';
+  // Page header — removed the top-right "Add Provider" primary button
+  // per design pass. New providers are added via the card-level action
+  // / empty-state CTA further below.
+  c.innerHTML = '<div style="margin-bottom:28px"><h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:28px;font-weight:800;letter-spacing:-0.5px">LLM Providers</h2><p style="color:var(--text2);font-size:14px;margin-top:4px">Manage external compute endpoints and local model integrations.</p></div><div id="providers-grid" style="display:grid;grid-template-columns:repeat(2,1fr);gap:20px"><div style="color:var(--text3);padding:20px">Loading...</div></div>';
   api('GET', '/api/portal/providers').then(function(data) {
     if (!data || epoch !== _renderEpoch) return;
     providers = data.providers || [];

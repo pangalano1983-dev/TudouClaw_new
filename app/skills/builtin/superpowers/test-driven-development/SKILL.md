@@ -1,6 +1,13 @@
 ---
 name: test-driven-development
 description: Use when implementing any feature or bugfix, before writing implementation code
+applicable_roles:
+  - "coder"
+  - "test-engineer"
+scenarios:
+  - "新功能实现"
+  - "bugfix 验证"
+  - "契约或接口实现"
 metadata:
   source: obra/superpowers
   license: MIT

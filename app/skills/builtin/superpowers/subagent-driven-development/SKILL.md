@@ -1,6 +1,12 @@
 ---
 name: subagent-driven-development
 description: Use when executing implementation plans with independent tasks in the current session
+applicable_roles:
+  - "coder"
+scenarios:
+  - "会话内并行执行"
+  - "多任务分派"
+  - "上下文隔离开发"
 metadata:
   source: obra/superpowers
   license: MIT

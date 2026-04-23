@@ -119,7 +119,54 @@ class ToolRegistry:
         # Resolve alias
         canonical_name = self._aliases.get(name, name)
 
+        # Auto-redirect common shell-command-as-tool misfires. Some LLMs
+        # (Qwen / smaller models) after reading a SKILL.md that shows
+        # `ls -la foo/` or `python build.py` mistake the command itself
+        # for a registered tool name — we get `name='ls', args={...}`
+        # instead of `name='bash', args={cmd: 'ls ...'}`. Rather than
+        # bubble up "Unknown tool 'ls'" and loop the LLM on its mistake,
+        # transparently reinterpret it as a bash call. This mirrors how
+        # a human would read the intent.
         if canonical_name not in self._tools:
+            _SHELL_COMMAND_REDIRECTS = frozenset({
+                "ls", "cat", "cd", "pwd", "mkdir", "rm", "cp", "mv",
+                "grep", "find", "head", "tail", "wc", "sort", "uniq",
+                "which", "whoami", "ps", "kill", "chmod", "touch",
+                "echo", "tree", "du", "df",
+            })
+            if canonical_name in _SHELL_COMMAND_REDIRECTS and "bash" in self._tools:
+                # Build a bash command from the args. If the LLM passed
+                # `{command: "..."}` or `{args: "..."}`, use that
+                # verbatim — otherwise rebuild `ls <positional>` from
+                # the original tool name + args dict.
+                if isinstance(arguments, dict):
+                    cmd_str = (
+                        arguments.get("command")
+                        or arguments.get("cmd")
+                        or arguments.get("shell")
+                        or ""
+                    )
+                    if not cmd_str:
+                        # Stitch together: `<tool_name> <arg1> <arg2> ...`
+                        parts = [canonical_name]
+                        for v in arguments.values():
+                            if v is None:
+                                continue
+                            parts.append(str(v))
+                        cmd_str = " ".join(parts)
+                else:
+                    cmd_str = f"{canonical_name} {arguments}" if arguments else canonical_name
+                logger.info(
+                    "tool dispatch: %r not registered — redirecting to bash(%r)",
+                    name, cmd_str[:200],
+                )
+                entry = self._tools["bash"]
+                try:
+                    return entry.handler(command=cmd_str)
+                except Exception as _rx_err:
+                    return (f"Error: redirected '{name}' to bash but bash "
+                            f"itself failed: {_rx_err}")
+
             available = list(self._tools.keys())
             return (f"Error: Unknown tool '{name}'. "
                     f"Available: {available}. "
@@ -330,6 +377,50 @@ TOOL_DEFINITIONS: list[dict] = [
             },
         },
     },
+    # run_tests — structured test execution. Block 2 Review loop
+    # invokes this automatically after a step completes (when the step
+    # declares `verify: {kind: "run_tests"}`), but the LLM can also call
+    # it directly for ad-hoc "did my change pass?" checks.
+    {
+        "type": "function",
+        "function": {
+            "name": "run_tests",
+            "description": (
+                "Run the project's test suite and get a STRUCTURED result (pass/fail counts, "
+                "failure list, framework detected). Auto-detects pytest / npm / go / cargo.\n"
+                "Use when: after writing code (TDD loop), before declaring a step complete, "
+                "verifying a bugfix actually landed. This is the canonical 'did it work' check — "
+                "prefer it over ad-hoc `bash('pytest')` because the result is parsed, not raw stdout.\n"
+                "Not for: starting dev servers or one-off scripts — use bash.\n"
+                "Output: JSON with ok/passed/failed/skipped counts + up to 10 failure lines + "
+                "trailing stdout for context. Exit code alone is NOT trusted — 0 pass tests also "
+                "counts as failure.\n"
+                "GOTCHA: for npm/jest, ensure `npm test` is wired in package.json. For go, runs "
+                "`./...` by default (whole module). Pass `paths` to narrow scope."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "string",
+                        "description": "Space-separated test paths/patterns. Empty = all tests in cwd.",
+                    },
+                    "framework": {
+                        "type": "string",
+                        "description": "Force framework: pytest | npm | go | cargo. Empty = auto-detect.",
+                    },
+                    "extra_args": {
+                        "type": "string",
+                        "description": "Additional CLI args appended verbatim (e.g. '-k test_foo' for pytest).",
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Seconds, clamped to [10, 1800]. Default 600.",
+                    },
+                },
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -457,8 +548,8 @@ TOOL_DEFINITIONS: list[dict] = [
                         "description": "The MCP tool name to invoke (e.g. 'send_email', 'send_message')",
                     },
                     "arguments": {
-                        "type": "object",
-                        "description": "Arguments object to pass to the MCP tool",
+                        "oneOf": [{"type": "object"}, {"type": "string"}],
+                        "description": "Arguments object to pass to the MCP tool. A JSON-encoded string is also accepted and auto-parsed.",
                     },
                     "list_mcps": {
                         "type": "boolean",
@@ -503,11 +594,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "send_message",
             "description": (
-                "Send a one-way FYI message to another agent. No acknowledgement, no response expected.\n"
+                "Send a structured message to another agent. Prefer the envelope fields (`summary` + `key_fields` + `artifact_refs`) over dumping a long `content` — the recipient's inbox injection renders envelopes compactly (~300 tokens) whereas raw content gets trimmed on-arrival.\n"
                 "Use when: sharing status / broadcasting a finding / pinging a teammate without blocking.\n"
-                "Not for: task handoffs where you expect a result (use handoff_request for the 3-state handshake). Not for scheduling (use task_update). Saying 'I will tell X to do Y' in prose is not equivalent — you must actually call this tool.\n"
-                "Output: confirmation 'Message sent to NAME (ID)' + content preview.\n"
-                "GOTCHA: no delivery guarantee — it is best-effort. The receiver sees it in their inbox but may not read it for a while. For work that MUST be picked up, use handoff_request."
+                "Not for: task handoffs where you expect a blocking result (use handoff_request). Not for scheduling (use task_update). Saying 'I will tell X to do Y' in prose is not equivalent — you must actually call this tool.\n"
+                "Output: confirmation 'Message sent to NAME (ID)' + envelope summary + inbox id.\n"
+                "GOTCHA: (1) no delivery guarantee — best-effort; the receiver sees it in their inbox. For work that MUST be picked up, use handoff_request. (2) If you put a 5KB report in `content`, the recipient only sees a preview; save it to a file first and pass the path in `artifact_refs` instead."
             ),
             "parameters": {
                 "type": "object",
@@ -516,13 +607,29 @@ TOOL_DEFINITIONS: list[dict] = [
                         "type": "string",
                         "description": "Agent ID or name to send the message to",
                     },
-                    "content": {"type": "string", "description": "Message content"},
+                    "summary": {
+                        "type": "string",
+                        "description": "1-3 sentence conclusion. THIS is what the recipient mainly reads. Be concrete.",
+                    },
+                    "key_fields": {
+                        "type": "object",
+                        "description": "Structured payload — numbers, decisions, names, URLs, status. Keep it small (a handful of keys). Example: {\"decision\": \"B\", \"risk_level\": \"low\", \"target_env\": \"staging\"}.",
+                    },
+                    "artifact_refs": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "File paths or artifact IDs pointing at large outputs. Recipient reads them with read_file if needed. Always prefer this over embedding a long body.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "(Legacy) optional raw body. Only use if you genuinely need inline detail that won't fit the summary and isn't big enough to warrant an artifact. If omitted, summary alone is fine.",
+                    },
                     "msg_type": {
                         "type": "string",
                         "description": "Message type: task | info | result | question (default: task)",
                     },
                 },
-                "required": ["to_agent", "content"],
+                "required": ["to_agent"],
             },
         },
     },
@@ -630,13 +737,125 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "check_inbox",
+            "description": (
+                "Read your inbox — messages sent to you by other agents via send_message / reply_message.\n"
+                "Use when: the plan calls for reviewing incoming handoffs, or you suspect teammates have pinged you since last turn.\n"
+                "Not for: sending new messages (use send_message / reply_message). Not for ACKing (use ack_message).\n"
+                "Output: compact list of unread messages with id / from / priority / timestamp / preview. Does NOT modify state — reading here doesn't mark messages as acked.\n"
+                "GOTCHA: unread messages are ALSO auto-injected at the start of each chat turn, so you may not need to call this explicitly. Use it when you want to re-check mid-turn or include already-read items via include_read."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max messages to return (default 20, max 100).",
+                    },
+                    "include_read": {
+                        "type": "boolean",
+                        "description": "If true, also include recent read-but-not-acked messages (default false).",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ack_message",
+            "description": (
+                "Mark one or more inbox messages as acknowledged (state='acked'). Acked messages stop being surfaced in the auto-injected inbox block at chat start.\n"
+                "Use when: you've read a message and either acted on it or decided no action is needed — this prevents it from re-appearing every turn.\n"
+                "Not for: deleting messages (they remain queryable). Not for replying (use reply_message).\n"
+                "Output: count of acked / skipped. Only YOUR messages can be acked — attempting to ack another agent's messages silently skips them.\n"
+                "GOTCHA: messages are NOT auto-acked; merely being read in the auto-injection only transitions new→read. Ack is a deliberate 'I'm done with this' marker."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message_ids": {
+                        "type": "string",
+                        "description": "One message id, or multiple ids separated by commas or whitespace (e.g. 'msg_abc, msg_def').",
+                    },
+                },
+                "required": ["message_ids"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reply_message",
+            "description": (
+                "Reply to an inbox message with an optional structured envelope (summary / key_fields / artifact_refs). Automatically preserves the original thread_id and sets reply_to.\n"
+                "Use when: responding to a specific message — answering a question, acknowledging a handoff, returning a result. Preferred over send_message when there's a specific message you're responding to.\n"
+                "Not for: unrelated new pings (use send_message). Not for marking done without responding (use ack_message).\n"
+                "Output: confirmation with the new inbox id + thread id.\n"
+                "GOTCHA: (1) you can only reply to messages addressed to YOU. (2) Prefer summary+key_fields over a long content body — downstream agents get a compact render and can read_file artifacts for detail."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message_id": {
+                        "type": "string",
+                        "description": "The id of the message you are replying to (from check_inbox or the auto-injected inbox block).",
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "1-3 sentence conclusion / answer. Main thing the recipient reads.",
+                    },
+                    "key_fields": {
+                        "type": "object",
+                        "description": "Structured result — numbers, decisions, file paths. Keep it small.",
+                    },
+                    "artifact_refs": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Paths to any large outputs produced. Recipient reads with read_file.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "(Legacy) raw body. Required only if no summary+structured fields provided.",
+                    },
+                    "priority": {
+                        "type": "string",
+                        "description": "urgent | normal | low (default normal).",
+                    },
+                    "ttl_s": {
+                        "type": "integer",
+                        "description": "Optional seconds-to-live; 0 (default) means never expire.",
+                    },
+                },
+                "required": ["message_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "plan_update",
             "description": (
-                "Render a live, visible execution checklist for the current multi-step task. User watches progress flip pending → in_progress → done.\n"
-                "Use when: BEFORE starting any task with 3+ steps — call action=create_plan first. As each step starts/finishes, call start_step / complete_step so the user sees real-time progress.\n"
-                "Not for: background tasks (use task_update). Not for describing the plan in prose only — the checklist IS the plan; do not stop after proposing steps.\n"
-                "Output: checklist pushed to the user's UI; each action returns the updated plan state.\n"
-                "GOTCHA: if you describe steps but never call create_plan, the user sees NOTHING. The tool call IS the commitment. For single-step tasks skip this — overhead is not worth it."
+                "Render a live, visible execution checklist. Also drives the agent's own "
+                "understanding of 'which step am I on' — plan state is injected into your "
+                "prompt every turn.\n"
+                "\n"
+                "Use when: BEFORE starting any task with 3+ steps. Skip for single-step tasks "
+                "(overhead not worth it).\n"
+                "\n"
+                "Each step MUST carry an `acceptance` field — one short sentence naming the "
+                "concrete artifact or state that proves the step is done (e.g. 'report.pptx "
+                "created with ≥5 slides in $AGENT_WORKSPACE', 'email sent with message_id "
+                "in mcp_call result'). Vague acceptances like '完成报告' are NOT acceptable "
+                "— they're the root cause of agents faking completion.\n"
+                "\n"
+                "When completing a step, `result_summary` must reference whether the "
+                "acceptance was satisfied. Don't just say 'done'; say 'generated report.pptx "
+                "with 7 slides, opened OK via python-pptx'.\n"
+                "\n"
+                "Not for: background tasks (use task_update). Not for describing plans in "
+                "prose only — the checklist IS the plan; the tool call IS the commitment."
             ),
             "parameters": {
                 "type": "object",
@@ -654,12 +873,46 @@ TOOL_DEFINITIONS: list[dict] = [
                         "items": {
                             "type": "object",
                             "properties": {
-                                "title": {"type": "string"},
-                                "detail": {"type": "string"},
-                                "depends_on": {"type": "array", "items": {"type": "string"}, "description": "Step IDs this step depends on"},
+                                "title": {"type": "string",
+                                           "description": "Short step name, e.g. '搜索云厂商市场数据'"},
+                                "detail": {"type": "string",
+                                            "description": "Optional longer description"},
+                                "acceptance": {"type": "string",
+                                                "description": (
+                                                    "REQUIRED. What does 'done' look like? One "
+                                                    "concrete sentence naming the artifact or state. "
+                                                    "Bad: '完成搜索'. Good: '至少 3 条来源且每条附 URL'."
+                                                )},
+                                "depends_on": {"type": "array", "items": {"type": "string"},
+                                                "description": "Step IDs this step depends on"},
+                                "llm_purpose": {
+                                    "type": "string",
+                                    "enum": ["tool-heavy", "multimodal",
+                                             "reasoning", "analysis",
+                                             "default"],
+                                    "description": (
+                                        "STRONGLY RECOMMENDED when auto-route is enabled. "
+                                        "Pick the category that best fits this step:\n"
+                                        "  - tool-heavy: mostly executes tools "
+                                        "(read/write/bash/mcp_call, external I/O)\n"
+                                        "  - multimodal: processes image/audio input\n"
+                                        "  - reasoning:  deep comparison/weighing/derivation\n"
+                                        "  - analysis:   long-form writing / synthesis / reporting\n"
+                                        "  - default:    everything else\n"
+                                        "The system uses this + the injected model-scores table "
+                                        "to pick the highest-scoring LLM for this step."
+                                    ),
+                                },
+                                "llm_rationale": {
+                                    "type": "string",
+                                    "description": (
+                                        "Optional one-line justification for the llm_purpose "
+                                        "choice (shown in the UI for traceability)."
+                                    ),
+                                },
                             },
                         },
-                        "description": "List of step objects with title and optional detail (for create_plan)",
+                        "description": "List of step objects (for create_plan). Each step MUST include title + acceptance, and SHOULD include llm_purpose.",
                     },
                     "step_id": {
                         "type": "string",
@@ -669,9 +922,21 @@ TOOL_DEFINITIONS: list[dict] = [
                         "type": "string",
                         "description": "Step title (for add_step)",
                     },
+                    "detail": {
+                        "type": "string",
+                        "description": "Step detail (for add_step)",
+                    },
+                    "acceptance": {
+                        "type": "string",
+                        "description": "Acceptance criterion (for add_step)",
+                    },
                     "result_summary": {
                         "type": "string",
-                        "description": "Brief result description (for complete_step/fail_step)",
+                        "description": (
+                            "REQUIRED for complete_step/fail_step. Describe what you produced "
+                            "with specifics — file paths, counts, identifiers — so the reader "
+                            "can verify the acceptance was actually met. Empty string is rejected."
+                        ),
                     },
                 },
                 "required": ["action"],
@@ -978,24 +1243,69 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "knowledge_lookup",
             "description": (
-                "Search the shared knowledge base (all agents see the same entries). Pass a query for fuzzy match or entry_id for direct fetch.\n"
-                "Use when: looking up design guidelines / coding standards / reference lists / cross-team conventions.\n"
-                "Not for: private role-specific experiences (those live in the experience library — agents read them implicitly via system prompt injection). Not for looking up skill guides (use get_skill_guide).\n"
-                "Output: JSON {status, entry | matches}. On exact-title match returns the full entry; on partial match returns up to 20 candidates — follow up with entry_id to read one in full.\n"
-                "GOTCHA: 'private' rag_mode agents also see private RAG results; check status=partial vs success. Empty result = no entry — do NOT assume the user's term matches an entry title verbatim."
+                "Search the knowledge base (shared enterprise pool AND/OR the private expert KB bound to this agent).\n"
+                "Use when: user asks for facts / figures / specs / rules / processes that should come from authoritative documents, not your own reasoning.\n"
+                "Not for: role-specific experiences (experience library is injected via system prompt). Not for skill guides (get_skill_guide).\n"
+                "Output: JSON. For expert-KB hits: {status:'success', entries:[{content, source_file, heading_path, chunk_index, ...}], usage_guidance}. For shared entries with exact title: {status:'success', entry}. Otherwise {status:'partial', matches} or {status:'not_found'}.\n"
+                "RULES when using the returned content:\n"
+                "  1. CITE every factual claim with [source_file §heading_path] or [title #chunk_index] — LLM output without citation is NOT acceptable for expert-KB questions.\n"
+                "  2. Reason ONLY from the retrieved content. Do NOT extrapolate, merge with your parametric knowledge, or invent numbers/names/sections that aren't in the chunks.\n"
+                "  3. If entries don't directly answer, say 『知识库中未找到直接答案』 and state what additional material would be needed. NEVER fabricate.\n"
+                "  4. For aggregate queries ('how many?', 'list all…') DO NOT reuse mode=search — it only sees 8 chunks. Use mode=count (exact scan) or mode=list (inventory) instead.\n"
+                "MODES (Pack v3):\n"
+                "  - mode=\"search\" (default): top-k retrieval with content; best for factual questions answerable from a few chunks.\n"
+                "  - mode=\"count\":  programmatic scan grouping every chunk by source_file. Use for 『有多少』『总共』『多少个…验收用例』. Optional `query` filters by substring match. Returns exact counts — no LLM math required, just repeat them.\n"
+                "  - mode=\"list\":   flat metadata list (titles + chunk_index + heading_path + source_file; NO content). Use for 『列出所有文档』『目录』『知识库都有什么』. Capped at 200 rows."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Search keyword or entry title",
+                        "description": "Search keyword / substring. Required for mode=search; optional filter for mode=count and mode=list.",
                     },
                     "entry_id": {
                         "type": "string",
                         "description": "Specific entry ID to read (from a previous search result)",
                     },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["search", "count", "list"],
+                        "description": "Retrieval mode. search=top-k content chunks; count=exact aggregate by source_file (for how-many questions); list=per-chunk metadata inventory.",
+                    },
                 },
+            },
+        },
+    },
+    # ---- Agent-private L3 memory recall (新 A) ----
+    {
+        "type": "function",
+        "function": {
+            "name": "memory_recall",
+            "description": (
+                "Query YOUR OWN (agent-private) long-term memory before doing fresh research.\n"
+                "Use when: about to web_search / fetch a URL / re-analyze a topic you MIGHT have seen before — a recent high-confidence memory lets you skip costly exploration and go straight to action.\n"
+                "Not for: cross-role reference material (use knowledge_lookup). Not for current turn's chat history (just reread messages).\n"
+                "Output: top-K matching facts ranked by similarity, each with category / content / age_days / confidence / id. Empty result = explore fresh; then save_experience afterward.\n"
+                "GOTCHA: memories age. If a hit is >30 days old or contradicts what you're about to observe, verify and save_experience with the correction — the similarity-refresh layer will supersede the outdated entry automatically."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What are you trying to remember? (topic / keywords / question)",
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Optional filter: intent | reasoning | outcome | rule | reflection (omit for all).",
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Max hits (default 5, max 20).",
+                    },
+                },
+                "required": ["query"],
             },
         },
     },
@@ -1405,11 +1715,12 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "get_skill_guide",
             "description": (
-                "Load the full SKILL.md guide (with frontmatter stripped) + ancillary files list for a granted skill.\n"
-                "Use when: you have been told a skill is granted and need step-by-step instructions to USE it — typically right before executing a complex capability like pptx / pdf / docx generation.\n"
-                "Not for: searching or discovering skills (skills appear in your system prompt as granted). Not for registering new skills (use submit_skill). Not for generic knowledge lookup (use knowledge_lookup).\n"
-                "Output: '## Skill: NAME' header + skill_dir + runtime + ancillary file list + full SKILL.md body.\n"
-                "GOTCHA: the returned skill_dir is where scripts live — cd there first before running any bash. If the skill has ancillary .md files, read those separately via read_file as needed."
+                "Load a granted SKILL's guide. TWO modes: brief (default, ~200 tokens, headings + file list) vs verbose (full body, 2k-5k tokens).\n"
+                "Use when: you need to USE a granted local skill. Start with brief — if you only need to know the skill's shape / scripts / args, you're done. Only re-call with brief=false when you need the full step-by-step body.\n"
+                "Not for: searching/discovering skills (granted skills are already in your system prompt). Not for registering new skills (use submit_skill). "
+                "**NOT for MCP servers — MCPs are NOT skills.** To list bound MCP servers use `mcp_call(list_mcps=true)`; to invoke use `mcp_call(mcp_id, tool, arguments)`. Passing an MCP name here will return 'skill not found'.\n"
+                "Output (brief): skill name + skill_dir + runtime + description + ancillary files + section headings. Output (verbose): same + full SKILL.md body.\n"
+                "GOTCHA: the returned skill_dir is where scripts live — cd there first before running any bash. Prefer brief mode; it's ~10x cheaper on tokens."
             ),
             "parameters": {
                 "type": "object",
@@ -1417,6 +1728,10 @@ TOOL_DEFINITIONS: list[dict] = [
                     "name": {
                         "type": "string",
                         "description": "Skill name (e.g. 'pdf', 'docx', 'xlsx')",
+                    },
+                    "brief": {
+                        "type": "boolean",
+                        "description": "Default true — return headings/summary only. Set false to load the full body (much larger).",
                     },
                     "agent_id": {
                         "type": "string",
@@ -1675,6 +1990,70 @@ TOOL_DEFINITIONS: list[dict] = [
             },
         },
     },
+    # ---- Handoff payload (structured baton-pass between agents) ----
+    {
+        "type": "function",
+        "function": {
+            "name": "emit_handoff",
+            "description": (
+                "Emit a structured handoff when finishing a task that another agent will pick up next.\n"
+                "Use when: you just finished an assignment in a meeting/project and want the NEXT agent "
+                "to see exactly what got done + what to do next, without scrolling the whole discussion.\n"
+                "Not for: casual status updates (use send_message or reply normally). "
+                "Not for: your OWN continuation — this is a baton pass to a different agent.\n"
+                "Output: renders a handoff card in the chat AND is ingested into the next agent's system "
+                "prompt so they see summary/deliverable/highlights/followups at the top.\n"
+                "GOTCHA: emit AT MOST ONE handoff per task completion. Keep summary to one paragraph. "
+                "followups must have {for: agent_name_or_role, task: concrete_next_step}."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "One-paragraph what-I-did. Max 500 chars.",
+                    },
+                    "deliverable_path": {
+                        "type": "string",
+                        "description": (
+                            "Relative path of the artifact in the shared workspace, if any "
+                            "(e.g. 'report.pptx', 'analysis/findings.md'). Empty if no file deliverable."
+                        ),
+                    },
+                    "highlights": {
+                        "type": "array",
+                        "description": "Key findings / decisions / data points (up to 6). String or {text}.",
+                        "items": {
+                            "oneOf": [
+                                {"type": "string"},
+                                {
+                                    "type": "object",
+                                    "properties": {"text": {"type": "string"}},
+                                    "required": ["text"],
+                                },
+                            ]
+                        },
+                    },
+                    "followups": {
+                        "type": "array",
+                        "description": (
+                            "Suggested next steps for other agents (up to 8). Each: "
+                            "{for: target_agent_name_or_role, task: concrete_action}."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "for": {"type": "string"},
+                                "task": {"type": "string"},
+                            },
+                            "required": ["for", "task"],
+                        },
+                    },
+                },
+                "required": ["summary"],
+            },
+        },
+    },
 ]
 
 
@@ -1705,6 +2084,9 @@ from .tools_split.system import (  # noqa: E402,F401
     _tool_desktop_screenshot,
 )
 
+# Test runner — powers Block 2 Review loop; also LLM-callable on its own.
+from .tools_split.test_runner import _tool_run_tests  # noqa: E402,F401
+
 
 # ---------------------------------------------------------------------------
 # Coordination tools — TeamCreate / SendMessage / TaskUpdate
@@ -1714,6 +2096,9 @@ from .tools_split.coordination import (  # noqa: E402,F401
     _tool_team_create,
     _tool_send_message,
     _tool_task_update,
+    _tool_check_inbox,
+    _tool_ack_message,
+    _tool_reply_message,
 )
 
 # _get_hub re-exported for backwards compat with any external importer.
@@ -1758,6 +2143,7 @@ from .tools_split.knowledge import (  # noqa: E402,F401
     _tool_knowledge_lookup,
     _tool_share_knowledge,
     _tool_learn_from_peers,
+    _tool_memory_recall,
 )
 
 # Media tools — pptx and video creation.
@@ -1777,7 +2163,9 @@ from .tools_split.skills import (  # noqa: E402,F401
 # UI-block tools — interactive choice + display-only checklist.
 from .tools_split.ui import (  # noqa: E402,F401
     _tool_emit_ui_block,
+    _tool_emit_handoff,
     build_ui_block,
+    build_handoff_payload,
 )
 
 # Web / network tools (already extracted in an earlier commit; import
@@ -1799,6 +2187,7 @@ _TOOL_FUNCS: dict[str, callable] = {
     "write_file": _tool_write_file,
     "edit_file": _tool_edit_file,
     "bash": _tool_bash,
+    "run_tests": _tool_run_tests,
     "search_files": _tool_search_files,
     "glob_files": _tool_glob_files,
     "web_search": _tool_web_search,
@@ -1813,6 +2202,9 @@ _TOOL_FUNCS: dict[str, callable] = {
     "team_create": _tool_team_create,
     "send_message": _tool_send_message,
     "task_update": _tool_task_update,
+    "check_inbox": _tool_check_inbox,
+    "ack_message": _tool_ack_message,
+    "reply_message": _tool_reply_message,
     # Project-scope tools (auto-discover project from thread-local context)
     "submit_deliverable": _tool_submit_deliverable,
     "create_goal": _tool_create_goal,
@@ -1826,11 +2218,16 @@ _TOOL_FUNCS: dict[str, callable] = {
     "submit_skill": _tool_submit_skill,
     # Knowledge management tools
     "knowledge_lookup": _tool_knowledge_lookup,
+    "memory_recall": _tool_memory_recall,
     "share_knowledge": _tool_share_knowledge,
     "learn_from_peers": _tool_learn_from_peers,
     # UI-block tools (choice buttons / checklist). Handler validates;
     # agent_execution.py emits the ui_block event after.
     "emit_ui_block": _tool_emit_ui_block,
+    # Structured baton-pass between agents. Handler validates; agent_execution.py
+    # emits the typed 'handoff' event so the UI can render a distinct card and
+    # the next agent's system prompt can ingest it.
+    "emit_handoff": _tool_emit_handoff,
     # Human-in-the-loop tools (handled specially by agent, not dispatched here)
     "request_web_login": lambda **kw: "ERROR: request_web_login must be handled by agent directly",
     # Inter-agent handoff with 3-state handshake (handled specially by agent)
@@ -1942,6 +2339,9 @@ def _init_registry() -> ToolRegistry:
         "team_create": "coordination",
         "send_message": "coordination",
         "task_update": "coordination",
+        "check_inbox": "coordination",
+        "ack_message": "coordination",
+        "reply_message": "coordination",
         "mcp_call": "coordination",
 
         # Skill management
@@ -1951,6 +2351,7 @@ def _init_registry() -> ToolRegistry:
 
         # Knowledge management
         "knowledge_lookup": "coordination",
+        "memory_recall": "coordination",
         "share_knowledge": "coordination",
         "learn_from_peers": "coordination",
 

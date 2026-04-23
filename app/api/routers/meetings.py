@@ -75,6 +75,32 @@ async def get_meeting(
             _enrich_meeting_messages_with_refs(hub, data.get("messages") or [])
         except Exception as _e:
             logger.debug("meeting ref enrichment failed: %s", _e)
+        # Expose currently-busy participants as "active_speakers". This
+        # lets the frontend show typing bubbles for agents re-queued
+        # mid-chain via @-mention (e.g. 小安 @小土 in its reply body —
+        # the moderator never told the UI to bubble for 小土, but the
+        # agent IS processing). Without this the UI goes silent after
+        # the last visible reply even though another agent is actively
+        # working on a response.
+        try:
+            active: list[str] = []
+            for pid in (m.participants or []):
+                try:
+                    ag = hub.get_agent(pid) if hasattr(hub, "get_agent") else None
+                except Exception:
+                    ag = None
+                if ag is None:
+                    continue
+                status_val = getattr(ag, "status", None)
+                # AgentStatus is a str-enum; compare via .value to avoid
+                # importing the class just for this.
+                sv = getattr(status_val, "value", status_val)
+                if sv in ("busy", "waiting_approval"):
+                    active.append(pid)
+            data["active_speakers"] = active
+        except Exception as _e:
+            logger.debug("active_speakers scan failed: %s", _e)
+            data["active_speakers"] = []
         return data
     except HTTPException:
         raise
@@ -399,14 +425,13 @@ async def meeting_interrupt(
 ):
     """Stop any in-flight agent reply sequence for this meeting.
 
-    Does not post a message; purely cancels the running round so the
-    host regains the floor immediately.
+    Soft stop — waits for the agent loop to notice between turns.
+    For hard stop (kill running bash subprocesses immediately) use /abort.
     """
     try:
         reg, m = _get_meeting(hub, meeting_id)
         from ...meeting import bump_meeting_reply_gen
         new_gen = bump_meeting_reply_gen(m.id)
-        # Also append a system note so the transcript shows the interrupt
         try:
             m.add_message(
                 sender="system",
@@ -418,6 +443,111 @@ async def meeting_interrupt(
         except Exception:
             pass
         return {"ok": True, "gen": new_gen}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, detail=str(e))
+
+
+@router.post("/meetings/{meeting_id}/abort")
+async def meeting_abort(
+    meeting_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Hard abort: stop discussion loop AND SIGTERM any bash subprocesses
+    spawned by agents in this meeting.
+
+    Differs from /interrupt: this ALSO flips the central abort registry
+    and kills tracked OS processes (e.g. a runaway `python build_report.py`
+    launched by the pptx-author skill). Use this when agents are stuck
+    in a long-running subprocess and cooperative interrupt isn't enough.
+    """
+    try:
+        reg, m = _get_meeting(hub, meeting_id)
+        from ...meeting import bump_meeting_reply_gen
+        from ... import abort_registry as _ar
+        from ... import checkpoint as _ckpt
+        # 1. Cooperative path: bump gen so any in-flight loop exits cleanly.
+        new_gen = bump_meeting_reply_gen(m.id)
+
+        # 2. Checkpoint-then-abort: snapshot unfinished plans and the
+        # recent transcript BEFORE we SIGTERM anything, so the user can
+        # resume this meeting later with minimal context loss.
+        def _snapshot_meeting():
+            # Collect each running/unfinished assignment's plan, if any.
+            assignments_snap = []
+            try:
+                for a in getattr(m, "assignments", []) or []:
+                    if getattr(a, "status", "") in ("done", "cancelled"):
+                        continue
+                    assignments_snap.append({
+                        "id": getattr(a, "id", ""),
+                        "agent_id": getattr(a, "agent_id", ""),
+                        "status": getattr(a, "status", ""),
+                        "task_summary": getattr(a, "task_summary", "") or
+                                        getattr(a, "prompt", "")[:200],
+                        "verify": getattr(a, "verify", {}),
+                    })
+            except Exception:
+                pass
+            # Capture the last ~20 messages as chat_tail.
+            tail = []
+            try:
+                msgs = list(getattr(m, "messages", []) or [])[-20:]
+                for msg in msgs:
+                    tail.append({
+                        "role": getattr(msg, "role", "") or
+                                (msg.get("role") if isinstance(msg, dict) else ""),
+                        "content": getattr(msg, "content", "") or
+                                   (msg.get("content") if isinstance(msg, dict) else ""),
+                        "sender": getattr(msg, "sender", "") or
+                                  (msg.get("sender") if isinstance(msg, dict) else ""),
+                        "ts": getattr(msg, "timestamp", 0.0) or
+                              (msg.get("timestamp") if isinstance(msg, dict) else 0.0),
+                    })
+            except Exception:
+                pass
+            return {
+                "agent_id": f"meeting:{m.id}",
+                "scope": _ckpt.SCOPE_MEETING,
+                "scope_id": m.id,
+                "plan_json": {
+                    "task_summary": getattr(m, "title", "") or m.id,
+                    "steps": assignments_snap,
+                },
+                "chat_tail": tail,
+                "reason": _ckpt.REASON_USER_ABORT,
+                "metadata": {
+                    "meeting_title": getattr(m, "title", ""),
+                    "participants": list(getattr(m, "participants", []) or []),
+                    "unfinished_assignments": len(assignments_snap),
+                },
+            }
+
+        result = _ar.abort_with_checkpoint(
+            _ar.meeting_key(m.id),
+            snapshot_fn=_snapshot_meeting,
+        )
+        ckpt_id = result.get("checkpoint_id", "")
+
+        # 3. Visible note in transcript.
+        try:
+            killed_n = len(result.get("killed_pids") or [])
+            note = "🛑 已强制终止本会议的 Agent 执行"
+            if killed_n:
+                note += f"（已停止 {killed_n} 个子进程）"
+            if ckpt_id:
+                note += f"\n📎 已保存检查点 {ckpt_id}，稍后可恢复未完成的工作。"
+            m.add_message(
+                sender="system", sender_name="系统", role="system",
+                content=note,
+            )
+            reg.save()
+        except Exception:
+            pass
+        return {"ok": True, "gen": new_gen,
+                "abort": result, "checkpoint_id": ckpt_id}
     except HTTPException:
         raise
     except Exception as e:
@@ -595,6 +725,54 @@ async def meeting_update_assignment(
     except HTTPException:
         raise
     except Exception as e:
+        raise HTTPException(500, detail=str(e))
+
+
+@router.post("/meetings/{meeting_id}/assignments/{assignment_id}/reexecute")
+async def meeting_reexecute_assignment(
+    meeting_id: str,
+    assignment_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Re-run an assignment — skips already-done plan steps, reuses
+    existing workspace artifacts, only redoes what's unfinished.
+
+    Triggered by the "🔄 重新执行此任务" button. Works for any
+    assignment status (OPEN / IN_PROGRESS / DONE / CANCELLED) — admin
+    may decide a "DONE" was a false completion and want to retry.
+    """
+    try:
+        reg, m = _get_meeting(hub, meeting_id)
+        target = None
+        for a in m.assignments:
+            if a.id == assignment_id:
+                target = a
+                break
+        if not target:
+            raise HTTPException(404, "Assignment not found")
+        if not target.assignee_agent_id:
+            raise HTTPException(400, "Assignment has no assignee_agent_id")
+        # Revert to IN_PROGRESS so the UI reflects the retry immediately
+        from ...meeting import (
+            AssignmentStatus, spawn_meeting_assignment_reexecute,
+        )
+        target.status = AssignmentStatus.IN_PROGRESS
+        import time as _t
+        target.updated_at = _t.time()
+        reg.save()
+        # Kick off reexecute in a daemon thread
+        spawn_meeting_assignment_reexecute(
+            meeting=m, registry=reg,
+            agent_chat_fn=hub._direct_chat,
+            agent_lookup_fn=hub.get_agent,
+            assignment=target,
+        )
+        return {"ok": True, "assignment": target.to_dict()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("reexecute failed")
         raise HTTPException(500, detail=str(e))
 
 
