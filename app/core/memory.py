@@ -69,20 +69,28 @@ class EpisodicEntry:
 class SemanticFact:
     """L3 — 长期结构化记忆。
 
-    category 分类体系 (五层记忆模型):
+    category 分类体系 (六层记忆模型):
       - "intent"        任务意图: 用户真实目标、约束条件、成功/失败标准
       - "reasoning"     决策逻辑: 为什么选这个方案、排除了什么、当时的假设
       - "outcome"       执行结果: 最终成功/失败、关键输出、状态变化、失败原因
       - "rule"          经验规则: 场景→方案、错误→修复、前置条件→必须先做什么
       - "reflection"    反思改进: 哪里低效、下次优先检查什么、可合并的步骤
+      - "preference"    用户画像: 长期偏好、风格约束、禁忌规则、个人设定 ⭐NEW
+
+    "preference" 与 "rule" 的区别:
+      - preference 来自**用户本人**表达 ("我喜欢简洁的回答" / "禁止用 emoji")，
+        agent 永远遵循，不因任务上下文失效，不参与 top-K 裁剪 —— 每次对话
+        都注入 system prompt。
+      - rule 来自**agent 自己学到的教训** ("调 web_search 前先 `which node`")，
+        按场景匹配召回，可被反例推翻。
 
     记忆原则: 只记对未来有用的信息，不记过程细节。
-    Agent 记忆 = 经验 + 规则 + 结论，不是日志。
+    Agent 记忆 = 经验 + 规则 + 结论 + 用户画像，不是日志。
 
     兼容旧分类映射:
       decision → reasoning, goal → intent, action_done → outcome,
       action_plan → intent, context → reasoning, issue → rule,
-      learned → rule, user_pref → rule, general → outcome
+      learned → rule, user_pref → preference (⭐ 升格), general → outcome
     """
     id: str = ""
     agent_id: str = ""
@@ -1281,9 +1289,11 @@ class MemoryManager:
     # Prompt Assembly — 检索 L2+L3 注入 system prompt
     # ==================================================================
 
-    # 分类优先级: 高优先级的记忆排在前面，模型更容易关注
+    # 分类优先级: 高优先级的记忆排在前面，模型更容易关注。
+    # preference=-1 表示"最高优先级 + 不受 top-K 限制"——每次都注入。
     _CATEGORY_PRIORITY = {
-        "intent": 0,       # 任务意图 — 最重要，理解用户到底要什么
+        "preference": -1,  # ⭐ 用户画像 — 永远在最前，不裁剪
+        "intent": 0,       # 任务意图 — 理解用户到底要什么
         "rule": 1,         # 经验规则 — 场景→方案，可复用知识
         "reasoning": 2,    # 决策逻辑 — 为什么这么做，避免重复讨论
         "reflection": 3,   # 反思改进 — Agent 进化，下次做得更好
@@ -1291,6 +1301,7 @@ class MemoryManager:
     }
 
     _CATEGORY_LABELS = {
+        "preference": "👤 偏好",
         "intent": "🎯 意图",
         "rule": "📏 规则",
         "reasoning": "🧠 决策",
@@ -1304,12 +1315,13 @@ class MemoryManager:
         "context": "🧠 决策",
         "issue": "📏 规则",
         "learned": "📏 规则",
-        "user_pref": "📏 规则",
+        "user_pref": "👤 偏好",
         "general": "✅ 结果",
         "project_rule": "📏 规则",
     }
 
-    # Map legacy categories to new 5-layer system for new writes
+    # Map legacy categories to new 6-layer system for new writes.
+    # user_pref 升格为 preference 一等公民（不再降级到 rule）。
     _LEGACY_CATEGORY_MAP = {
         "decision": "reasoning",
         "goal": "intent",
@@ -1318,10 +1330,16 @@ class MemoryManager:
         "context": "reasoning",
         "issue": "rule",
         "learned": "rule",
-        "user_pref": "rule",
+        "user_pref": "preference",  # ⭐ 升格
         "general": "outcome",
         "project_rule": "rule",
     }
+
+    # Canonical categories — the set we emit for new writes.
+    CANONICAL_CATEGORIES = (
+        "preference", "intent", "rule",
+        "reasoning", "reflection", "outcome",
+    )
 
     def retrieve_for_prompt(self, agent_id: str,
                             current_query: str,
@@ -1347,25 +1365,46 @@ class MemoryManager:
         # Choose search strategy: vector (ChromaDB) or FTS5
         use_vector = config.vector_search_enabled and self._check_chromadb_available()
 
-        # L3 事实检索
+        # L3 事实检索 —— preference 永远全量注入（用户画像，不裁剪）
+        # + 其他 category 走 top-K 相似度检索
+        pref_facts = self.get_recent_facts(
+            agent_id, limit=50, category="preference")
+        # legacy: user_pref 在旧数据里存在，一并拉
+        pref_facts += self.get_recent_facts(
+            agent_id, limit=50, category="user_pref")
+
         if use_vector:
-            facts = self.search_facts_vector(
+            other_facts = self.search_facts_vector(
                 agent_id, current_query,
                 top_k=config.l3_retrieve_top_k,
             )
         else:
-            facts = self.search_facts(
+            other_facts = self.search_facts(
                 agent_id, current_query,
                 top_k=config.l3_retrieve_top_k,
             )
+        # 合并：preference 在前且去重（不重复进入 other 列表）
+        pref_ids = {f.id for f in pref_facts}
+        other_facts = [f for f in other_facts if f.id not in pref_ids]
+        facts = pref_facts + other_facts
+
         if facts:
-            # 按分类优先级排序
+            # 按分类优先级排序 —— preference 的 priority = -1 自动置顶
             facts.sort(key=lambda f: self._CATEGORY_PRIORITY.get(f.category, 9))
-            fact_lines = []
+            pref_lines = []
+            other_lines = []
             for f in facts:
                 label = self._CATEGORY_LABELS.get(f.category, f"[{f.category}]")
-                fact_lines.append(f"- {label} {f.content}")
-            parts.append("## Key Facts\n" + "\n".join(fact_lines))
+                line = f"- {label} {f.content}"
+                if f.category in ("preference", "user_pref"):
+                    pref_lines.append(line)
+                else:
+                    other_lines.append(line)
+            # 独立分块：User Profile 放最前，其他走 Key Facts
+            if pref_lines:
+                parts.append("## User Profile (永久)\n" + "\n".join(pref_lines))
+            if other_lines:
+                parts.append("## Key Facts\n" + "\n".join(other_lines))
 
         # L2 摘要检索
         if use_vector:
@@ -1614,34 +1653,44 @@ class MemoryManager:
         current_time = time.strftime("%Y-%m-%d %H:%M")
         prompt = (
             "你是 Agent 的记忆提取器。从对话中提取**对未来有用的关键记忆**。\n\n"
-            "核心原则: Agent 记忆 = 经验 + 规则 + 结论，不是日志。\n"
+            "核心原则: Agent 记忆 = 用户画像 + 经验 + 规则 + 结论，不是日志。\n"
             "不记录: 每条命令本身、终端输出全文、无意义重试、状态轮询、系统噪音。\n\n"
-            "五层记忆分类:\n\n"
-            "| category | 记什么 | 举例 |\n"
-            "|----------|--------|------|\n"
+            "六层记忆分类:\n\n"
+            "| category | 记什么 | 举例 | 触发词（用户一说立刻记）|\n"
+            "|----------|--------|------|------|\n"
+            "| preference ⭐ | 用户**长期画像**: 偏好/风格/禁忌/口味/身份设定 | "
+            "\"用户偏好中英混合回复\" / \"用户要求代码不加 emoji\" / \"用户是 Ops 背景，看重运维细节\" | "
+            "\"我喜欢/我讨厌/我是/我禁止/以后都/从此/请一直/永远不要\" |\n"
             "| intent | 任务的真实目标、用户意图、约束条件、成功标准 | "
-            "\"用户需要将TudouClaw的记忆体系从流水账改为结构化五层模型，约束: 兼容旧数据\" |\n"
+            "\"用户需要将记忆体系从流水账改为结构化模型，约束: 兼容旧数据\" | "
+            "\"我要做/帮我实现/本次任务\" |\n"
             "| reasoning | 为什么选这个方案、排除了什么、当时的假设和风险判断 | "
-            "\"选择重构L3分类而非新建表，因为SQLite schema变更成本高；排除新增layer是因为会破坏现有检索逻辑\" |\n"
-            "| outcome | 最终成功/失败/部分成功、关键输出、状态变化、失败原因 | "
-            "\"记忆体系重构完成，5层分类上线；旧数据通过映射表兼容，无需迁移\" |\n"
-            "| rule | 场景→用什么方案、错误→修复方案、前置条件→必须先做什么 | "
-            "\"新分支首次推送必须加 -u 关联上游，否则推送失败\" |\n"
-            "| reflection | 哪里低效、下次应优先检查什么、哪些步骤可以合并 | "
-            "\"下次修改DB schema前应先检查是否有未迁移的旧数据，避免运行时报错\" |\n\n"
+            "\"选择重构L3分类而非新建表，因为SQLite schema变更成本高\" | "
+            "\"之所以/因为/所以我们选\" |\n"
+            "| outcome | 最终成功/失败、关键输出、状态变化、失败原因 | "
+            "\"记忆体系重构完成，6层分类上线\" | "
+            "\"完成/失败/交付\" |\n"
+            "| rule | 场景→方案、错误→修复、前置条件→必须先做什么 | "
+            "\"新分支首次推送必须加 -u 关联上游\" | "
+            "\"下次遇到/如果.../记得要\" |\n"
+            "| reflection | 哪里低效、下次优先检查什么、可合并的步骤 | "
+            "\"下次修改DB schema前应先检查未迁移旧数据\" | "
+            "\"早知道/本应该/如果重来\" |\n\n"
             f"当前时间: {current_time}\n\n"
             f"用户: {user_message[:1000]}\n"
             f"助手: {assistant_response[:1000]}\n\n"
             "提取规则:\n"
-            "- 每条 content 必须是**自包含的完整句子**，脱离上下文也能理解\n"
-            "- 只提取对未来有价值的信息，不提取过程细节和临时状态\n"
-            "- rule 类型要抽象成「场景→方案」的 if-then 模式，不是叙述句\n"
-            "- reasoning 要记录「为什么」而非「做了什么」\n"
-            "- reflection 要有具体的改进动作，不是空泛的感想\n"
-            "- confidence: 0.9=用户明确说的, 0.7=从对话推断的, 0.5=不太确定\n"
-            "- 宁缺毋滥: 没有高价值信息就返回空数组 []\n\n"
+            "- 每条 content 必须**自包含**，脱离上下文也能理解\n"
+            "- **preference 优先级最高** —— 用户一表达长期偏好/风格/禁忌，必抽，"
+            "即便整轮对话只有一句；confidence 写 0.9+\n"
+            "- preference 区别 rule: preference 是用户**本人**表达的永久画像（\"我喜欢 X\"），"
+            "rule 是 agent 自己学到的操作教训（\"调 X 前必须先 Y\"）\n"
+            "- rule 要抽象成「场景→方案」if-then 模式\n"
+            "- reasoning 记「为什么」，reflection 要有具体改进动作\n"
+            "- confidence: 0.95=用户明确/工具验证, 0.8=从对话合理推断, 0.5=不太确定\n"
+            "- 宁缺毋滥: 无高价值信息返回 []。绝不要为了凑数提取\"本次会话执行了 N 个操作\"类流水\n\n"
             "返回 JSON 数组（不要包含其他内容）:\n"
-            '[{"content": "自包含描述", "category": "intent|reasoning|outcome|rule|reflection", "confidence": 0.9}]'
+            '[{"content": "自包含描述", "category": "preference|intent|reasoning|outcome|rule|reflection", "confidence": 0.9}]'
         )
         try:
             result = llm_call(prompt)

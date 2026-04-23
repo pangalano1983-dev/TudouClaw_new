@@ -17292,6 +17292,7 @@ function showAgentMemoryView(aid) {
       + _memStatCard('L3 长期记忆', l3, '#10b981', '结构化语义知识')
       + '</div>'
       + (l3 > 0 ? '<div style="display:flex;gap:6px;flex-wrap:wrap">'
+        + _catBadge('preference', '偏好', (l3cat.preference||0) + (l3cat.user_pref||0))
         + _catBadge('intent', '意图', l3cat.intent||0)
         + _catBadge('reasoning', '推理', l3cat.reasoning||0)
         + _catBadge('outcome', '结果', l3cat.outcome||0)
@@ -17299,7 +17300,7 @@ function showAgentMemoryView(aid) {
         + _catBadge('reflection', '反思', l3cat.reflection||0)
         + '</div>' : '')
       + '<div style="margin-top:10px;padding:8px 10px;background:var(--surface2, #222);border-radius:6px;font-size:11px;color:var(--text3)">'
-      + '<b>压缩策略：</b>L1（最近对话）超出窗口后 → 自动压缩为 L2 摘要（渐进式 Level 0→1→2，信息保留递减）→ 对话中提取结构化事实写入 L3（分 5 类：意图/推理/结果/规则/反思）'
+      + '<b>压缩策略：</b>L1（最近对话）超出窗口后 → 自动压缩为 L2 摘要（渐进式 Level 0→1→2，信息保留递减）→ 对话中提取结构化事实写入 L3（分 6 类：👤偏好 / 🎯意图 / 🧠推理 / ✅结果 / 📏规则 / 💡反思；👤偏好永久注入，不受检索 TopK 限制）'
       + '</div></div>'
     );
 
@@ -17331,8 +17332,8 @@ function showAgentMemoryView(aid) {
     // ── L3 Semantic facts ──
     var l3entries = mem.l3_entries || [];
     if (l3entries.length) {
-      var CAT_LABELS = {intent:'意图',reasoning:'推理',outcome:'结果',rule:'规则',reflection:'反思'};
-      var CAT_COLORS = {intent:'#3b82f6',reasoning:'#f59e0b',outcome:'#10b981',rule:'#ef4444',reflection:'#8b5cf6'};
+      var CAT_LABELS = {preference:'👤偏好',user_pref:'👤偏好',intent:'意图',reasoning:'推理',outcome:'结果',rule:'规则',reflection:'反思'};
+      var CAT_COLORS = {preference:'#ec4899',user_pref:'#ec4899',intent:'#3b82f6',reasoning:'#f59e0b',outcome:'#10b981',rule:'#ef4444',reflection:'#8b5cf6'};
       var l3rows = l3entries.map(function(f){
         var cat = f.category || 'unknown';
         var catLabel = CAT_LABELS[cat] || cat;
@@ -17450,7 +17451,7 @@ function _memStatCard(label, count, color, desc) {
 }
 
 function _catBadge(cat, label, count) {
-  var colors = {intent:'#3b82f6',reasoning:'#f59e0b',outcome:'#10b981',rule:'#ef4444',reflection:'#8b5cf6'};
+  var colors = {preference:'#ec4899',user_pref:'#ec4899',intent:'#3b82f6',reasoning:'#f59e0b',outcome:'#10b981',rule:'#ef4444',reflection:'#8b5cf6'};
   var c = colors[cat] || 'var(--text3)';
   return '<span style="font-size:10px;padding:2px 6px;border-radius:3px;background:'+c+'15;color:'+c+'">'+label+' '+count+'</span>';
 }

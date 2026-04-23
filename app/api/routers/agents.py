@@ -2161,13 +2161,14 @@ def _build_memory_stats(agent) -> dict:
         except Exception:
             pass
 
-    # L3 by category breakdown
+    # L3 by category breakdown. Include preference (new 6th category) +
+    # legacy user_pref for backward compat display.
     l3_by_category = {}
     if mm:
         try:
-            for cat in ("intent", "reasoning", "outcome", "rule", "reflection"):
-                facts = mm.get_recent_facts(aid, limit=1, category=cat)
-                # Use count query if available
+            for cat in ("preference", "user_pref",
+                         "intent", "reasoning", "outcome",
+                         "rule", "reflection"):
                 row = mm._conn.execute(
                     "SELECT COUNT(*) as cnt FROM memory_semantic WHERE agent_id=? AND category=?",
                     (aid, cat),
