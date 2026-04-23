@@ -47,15 +47,16 @@ import copy
 logger = logging.getLogger("tudou.llm")
 token_logger = logging.getLogger("tudou.tokens")
 
-# HTTP timeouts for chat/completions requests. Default read timeout is 15 min
-# (big enough for large local models like MLX-served Qwen3.6-35B to finish
-# decoding long outputs). Override via env var `TUDOU_LLM_READ_TIMEOUT`
-# (seconds) for slower or faster setups.
+# HTTP timeouts for chat/completions requests. Default read timeout is 3 min;
+# longer hangs almost always indicate a cloud-model stall rather than legitimate
+# long decoding, and shorter timeouts let the fallback-LLM path kick in quickly.
+# Override via env var `TUDOU_LLM_READ_TIMEOUT` (seconds) — raise it for slow
+# local models (e.g. MLX-served Qwen3.6-35B) that genuinely need more time.
 _CONNECT_TIMEOUT = 15.0
 try:
-    _READ_TIMEOUT = float(os.environ.get("TUDOU_LLM_READ_TIMEOUT", "900"))
+    _READ_TIMEOUT = float(os.environ.get("TUDOU_LLM_READ_TIMEOUT", "180"))
 except ValueError:
-    _READ_TIMEOUT = 900.0
+    _READ_TIMEOUT = 180.0
 _REQUEST_TIMEOUT: tuple[float, float] = (_CONNECT_TIMEOUT, _READ_TIMEOUT)
 
 # Set by Hub.__init__ so token logger can route per-agent stats.

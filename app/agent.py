@@ -2517,46 +2517,19 @@ class Agent:
         # tool descriptions. Kept only the decisions the LLM genuinely
         # needs to repeatedly remember (output location / scheduled-task
         # 3-step / MCP discovery pattern / config-over-history rule).
+        # Minimal header — only structural info (workspace path + XML block
+        # freshness notice). All behavioural rules (plan_update, MCP,
+        # confirmations, etc.) must come from the user's global system
+        # prompt / role preset / SOUL configuration, not from code.
         header = (
             f"\n[Agent workspace: {ws}]\n"
-            "约定：产出文件放 workspace/；以下 <project>/<skills>/<mcp_servers>/<tasks>/... "
-            "XML 块反映**当前配置**，与对话历史冲突时以它们为准。\n"
-            "- 定时任务：用户说「每天/每周X点做Y」→ 1) 立即执行一次 "
-            "2) task_update(recurrence=daily|weekly, recurrence_spec=HH:MM) "
-            "3) 追加到 Scheduled.md。明确说「从明天开始」除外。\n"
-            "- 外部服务（邮件/IM/第三方 API）**只能**用 mcp_call：\n"
-            "    · 查 MCP：mcp_call(list_mcps=true)\n"
-            "    · 执行：mcp_call(mcp_id, tool, arguments)\n"
-            "    · 禁止 bash echo JSON-RPC / 禁止假设存在本地 socket / 禁止用 get_skill_guide 查 MCP。\n"
-            "- **外部交付前硬性确认**：以下操作**禁止**先斩后奏，执行前必须输出一行"
-            "「准备 <操作> <对象摘要>，请确认」然后**停下**等用户回复 OK / 确认 / yes：\n"
-            "    · 发邮件 / 发 IM 到外部收件人（包括 mcp_call tool=send_email/send_message 等）\n"
-            "    · 删除任何文件\n"
-            "    · git push / 提交 PR / 发布到任何外部系统\n"
-            "    · 修改 agent workspace 之外的任何文件\n"
-            "  不接受「我已经 <操作> 了」这种事后告知。只要用户原始消息没含"
-            "「直接做 / 别确认 / 已授权」之类明确授权词，就必须先确认。\n"
-            "- **卡壳自省**：同一 tool 或同一操作连续失败 3 次后，**停下** —— 不要再试第 4 次，"
-            "而是向用户说明：(1) 你试图做什么 (2) 最近的错误 (3) 你需要什么支持。不要无限 retry / cp 绕路。\n"
-            "- **多步任务开始前先列计划**：用户请求明显需要 3+ 步时，**第一步**必须调 "
-            "plan_update(action='create_plan', task_summary='...', steps=[{title, acceptance, llm_purpose}, ...])。"
-            "每步必须带 `acceptance` —— 具体的交付物/状态，不是 '完成xxx' 这种空话。"
-            "**好示例**：acceptance='report.pptx 生成且 ≥5 页，用 python-pptx 打开 OK'；"
-            "**坏示例**：acceptance='完成报告'。每完成一步调 "
-            "plan_update(action='complete_step', step_id=..., result_summary='<具体验证 acceptance 是否满足>')。"
-            "这个 checklist 会在前端 TODOs 面板实时显示给用户，也是你自己的进度记忆。\n"
-            "  · 若已启用 auto_route（系统下方会注入 LLM 评分表），每个 step 还要带 "
-            "`llm_purpose`（tool-heavy / multimodal / reasoning / analysis / default 五选一），"
-            "系统会据此把该步派给最合适的 LLM。\n"
-            "- **禁止重复叙述计划**：每一轮 iteration 必须做下面之一，**不许再次列出同一段计划文字**：\n"
-            "    (a) 调一个具体 tool（web_search / read_file / bash / mcp_call / plan_update 等）；\n"
-            "    (b) 基于上一轮 tool_result 输出具体结论或下一步（例 '搜到 X，接下来查 Y'）；\n"
-            "    (c) 调 plan_update 真正登记/推进步骤。\n"
-            "  Markdown checkbox 的 '计划' 文字不是 tool_call；只写文字不调 tool 会被判重复输出并打断。\n"
+            "下方 <project>/<skills>/<mcp_servers>/<tasks>/... XML 块反映**当前实时配置**，"
+            "与对话历史冲突时以它们为准。\n"
         )
-        # Auto-route scores hint (Phase 1-B): inject per-category scores so
-        # the LLM can pick `llm_purpose` on each step informed by actual
-        # capability numbers instead of guessing.
+        # Auto-route scores table — injected only when auto_route is enabled
+        # AND extra_llms has real candidates. This is config-driven data,
+        # not a behavioural rule. If operator doesn't want it they can
+        # disable auto_route in agent config.
         try:
             ar = self.auto_route or {}
             if ar.get("enabled") and self.extra_llms:
@@ -5091,24 +5064,43 @@ Write only the summary body. Do not include any preamble or prefix."""
                 # message-text keyword detection (which only sees the
                 # original user prompt, not "which step am I on").
                 category = ""
+                _cat_source = "keyword"  # for logging
                 try:
                     _plan = getattr(self, "_current_plan", None)
-                    if _plan is not None:
-                        _step = next((s for s in _plan.steps
-                                      if getattr(s, "status", None)
-                                      and str(s.status.value if hasattr(s.status, "value") else s.status) == "in_progress"),
-                                     None)
+                    if _plan is not None and _plan.steps:
+                        _step = None
+                        for s in _plan.steps:
+                            _st_val = s.status.value if hasattr(s.status, "value") else str(s.status)
+                            if _st_val == "in_progress":
+                                _step = s
+                                break
                         if _step is not None:
                             _hint = str(getattr(_step, "llm_purpose", "") or "").strip()
                             if _hint in ("tool-heavy", "multimodal",
                                          "reasoning", "analysis", "default"):
                                 category = _hint
-                                logger.debug(
-                                    "Agent %s: route category from plan step "
-                                    "%s.llm_purpose=%s",
-                                    self.id[:8], _step.id, _hint)
+                                _cat_source = f"plan_step({_step.id}).llm_purpose"
+                                logger.info(
+                                    "Agent %s: category=%s from in-progress "
+                                    "step '%s' (llm_purpose)",
+                                    self.id[:8], _hint, _step.title[:30])
+                            else:
+                                logger.info(
+                                    "Agent %s: in-progress step '%s' has "
+                                    "empty/invalid llm_purpose=%r — falling "
+                                    "back to keyword detection",
+                                    self.id[:8], _step.title[:30], _hint)
+                        else:
+                            logger.info(
+                                "Agent %s: plan exists but no step in-progress "
+                                "— using keyword detection",
+                                self.id[:8])
+                    else:
+                        logger.info(
+                            "Agent %s: no active plan — using keyword detection",
+                            self.id[:8])
                 except Exception as _step_err:
-                    logger.debug("step-purpose lookup failed: %s", _step_err)
+                    logger.warning("step-purpose lookup failed: %s", _step_err)
                 if not category:
                     category = _router.detect_category(
                         user_message=user_message,
@@ -8069,6 +8061,71 @@ Write only the summary body. Do not include any preamble or prefix."""
         self._update_agent_phase()
         return plan
 
+    def _auto_advance_plan(self, tool_name: str = "") -> None:
+        """Soft-fallback auto-advance — fires ONLY when the LLM hasn't
+        started managing the plan state machine on its own yet.
+
+        Once the LLM calls plan_update(start_step|complete_step|...) even
+        once, a flag flips and this helper no-ops for the rest of the
+        turn — ensuring we don't fight the LLM. The flag resets at turn
+        start (see agent_execution chat loop entry).
+
+        Semantics:
+          - If no step is in_progress AND at least one is pending AND
+            the LLM hasn't touched plan_update yet this turn → start
+            the earliest pending step.
+          - Called with tool_name='plan_update' marks the LLM as
+            managing state itself and disables auto-advance until
+            next turn.
+        """
+        if tool_name == "plan_update":
+            # LLM is explicitly driving the state machine — stand down.
+            self._llm_manages_plan_this_turn = True
+            return
+        if getattr(self, "_llm_manages_plan_this_turn", False):
+            return
+        plan = self._current_plan
+        if plan is None or not plan.steps or plan.status != "active":
+            return
+        try:
+            from .agent_types import StepStatus as _SS
+        except Exception:
+            return
+        in_prog = next((s for s in plan.steps
+                        if s.status == _SS.IN_PROGRESS), None)
+        if in_prog is not None:
+            return
+        pending = [s for s in plan.steps if s.status == _SS.PENDING]
+        if not pending:
+            return
+        target = pending[0]
+        self.update_plan_step(target.id, "in_progress")
+        logger.info(
+            "Agent %s: auto-started plan step '%s' (id=%s) on tool=%s",
+            self.id[:8], target.title[:50], target.id, tool_name or "-")
+
+    def _auto_complete_in_progress_on_turn_end(self) -> None:
+        """Called when a chat turn ends. If any step is still in_progress
+        and the LLM never explicitly called complete_step/fail_step,
+        mark it completed with an auto-generated summary — otherwise
+        the plan stays permanently 'in progress' after the turn."""
+        plan = self._current_plan
+        if plan is None or not plan.steps:
+            return
+        try:
+            from .agent_types import StepStatus as _SS
+        except Exception:
+            return
+        stuck = [s for s in plan.steps if s.status == _SS.IN_PROGRESS]
+        for s in stuck:
+            self.update_plan_step(
+                s.id, "completed",
+                result_summary="(auto) turn ended without explicit complete_step",
+            )
+            logger.info(
+                "Agent %s: auto-completed '%s' on turn end",
+                self.id[:8], s.title[:50])
+
     def update_plan_step(self, step_id: str, status: str,
                           result_summary: str = "") -> ExecutionStep | None:
         """Update a step's status in the current plan."""
@@ -8079,6 +8136,15 @@ Write only the summary body. Do not include any preamble or prefix."""
             step = plan.start_step(step_id)
         elif status == "completed":
             step = plan.complete_step(step_id, result_summary)
+            # NOTE: Previously we auto-chained start_step on the next
+            # pending here. That fought with LLM's explicit start_step
+            # calls — LLM calls complete_step(s1) then start_step(s2);
+            # our auto-chain had already started s2 under the hood, so
+            # the second start_step either duplicated the step or flipped
+            # it to a confused state (observed "same title two ids" +
+            # step marked skipped). Simplest fix: LLM that calls
+            # complete_step clearly knows the state machine — trust it
+            # and don't pre-empt.
         elif status == "failed":
             step = plan.fail_step(step_id, result_summary)
         else:

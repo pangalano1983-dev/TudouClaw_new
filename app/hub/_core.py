@@ -11,6 +11,7 @@ The Hub is the central brain that:
 import atexit
 import json
 import logging
+import os
 import signal
 import threading
 import time
@@ -401,6 +402,23 @@ class Hub:
                                          getattr(ag, "id", "?"), _ge)
                 except Exception as _ge:
                     logger.debug("growth tick loop failed: %s", _ge)
+
+                # ── Stuck-agent watchdog ──
+                # If an agent is IDLE but has an ACTIVE ExecutionPlan with
+                # pending/in-progress steps AND hasn't seen step-level
+                # activity for a while, send it a "continue" nudge so it
+                # doesn't sit on an unfinished task silently. Capped at 3
+                # wakes per plan to avoid infinite loops.
+                try:
+                    for ag in list(self.agents.values()):
+                        try:
+                            self._maybe_wake_stuck_agent(ag)
+                        except Exception as _we:
+                            logger.debug(
+                                "stuck-agent watchdog for %s failed: %s",
+                                getattr(ag, "id", "?"), _we)
+                except Exception as _we:
+                    logger.debug("stuck-agent watchdog loop error: %s", _we)
             except Exception as _le:
                 logger.debug("heartbeat loop iter error: %s", _le)
             self._heartbeat_stop.wait(self._heartbeat_interval)
@@ -1536,6 +1554,98 @@ class Hub:
                                 -x["priority"],
                                 x["created_at"]))
         return out
+
+    # ──────────────────────────────────────────────────────────────
+    # Stuck-agent watchdog — fired from _heartbeat_loop
+    # ──────────────────────────────────────────────────────────────
+
+    # Seconds an agent can be IDLE-with-open-plan before we nudge it.
+    # Read from env so operators can tune without a code change.
+    _STUCK_WATCHDOG_IDLE_SEC = float(
+        os.environ.get("TUDOU_STUCK_WATCHDOG_IDLE_SEC", "300") or 300)
+    _STUCK_WATCHDOG_MAX_WAKES = int(
+        os.environ.get("TUDOU_STUCK_WATCHDOG_MAX_WAKES", "3") or 3)
+
+    def _maybe_wake_stuck_agent(self, agent) -> None:
+        """Nudge an idle agent with an unfinished ExecutionPlan.
+
+        Fires only when ALL of the following hold:
+          1. Agent has an `_current_plan` with status == 'active'.
+          2. That plan has at least one step in PENDING or IN_PROGRESS.
+          3. Agent status == IDLE (no chat loop currently running).
+          4. No step has seen an update (started_at / completed_at)
+             in the last ``_STUCK_WATCHDOG_IDLE_SEC`` seconds.
+          5. Agent has been woken fewer than
+             ``_STUCK_WATCHDOG_MAX_WAKES`` times for this plan already.
+
+        When all pass, injects a synthetic user message from
+        source="system:watchdog" pointing at the next unfinished step.
+        """
+        from ..agent_types import AgentStatus, StepStatus
+        plan = getattr(agent, "_current_plan", None)
+        if plan is None or getattr(plan, "status", "") != "active":
+            return
+        open_steps = [s for s in plan.steps
+                      if s.status in (StepStatus.PENDING,
+                                      StepStatus.IN_PROGRESS)]
+        if not open_steps:
+            return
+        if getattr(agent, "status", None) != AgentStatus.IDLE:
+            return
+        # Most-recent step activity timestamp
+        ts_values = []
+        for s in plan.steps:
+            for k in ("completed_at", "started_at"):
+                v = getattr(s, k, 0) or 0
+                if v > 0:
+                    ts_values.append(v)
+        last_update = max(ts_values) if ts_values else getattr(
+            plan, "created_at", 0) or 0
+        now = time.time()
+        if last_update <= 0 or (now - last_update) < self._STUCK_WATCHDOG_IDLE_SEC:
+            return
+        # Per-plan wake cap
+        _plan_id = getattr(plan, "id", "")
+        counts = getattr(agent, "_stuck_wake_counts", None)
+        if not isinstance(counts, dict):
+            counts = {}
+            try:
+                agent._stuck_wake_counts = counts
+            except Exception:
+                pass
+        n = counts.get(_plan_id, 0)
+        if n >= self._STUCK_WATCHDOG_MAX_WAKES:
+            return
+        counts[_plan_id] = n + 1
+        # Pick the step to nudge: prefer the one already in-progress;
+        # otherwise the first pending.
+        target = next((s for s in open_steps
+                       if s.status == StepStatus.IN_PROGRESS), None) \
+                 or open_steps[0]
+        msg = (
+            "[SYSTEM · 唤醒] 你的当前任务还有未完成步骤，但你已经空闲了 "
+            f"{int(now - last_update)} 秒。\n"
+            f"计划：{plan.task_summary[:120]}\n"
+            f"剩余开放步骤：{len(open_steps)}\n"
+            f"下一步（id={target.id}）：{target.title}\n"
+            f"acceptance：{(target.acceptance or '')[:200]}\n"
+            f"请调 plan_update(action='start_step', step_id='{target.id}') "
+            "然后继续执行。如果你判断任务已经交付或无法推进，请调 "
+            "plan_update(action='complete_step' 或 'fail_step') 收尾，而不是静止。\n"
+            f"这是自动唤醒 #{n + 1}，最多 {self._STUCK_WATCHDOG_MAX_WAKES} 次。"
+        )
+        logger.warning(
+            "Hub watchdog: waking stuck agent %s — plan '%s' has %d open "
+            "steps, idle for %.0fs (wake #%d)",
+            agent.id[:8], plan.task_summary[:40], len(open_steps),
+            now - last_update, n + 1)
+        try:
+            self.supervisor.chat_async(agent.id, msg,
+                                       source="system:watchdog")
+        except Exception as _ce:
+            logger.warning(
+                "Hub watchdog: chat_async for %s failed: %s",
+                agent.id[:8], _ce)
 
     def wake_up_agent(self, agent_id: str,
                        max_tasks: int = 5) -> dict:

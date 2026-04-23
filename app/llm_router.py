@@ -179,9 +179,13 @@ _TOOL_HEAVY_KEYWORDS = (
     "下载", "上传", "写一个", "做一个", "帮我发", "帮我存", "帮我下载",
     "帮我创建", "帮我生成", "导出", "导入", "部署", "推送",
     "调用", "测试一下",
+    # CN — research / scraping verbs (usually web_search / web_fetch heavy)
+    "搜索", "搜一下", "查一下", "查查", "上网", "抓取", "爬取",
+    "检索", "找资料", "调研",
     # EN
     "generate", "create", "send", "run", "execute", "download",
     "upload", "deploy", "push", "commit", "export", "build",
+    "search", "scrape", "fetch", "crawl",
 )
 
 
@@ -387,8 +391,12 @@ def build_scores_hint_for_agent(primary_provider: str,
         rows.append((label, prov, mdl, scores))
     if len(rows) < 2:
         return ""
-    header = ("## 可用 LLM 及各类别评分（0-10，越高越合适）\n\n"
-              "| Label | Provider/Model | tool-heavy | multimodal "
+    # Pure data table. No behavioural instruction — operator's global
+    # system prompt is the single source of truth for "use this table"
+    # guidance. This helper only serialises scores into a markdown block
+    # the prompt can reference.
+    header = ("## LLM capability scores (0-10)\n\n"
+              "| label | provider/model | tool-heavy | multimodal "
               "| reasoning | analysis | default |\n"
               "|-------|---------------|-----------|-----------"
               "|-----------|----------|---------|\n")
@@ -397,10 +405,5 @@ def build_scores_hint_for_agent(primary_provider: str,
                    f"| {sc['tool-heavy']:.1f} | {sc['multimodal']:.1f} "
                    f"| {sc['reasoning']:.1f} | {sc['analysis']:.1f} "
                    f"| {sc['default']:.1f} |\n")
-    header += (
-        "\n**调 plan_update(action='create_plan') 时，每个 step 请带 `llm_purpose` 字段**，"
-        "从 `tool-heavy / multimodal / reasoning / analysis / default` 里选一个，"
-        "系统会按上表评分自动把该步派给最合适的 LLM。可选填 `llm_rationale` 说明理由。\n"
-    )
     return header
 

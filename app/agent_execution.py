@@ -490,6 +490,12 @@ class AgentExecutionMixin:
             else:
                 # Normal turn — no history pruning.
                 self._turn_skip_from_idx = None
+            # Reset the auto-advance "LLM is driving plan" flag at each
+            # turn start so it never sticks across turns.
+            try:
+                self._llm_manages_plan_this_turn = False
+            except Exception:
+                pass
             msg = {"role": "user", "content": _msg_content, "source": source}
             self.messages.append(msg)
             self._log("message", {"role": "user", "content": _user_text[:500], "source": source})
@@ -1125,6 +1131,21 @@ class AgentExecutionMixin:
                             _empty_args_detected = True
                         parsed_calls.append((name, arguments, call_id))
 
+                    # Soft-fallback auto-advance of plan state machine. If
+                    # there's an active plan and the LLM never explicitly
+                    # called plan_update(start_step, ...), this auto-starts
+                    # the earliest pending step so the TODOs panel shows
+                    # something as 进行中 instead of all 待办. Explicit
+                    # plan_update calls override.
+                    try:
+                        for _nm, _args, _cid in parsed_calls:
+                            if _nm == "plan_update":
+                                continue
+                            self._auto_advance_plan(_nm)
+                            break   # one auto-advance per iteration is enough
+                    except Exception as _aa_err:
+                        logger.debug("auto-advance skipped: %s", _aa_err)
+
                     # Detect repeated empty-argument tool calls (LLM stuck in
                     # truncation loop). After 2 consecutive failures, inject a
                     # hint and let the LLM produce a text response instead.
@@ -1381,6 +1402,15 @@ class AgentExecutionMixin:
                 os.chdir(old_cwd)
                 from .agent_types import AgentStatus
                 self.status = AgentStatus.IDLE
+
+                # Soft-fallback: if any plan step is still in_progress at
+                # turn end (LLM never called complete_step), auto-close it
+                # so the UI doesn't hang on "进行中" forever after the
+                # assistant has clearly moved on.
+                try:
+                    self._auto_complete_in_progress_on_turn_end()
+                except Exception as _ac_err:
+                    logger.debug("turn-end auto-complete skipped: %s", _ac_err)
 
                 # --- src integration: track cost & history ---
                 if final_content:
