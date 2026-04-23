@@ -1366,6 +1366,14 @@ class SkillRegistry:
     # ── Grant / Revoke ──
 
     def grant(self, skill_id: str, agent_id: str) -> bool:
+        """Grant skill to agent + auto-sync latest files into agent workspace.
+
+        Every grant is idempotent and a no-op at the grant-record level if
+        already granted, BUT it always re-runs the workspace sync so the
+        agent's local copy of skill files (SKILL.md, .py helpers, assets)
+        stays aligned with the source install_dir. This means re-granting
+        an already-granted skill acts as a "refresh / pull latest" button.
+        """
         with self._lock:
             inst = self._installs.get(skill_id)
             if not inst:
@@ -1373,9 +1381,71 @@ class SkillRegistry:
             if agent_id not in inst.granted_to:
                 inst.granted_to.append(agent_id)
             self._save()
+        # Sync files to agent's workspace. Best-effort — if sync fails
+        # (permissions, missing agent object, I/O), the grant record
+        # still stands and bash PYTHONPATH fallback keeps imports working.
+        self._sync_to_agent_workspace(inst, agent_id)
         self._logger(t("skills.granted_success", skill=inst.manifest.name,
                        agent=agent_id))
         return True
+
+    def _sync_to_agent_workspace(self, inst, agent_id: str) -> None:
+        """Copy skill install_dir into <agent_workspace>/skills/<name>/.
+
+        Resolves the live agent object via the active Hub and calls its
+        sync_skill_to_workspace method. Silent no-op if we can't find
+        the agent (registry running before hub is up, or agent was
+        deleted between grant & sync). All errors are logged at debug
+        and swallowed — grant semantics don't depend on sync success.
+        """
+        try:
+            import sys as _sys
+            llm_mod = _sys.modules.get("app.llm")
+            hub = getattr(llm_mod, "_active_hub", None) if llm_mod else None
+            if hub is None or not hasattr(hub, "get_agent"):
+                return
+            agent = hub.get_agent(agent_id)
+            if agent is None or not hasattr(agent, "sync_skill_to_workspace"):
+                return
+            result = agent.sync_skill_to_workspace(inst)
+            if not result.get("ok"):
+                logger.debug(
+                    "skill sync %s → %s failed: %s",
+                    getattr(inst.manifest, "name", "?"), agent_id,
+                    result.get("error", "?"))
+        except Exception as e:
+            logger.debug(
+                "skill sync %s → %s exception: %s",
+                getattr(getattr(inst, "manifest", None), "name", "?"),
+                agent_id, e)
+
+    def resync_all_granted_skills(self) -> dict:
+        """Walk every (skill, agent) grant and re-sync the skill into the
+        agent's workspace. Safe to call at hub startup — no-op for grants
+        whose agent is already up-to-date (shutil.copytree over existing
+        tree is how sync_skill_to_workspace works: it `rmtree` + fresh copy).
+
+        Returns summary {total: N, synced: N, errors: [...]}.
+        """
+        total = 0
+        synced = 0
+        errors: list[str] = []
+        with self._lock:
+            grants = [(inst, aid) for inst in self._installs.values()
+                      for aid in list(inst.granted_to)]
+        for inst, aid in grants:
+            total += 1
+            try:
+                self._sync_to_agent_workspace(inst, aid)
+                synced += 1
+            except Exception as e:  # noqa: BLE001
+                errors.append(
+                    f"{getattr(inst.manifest, 'name', '?')} → {aid}: {e}")
+        if total:
+            self._logger(
+                f"skill resync: {synced}/{total} granted skills synced "
+                f"to agent workspaces ({len(errors)} errors)")
+        return {"total": total, "synced": synced, "errors": errors}
 
     def revoke(self, skill_id: str, agent_id: str) -> bool:
         with self._lock:

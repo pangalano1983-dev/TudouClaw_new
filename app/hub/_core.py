@@ -325,6 +325,24 @@ class Hub:
         except (OSError, ValueError):
             pass  # Not main thread or signal not supported
 
+        # ── Skill resync on startup ──
+        # Every time the hub boots, replay all existing (skill, agent)
+        # grants to re-copy the latest skill files into each agent's
+        # workspace. This is how upstream changes to builtin skills
+        # (e.g. new _pptx_helpers.py APIs) propagate to agents that
+        # were granted the skill on a previous boot — users don't need
+        # to manually "reinstall" via the UI.
+        try:
+            if self.skill_registry is not None:
+                report = self.skill_registry.resync_all_granted_skills()
+                logger.info(
+                    "Startup skill resync: %d/%d grants synced to "
+                    "agent workspaces (%d errors)",
+                    report.get("synced", 0), report.get("total", 0),
+                    len(report.get("errors", [])))
+        except Exception as _re:
+            logger.warning("Startup skill resync failed: %s", _re)
+
     def _heartbeat_loop(self):
         """Periodic loop:
         1) If running as a downstream node (TUDOU_UPSTREAM_HUB set), send a
