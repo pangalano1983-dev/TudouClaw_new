@@ -9242,7 +9242,7 @@ async function initGrowthPath(agentId) {
 }
 async function completeObjective(agentId, objectiveId) {
   const result = await api('POST', '/api/portal/agent/' + agentId + '/growth', {action: 'complete_objective', objective_id: objectiveId});
-  if (result && result.advanced) { showToast('Advanced to next stage!', 'success'); }
+  if (result && result.advanced) { window._toast('Advanced to next stage!', 'success'); }
   showGrowthPathPanel(agentId);
 }
 async function triggerGrowthLearning(agentId) {
@@ -9257,7 +9257,7 @@ async function triggerGrowthLearning(agentId) {
     html += '</div>';
     showModalHTML(html);
   } else {
-    showToast(result && result.message ? result.message : 'No pending objectives', 'info');
+    window._toast(result && result.message ? result.message : 'No pending objectives', 'info');
   }
 }
 
@@ -18580,7 +18580,7 @@ async function _permSaveDelegation(uid) {
     // and intentionally ignored.
     var nodeIds = Array.from(document.querySelectorAll('.perm-node-cb:checked')).map(function(x){return x.value;});
     await api('POST', '/api/portal/admins/bind-nodes', {user_id: uid, node_ids: nodeIds});
-    showToast(window.t('perm.saved', '权限已更新'), 'success');
+    window._toast(window.t('perm.saved', '权限已更新'), 'success');
     // Refresh the whole panel so lists reflect the saved state.
     renderPermissionsPanel();
   } catch (e) {
@@ -18647,7 +18647,7 @@ async function _permCreateUser() {
     });
     if (r && r.ok) {
       closeModal();
-      showToast(window.t('perm.userCreated', '用户已创建'), 'success');
+      window._toast(window.t('perm.userCreated', '用户已创建'), 'success');
       renderPermissionsPanel();
     } else {
       alert(window.t('perm.createFailed', '创建失败') + ': ' + ((r && r.error) || 'unknown'));
@@ -18663,7 +18663,7 @@ async function _permDeleteUser(uid, username) {
   try {
     var r = await api('POST', '/api/portal/admins/delete', {user_id: uid});
     if (r && r.ok) {
-      showToast(window.t('perm.userDeleted', '用户已删除'), 'success');
+      window._toast(window.t('perm.userDeleted', '用户已删除'), 'success');
       renderPermissionsPanel();
     } else {
       alert(window.t('perm.deleteFailed', '删除失败') + ': ' + ((r && r.error) || 'unknown'));
@@ -18678,7 +18678,7 @@ async function _permResetPassword(uid) {
   if (!pw || pw.length < 6) return;
   try {
     await api('POST', '/api/portal/admins/update', {user_id: uid, password: pw});
-    showToast(window.t('perm.passwordReset', '密码已重置'), 'success');
+    window._toast(window.t('perm.passwordReset', '密码已重置'), 'success');
   } catch (e) {
     alert(window.t('perm.saveFailed', '操作失败') + ': ' + (e && e.message || e));
   }
@@ -18691,7 +18691,7 @@ async function _permToggleActive(uid, toActive) {
   if (!confirm(confirmMsg)) return;
   try {
     await api('POST', '/api/portal/admins/update', {user_id: uid, active: !!toActive});
-    showToast(toActive ? window.t('perm.enabled', '已启用') : window.t('perm.disabled', '已禁用'), 'success');
+    window._toast(toActive ? window.t('perm.enabled', '已启用') : window.t('perm.disabled', '已禁用'), 'success');
     renderPermissionsPanel();
   } catch (e) {
     alert(window.t('perm.saveFailed', '操作失败') + ': ' + (e && e.message || e));
