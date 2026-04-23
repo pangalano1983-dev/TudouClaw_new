@@ -417,6 +417,12 @@ class Hub:
                             logger.debug(
                                 "stuck-agent watchdog for %s failed: %s",
                                 getattr(ag, "id", "?"), _we)
+                        try:
+                            self._maybe_reset_busy_stalled_agent(ag)
+                        except Exception as _we:
+                            logger.debug(
+                                "busy-stall watchdog for %s failed: %s",
+                                getattr(ag, "id", "?"), _we)
                 except Exception as _we:
                     logger.debug("stuck-agent watchdog loop error: %s", _we)
             except Exception as _le:
@@ -1565,6 +1571,11 @@ class Hub:
         os.environ.get("TUDOU_STUCK_WATCHDOG_IDLE_SEC", "300") or 300)
     _STUCK_WATCHDOG_MAX_WAKES = int(
         os.environ.get("TUDOU_STUCK_WATCHDOG_MAX_WAKES", "3") or 3)
+    # Seconds an agent can be BUSY with NO events before we force-reset.
+    # Default 300s — longer than the LLM read timeout (180s) so a genuine
+    # long tool or slow LLM call finishes first; only true deadlocks trip.
+    _BUSY_STALL_SEC = float(
+        os.environ.get("TUDOU_BUSY_STALL_SEC", "300") or 300)
 
     def _maybe_wake_stuck_agent(self, agent) -> None:
         """Nudge an idle agent with an unfinished ExecutionPlan.
@@ -1646,6 +1657,100 @@ class Hub:
             logger.warning(
                 "Hub watchdog: chat_async for %s failed: %s",
                 agent.id[:8], _ce)
+
+    def _maybe_reset_busy_stalled_agent(self, agent) -> None:
+        """Force-reset a BUSY agent that has emitted no events for too long.
+
+        Different from ``_maybe_wake_stuck_agent`` — that one targets
+        IDLE agents with unfinished plans. This one catches the opposite
+        failure mode: agent is stuck in BUSY (LLM call hanging past the
+        connection's own timeout, dead tool subprocess, deadlocked thread,
+        etc.) and the UI shows "busy" but no new events appear in the log.
+
+        Fires only when:
+          1. agent.status == BUSY
+          2. Last ``AgentEvent`` timestamp (or agent creation time if
+             no events yet) is more than ``_BUSY_STALL_SEC`` seconds old.
+          3. We haven't already force-reset this BUSY streak — track via
+             ``agent._busy_stall_reset_at`` so repeated heartbeats don't
+             spam the user.
+
+        Action: transition status → IDLE, emit a user-visible assistant
+        message explaining what happened, and clear any in-flight
+        ConversationTask that's still claimed active. User can then
+        retry or type /new to continue.
+        """
+        from ..agent_types import AgentStatus, AgentEvent
+        if getattr(agent, "status", None) != AgentStatus.BUSY:
+            # No longer stalled — clear the flag so a future BUSY streak
+            # gets its own reset opportunity.
+            try:
+                agent._busy_stall_reset_at = 0.0
+            except Exception:
+                pass
+            return
+        events = getattr(agent, "events", None) or []
+        if events:
+            last_event_ts = float(getattr(events[-1], "time", 0) or 0)
+        else:
+            last_event_ts = float(getattr(agent, "created_at", 0) or 0)
+        now = time.time()
+        if last_event_ts <= 0 or (now - last_event_ts) < self._BUSY_STALL_SEC:
+            return
+        # Debounce: don't reset the same stall twice within one minute
+        # (gives the forced IDLE transition a moment to actually propagate).
+        last_reset = float(getattr(agent, "_busy_stall_reset_at", 0) or 0)
+        if last_reset > 0 and (now - last_reset) < 60:
+            return
+        stall_sec = now - last_event_ts
+        logger.error(
+            "Hub watchdog: BUSY-stall detected on agent %s — no events "
+            "for %.0fs, force-resetting to IDLE",
+            agent.id[:8], stall_sec)
+        try:
+            agent._busy_stall_reset_at = now
+        except Exception:
+            pass
+        # 1) Emit a user-visible message so the chat doesn't look dead.
+        try:
+            warn = (
+                f"⚠️ 检测到 agent 卡死（BUSY 状态 {int(stall_sec)} 秒未产出日志）。"
+                "已自动重置为 IDLE，你可以重新输入指令，或用 /new 清空上下文再试。\n"
+                "常见原因：LLM 响应挂起、工具子进程死锁。如反复发生，建议切到更稳的 "
+                "LLM（设置 auto_route + 云端 primary）并看下 provider 的 status 页。"
+            )
+            agent.events.append(AgentEvent(now, "message",
+                                           {"role": "assistant",
+                                            "content": warn,
+                                            "_source": "busy_stall_guard"}))
+            # Also append to conversation messages so next prompt has
+            # the context (don't add if messages list doesn't exist).
+            msgs = getattr(agent, "messages", None)
+            if isinstance(msgs, list):
+                msgs.append({"role": "assistant",
+                             "content": warn,
+                             "_source": "busy_stall_guard"})
+        except Exception as _ee:
+            logger.debug("busy-stall emit failed: %s", _ee)
+        # 2) Force status → IDLE so the UI unlocks the input.
+        try:
+            agent.status = AgentStatus.IDLE
+        except Exception as _se:
+            logger.warning(
+                "busy-stall: failed to set IDLE on %s: %s",
+                agent.id[:8], _se)
+        # 3) Best-effort: close any in-flight ConversationTask that still
+        # thinks it's running. (Observer handles the sweep elsewhere; here
+        # we just tap it to fast-forward.)
+        try:
+            from ..conversation_observer import on_agent_event
+            on_agent_event(agent.id, {
+                "timestamp": now,
+                "kind": "agent_reset",
+                "data": {"reason": "busy_stall", "stall_sec": int(stall_sec)},
+            })
+        except Exception:
+            pass
 
     def wake_up_agent(self, agent_id: str,
                        max_tasks: int = 5) -> dict:

@@ -1003,7 +1003,77 @@ class AgentExecutionMixin:
                     content = _ensure_str_content(msg.get("content"))
                     tool_calls = msg.get("tool_calls", [])
 
-                    if content:
+                    # Duplicate-output guard — run BEFORE the emit so we can
+                    # suppress the bubble instead of letting the user see it
+                    # and only then telling the LLM to stop repeating. Covers
+                    # both tool-call iterations and final-response branches
+                    # and is cross-turn (self._last_iter_content persists).
+                    _suppress_display = False
+                    _dup_abort = False
+                    try:
+                        _prev = str(getattr(self, "_last_iter_content", "") or "")
+                        _curr = str(content or "")
+                        if _prev and _curr and len(_curr) > 40:
+                            _sim = _text_similarity(_prev, _curr)
+                            if _sim >= 0.85:
+                                _dup_count = int(getattr(
+                                    self, "_dup_iter_count", 0)) + 1
+                                self._dup_iter_count = _dup_count
+                                _suppress_display = True
+                                logger.warning(
+                                    "Agent %s: duplicate narration "
+                                    "(similarity=%.2f, dup#%d, tool_calls=%d)",
+                                    self.id[:8], _sim, _dup_count,
+                                    len(tool_calls or []))
+                                if _dup_count == 1:
+                                    # First duplicate: inject corrective so
+                                    # the LLM's next iteration sees it.
+                                    _corrective = (
+                                        "[SYSTEM] 你刚才这一轮的回复和上一轮几乎一模一样。"
+                                        "请不要再重复输出'我的计划 / 现在开始执行第一步'这类文字。"
+                                        "下一轮必须做下面之一：\n"
+                                        "  (a) 基于上一轮 tool_result 说出结论或下一步（例如"
+                                        "'上次搜索得到 X，我现在查 Y'）；\n"
+                                        "  (b) 调 plan_update(action='create_plan', ...) 把计划"
+                                        "固化（带 llm_purpose 字段），或 plan_update(complete_step);\n"
+                                        "  (c) 直接调下一个 tool（web_search / read_file / bash / mcp_call 等）。\n"
+                                        "禁止再用 Markdown checkbox 列计划当作输出。"
+                                    )
+                                    self.messages.append({
+                                        "role": "system",
+                                        "content": _corrective,
+                                        "_dynamic": True,
+                                        "_source": "dup_guard",
+                                    })
+                                if _dup_count >= 2:
+                                    # 2nd duplicate — give up this turn and
+                                    # emit a user-facing warning (so the chat
+                                    # doesn't just go silent after suppress).
+                                    logger.error(
+                                        "Agent %s: 2 consecutive duplicates "
+                                        "— aborting turn", self.id[:8])
+                                    _dup_abort = True
+                            else:
+                                self._dup_iter_count = 0
+                        self._last_iter_content = _curr
+                    except Exception as _dup_err:
+                        logger.debug("dup-guard skipped: %s", _dup_err)
+
+                    if _dup_abort:
+                        from .agent_types import AgentEvent
+                        _warn = ("⚠️ 检测到连续重复输出。已停止执行。"
+                                 "建议切换到更强的 LLM（配置云端 model 并勾选 auto_route），"
+                                 "或输入 /new 清空上下文重试。")
+                        evt = AgentEvent(time.time(), "message",
+                                         {"role": "assistant", "content": _warn})
+                        self._log(evt.kind, evt.data)
+                        _emit(evt)
+                        self.messages.append({"role": "assistant",
+                                              "content": _warn,
+                                              "_source": "dup_guard"})
+                        break
+
+                    if content and not _suppress_display:
                         final_content = content
                         from .agent_types import AgentEvent
                         evt = AgentEvent(time.time(), "message",
@@ -1018,6 +1088,12 @@ class AgentExecutionMixin:
                     # tool_calls here is already normalised.
 
                     if not tool_calls:
+                        if _suppress_display:
+                            # Duplicate final-response with no tool_calls —
+                            # don't break so the next iteration (with the
+                            # corrective system msg injected above) gets a
+                            # chance to actually do something different.
+                            continue
                         # Final response — ensure we always emit something
                         if not content and final_content:
                             # LLM returned empty final response but we had
@@ -1033,64 +1109,8 @@ class AgentExecutionMixin:
                                               "_source": "llm"})
                         break
 
-                    # Duplicate-output detector: if this iteration's content
-                    # is near-identical to the previous iteration's content,
-                    # the LLM is stuck "re-narrating the plan" instead of
-                    # making progress based on prior tool_results. Inject a
-                    # corrective system message so the next iteration sees
-                    # explicit "stop repeating, commit to action" guidance.
-                    try:
-                        _prev = str(getattr(self, "_last_iter_content", "") or "")
-                        _curr = str(content or "")
-                        if _prev and _curr and len(_curr) > 40:
-                            _sim = _text_similarity(_prev, _curr)
-                            if _sim >= 0.85:
-                                _dup_count = int(getattr(
-                                    self, "_dup_iter_count", 0)) + 1
-                                self._dup_iter_count = _dup_count
-                                logger.warning(
-                                    "Agent %s: duplicate narration "
-                                    "detected (similarity=%.2f, dup#%d) — "
-                                    "injecting corrective meta",
-                                    self.id[:8], _sim, _dup_count)
-                                _corrective = (
-                                    "[SYSTEM] 你刚才这一轮的回复和上一轮几乎一模一样。"
-                                    "请不要再重复输出'我的计划 / 现在开始执行第一步'这类文字。"
-                                    "下一轮必须做下面之一：\n"
-                                    "  (a) 基于上一轮 tool_result 说出结论或下一步（例如"
-                                    "'上次搜索得到 X，我现在查 Y'）；\n"
-                                    "  (b) 调 plan_update(action='create_plan', ...) 把计划"
-                                    "固化（带 llm_purpose 字段），或 plan_update(complete_step);\n"
-                                    "  (c) 直接调下一个 tool（web_search / read_file / bash / mcp_call 等）。\n"
-                                    "禁止再用 Markdown checkbox 列计划当作输出。"
-                                )
-                                self.messages.append({
-                                    "role": "system",
-                                    "content": _corrective,
-                                    "_dynamic": True,
-                                    "_source": "dup_guard",
-                                })
-                                if _dup_count >= 3:
-                                    # Three consecutive duplicates — this
-                                    # LLM isn't going to break out. Give
-                                    # up this turn and surface the issue.
-                                    logger.error(
-                                        "Agent %s: 3 consecutive duplicates "
-                                        "— aborting turn", self.id[:8])
-                                    final_content = (
-                                        "⚠️ 检测到连续重复输出。已停止执行。"
-                                        "建议切换到更强的 LLM（配置云端 model 并勾选 auto_route），"
-                                        "或输入 /new 清空上下文重试。"
-                                    )
-                                    break
-                            else:
-                                self._dup_iter_count = 0
-                        self._last_iter_content = _curr
-                    except Exception as _dup_err:
-                        logger.debug("dup-guard skipped: %s", _dup_err)
-
                     assistant_msg: dict = {"role": "assistant",
-                                           "content": content,
+                                           "content": "" if _suppress_display else content,
                                            "_source": "llm"}
                     assistant_msg["tool_calls"] = tool_calls
                     self.messages.append(assistant_msg)
