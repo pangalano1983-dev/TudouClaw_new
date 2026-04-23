@@ -634,7 +634,7 @@ class ExecutionStep:
     # primary LLM when calling plan_update(create_plan) with scores table
     # injected in its system prompt. Read by the per-iteration LLM resolver
     # as a category override (beats keyword detection). "" = fall back.
-    # Valid: tool-heavy | multimodal | reasoning | analysis | default
+    # Valid: tool-heavy | multimodal | reasoning | analysis | coding | default
     llm_purpose: str = ""
     llm_rationale: str = ""
 
@@ -5077,7 +5077,8 @@ Write only the summary body. Do not include any preamble or prefix."""
                         if _step is not None:
                             _hint = str(getattr(_step, "llm_purpose", "") or "").strip()
                             if _hint in ("tool-heavy", "multimodal",
-                                         "reasoning", "analysis", "default"):
+                                         "reasoning", "analysis",
+                                         "coding", "default"):
                                 category = _hint
                                 _cat_source = f"plan_step({_step.id}).llm_purpose"
                                 logger.info(
@@ -8027,7 +8028,7 @@ Write only the summary body. Do not include any preamble or prefix."""
         plan = ExecutionPlan(task_summary=task_summary)
         if steps:
             _valid_purposes = {"tool-heavy", "multimodal", "reasoning",
-                               "analysis", "default"}
+                               "analysis", "coding", "default"}
             for s in steps:
                 step = plan.add_step(
                     title=s.get("title", ""),

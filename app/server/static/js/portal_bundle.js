@@ -9746,7 +9746,7 @@ function eaToggleLlmPanel() {
 //   provider, model : standard
 //   scores  : {category: float} user-override map. Empty = use public scores from model_scores.json.
 
-var EA_CATEGORIES = ['tool-heavy', 'multimodal', 'reasoning', 'analysis', 'default'];
+var EA_CATEGORIES = ['tool-heavy', 'multimodal', 'reasoning', 'analysis', 'coding', 'default'];
 window._eaRouterScores = null;   // cached model_scores.json response
 
 async function _eaEnsureRouterScores() {

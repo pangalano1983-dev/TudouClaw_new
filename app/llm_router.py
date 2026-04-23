@@ -29,7 +29,7 @@ logger = logging.getLogger("tudou.llm_router")
 
 # Canonical category set — keep in sync with model_scores.json "categories".
 CATEGORIES = ("tool-heavy", "multimodal", "reasoning", "analysis",
-              "complex", "default")
+              "coding", "complex", "default")
 # Default score for any (model, category) pair we can't resolve.
 NEUTRAL_SCORE = 5.0
 
@@ -187,6 +187,36 @@ _TOOL_HEAVY_KEYWORDS = (
     "upload", "deploy", "push", "commit", "export", "build",
     "search", "scrape", "fetch", "crawl",
 )
+# Coding-specific triggers. Matched BEFORE tool-heavy so "帮我写一段 Python"
+# routes to code-strong models (Qwen-Coder / DeepSeek-Coder / Sonnet) instead
+# of whatever happens to top tool-heavy. Kept narrow on purpose — generic
+# "写一个" falls through to tool-heavy.
+_CODING_KEYWORDS = (
+    # CN — direct code-intent nouns / verbs
+    "代码", "写代码", "写一段代码", "写段代码", "改代码", "段代码",
+    "调试", "debug", "重构", "修 bug", "修一下bug", "fix bug",
+    "代码审查", "code review", "实现一个函数", "实现一个类",
+    "编写函数", "补全代码", "写脚本", "写一个脚本",
+    "单元测试", "写测试", "跑测试", "lint",
+    "编程", "敲代码", "撸代码",
+    # CN — language + verb combos (narrow, verb-led)
+    "写 Python", "写python", "写一段 Python", "用 Python 写",
+    "用 JS 写", "用 Go 写", "用 Rust 写", "用 Java 写",
+    "Python 函数", "Python函数", "JavaScript 函数", "TypeScript 函数",
+    # EN — direct
+    "write code", "write a function", "write a class", "write a script",
+    "write a method", "implement a function", "implement a class",
+    "implement a method", "implement function", "implement class",
+    "code a function", "code up", "refactor", "unit test", "pytest",
+    "jest", "code snippet", "programming", "fix the bug", "debugging",
+    "a function that", "a function to", "a class that", "a script that",
+    # Strong code-file / code-symbol signals
+    ".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java",
+    ".cpp", ".c ", ".h ", ".swift", ".kt",
+    "def ", "class ", "import ", "from ", "async def", "return ",
+    "function(", "=>", "TypeError", "ValueError", "NullPointer",
+    "stacktrace", "stack trace", "traceback",
+)
 
 
 def _message_text(user_message: Any) -> str:
@@ -235,21 +265,28 @@ def detect_category(user_message: Any = None,
 
     Priority (first match wins):
       1. multimodal  — message has image/audio parts
-      2. reasoning   — reasoning-keyword hit AND not dominated by tool-verbs
-      3. analysis    — analysis/reporting keywords
-      4. tool-heavy  — imperative verbs OR tools are already being used densely
-      5. complex     — long prompt above the threshold
-      6. default
+      2. coding      — explicit code / refactor / debug signals
+      3. reasoning   — reasoning-keyword hit AND not dominated by tool-verbs
+      4. analysis    — analysis/reporting keywords
+      5. tool-heavy  — imperative verbs OR tools are already being used densely
+      6. complex     — long prompt above the threshold
+      7. default
     """
     if _message_is_multimodal(user_message):
         return "multimodal"
 
     text = _message_text(user_message)
 
+    coding_hit = _any_keyword(text, _CODING_KEYWORDS)
     reasoning_hit = _any_keyword(text, _REASONING_KEYWORDS)
     tool_hit = _any_keyword(text, _TOOL_HEAVY_KEYWORDS)
     analysis_hit = _any_keyword(text, _ANALYSIS_KEYWORDS)
 
+    # Coding wins over tool-heavy when both are present: code-strong models
+    # (Sonnet / Qwen-Coder / DeepSeek-Coder) are usually also decent tool
+    # callers, and "写一段 Python 调 API" is more a code task than a tool task.
+    if coding_hit:
+        return "coding"
     # Reasoning wins over tool-heavy when BOTH are present and the user is
     # asking "why / compare / explain" — those require thinking regardless
     # of whether tools are involved.
@@ -370,11 +407,12 @@ def build_scores_hint_for_agent(primary_provider: str,
         return ""
     d = data or load_scores()
     rows = []
+    _HINT_CATS = ("tool-heavy", "multimodal", "reasoning",
+                  "analysis", "coding", "default")
     # Primary row
     if primary_model:
         scores = {cat: score_for_model(primary_model, cat, d)
-                  for cat in ("tool-heavy", "multimodal", "reasoning",
-                              "analysis", "default")}
+                  for cat in _HINT_CATS}
         rows.append(("primary", primary_provider or "?", primary_model, scores))
     # Extra slots
     for slot in extra_llms:
@@ -384,10 +422,7 @@ def build_scores_hint_for_agent(primary_provider: str,
                  or slot.get("model") or "?")
         mdl = str(slot.get("model") or "").strip()
         prov = str(slot.get("provider") or "").strip()
-        scores = {}
-        for cat in ("tool-heavy", "multimodal", "reasoning",
-                    "analysis", "default"):
-            scores[cat] = _slot_score(slot, cat, d)
+        scores = {cat: _slot_score(slot, cat, d) for cat in _HINT_CATS}
         rows.append((label, prov, mdl, scores))
     if len(rows) < 2:
         return ""
@@ -397,13 +432,13 @@ def build_scores_hint_for_agent(primary_provider: str,
     # the prompt can reference.
     header = ("## LLM capability scores (0-10)\n\n"
               "| label | provider/model | tool-heavy | multimodal "
-              "| reasoning | analysis | default |\n"
+              "| reasoning | analysis | coding | default |\n"
               "|-------|---------------|-----------|-----------"
-              "|-----------|----------|---------|\n")
+              "|-----------|----------|--------|---------|\n")
     for label, prov, mdl, sc in rows:
         header += (f"| {label} | {prov}/{mdl or '-'} "
                    f"| {sc['tool-heavy']:.1f} | {sc['multimodal']:.1f} "
                    f"| {sc['reasoning']:.1f} | {sc['analysis']:.1f} "
-                   f"| {sc['default']:.1f} |\n")
+                   f"| {sc['coding']:.1f} | {sc['default']:.1f} |\n")
     return header
 

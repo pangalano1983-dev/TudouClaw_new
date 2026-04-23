@@ -227,7 +227,7 @@ class ExecutionStep:
     # (with the scores table injected into its system prompt, so the
     # decision is informed). Read by the per-iteration LLM resolver to
     # override keyword-based detection. Empty = fall back to detection.
-    # Valid values: tool-heavy | multimodal | reasoning | analysis | default
+    # Valid values: tool-heavy | multimodal | reasoning | analysis | coding | default
     llm_purpose: str = ""
     llm_rationale: str = ""       # short sentence explaining the choice (optional)
 

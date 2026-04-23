@@ -889,7 +889,7 @@ TOOL_DEFINITIONS: list[dict] = [
                                     "type": "string",
                                     "enum": ["tool-heavy", "multimodal",
                                              "reasoning", "analysis",
-                                             "default"],
+                                             "coding", "default"],
                                     "description": (
                                         "STRONGLY RECOMMENDED when auto-route is enabled. "
                                         "Pick the category that best fits this step:\n"
@@ -898,6 +898,7 @@ TOOL_DEFINITIONS: list[dict] = [
                                         "  - multimodal: processes image/audio input\n"
                                         "  - reasoning:  deep comparison/weighing/derivation\n"
                                         "  - analysis:   long-form writing / synthesis / reporting\n"
+                                        "  - coding:     writing/refactoring/debugging code\n"
                                         "  - default:    everything else\n"
                                         "The system uses this + the injected model-scores table "
                                         "to pick the highest-scoring LLM for this step."
