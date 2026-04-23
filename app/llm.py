@@ -140,12 +140,15 @@ def _log_token_usage(provider: str, model: str,
         bucket["out"] += p_out
         bucket["calls"] += 1
 
-    # 同时回写到 agent.stats 累计（如果能拿到 agent 实例）
+    # 同时回写到 agent.stats 累计（如果能拿到 agent 实例）。
+    # 注意 _active_hub 是挂在 THIS module (app.llm) 的全局变量，
+    # 由 Hub.__init__ 启动时写入 (see hub/_core.py:143)。之前这里
+    # 错误地从 `app.hub` 读，导致永远拿不到 hub，agent 的 _token_stats
+    # 永远是 0 —— portal 上 TOKENS 显示 "0 / 0, 0 calls" 的 root cause。
     if agent_id:
         try:
-            from . import hub as _hub_mod
-            _h = getattr(_hub_mod, "_active_hub", None)
-            if _h:
+            _h = _active_hub  # module-local global
+            if _h is not None and hasattr(_h, "agents"):
                 _ag = _h.agents.get(agent_id)
                 if _ag is not None:
                     _stats = getattr(_ag, "_token_stats", None)
