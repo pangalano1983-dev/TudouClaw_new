@@ -47,12 +47,20 @@ import copy
 logger = logging.getLogger("tudou.llm")
 token_logger = logging.getLogger("tudou.tokens")
 
-# HTTP timeouts for chat/completions requests. Default read timeout is 3 min;
-# longer hangs almost always indicate a cloud-model stall rather than legitimate
-# long decoding, and shorter timeouts let the fallback-LLM path kick in quickly.
-# Override via env var `TUDOU_LLM_READ_TIMEOUT` (seconds) — raise it for slow
-# local models (e.g. MLX-served Qwen3.6-35B) that genuinely need more time.
-_CONNECT_TIMEOUT = 15.0
+# HTTP timeouts for chat/completions requests.
+#   CONNECT — includes TCP handshake AND the time to flush the request body
+#             to the server. 45s accommodates large prompts (50KB+ of tool
+#             schemas + message history + XML context blocks) over slow
+#             uplinks — a common cause of the "The write operation timed
+#             out" urllib3 warnings.
+#   READ    — time to receive the FIRST byte of the response. Default 3 min;
+#             longer hangs almost always mean cloud-model stall, and shorter
+#             timeouts let the fallback-LLM path kick in quickly.
+# Override via env vars TUDOU_LLM_CONNECT_TIMEOUT / TUDOU_LLM_READ_TIMEOUT.
+try:
+    _CONNECT_TIMEOUT = float(os.environ.get("TUDOU_LLM_CONNECT_TIMEOUT", "45"))
+except ValueError:
+    _CONNECT_TIMEOUT = 45.0
 try:
     _READ_TIMEOUT = float(os.environ.get("TUDOU_LLM_READ_TIMEOUT", "180"))
 except ValueError:
