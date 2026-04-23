@@ -150,13 +150,26 @@ build_analysis_report(symbol, ...)      # 一站式: 数据 + 图 + md
 
 ---
 
+## 🔄 双后端设计（重要）
+
+**AkShare 在国内部分网络环境会被东方财富/新浪源限流或阻断**。为此 `get_stock_history` 和 `get_index_history` 内置了 **baostock 备份后端**：
+
+- **Primary**：akshare（东方财富，数据全、包含财报/板块资金流等）
+- **Fallback**：baostock（国内稳定、免费免注册，但仅覆盖 K 线/基本信息/财报）
+
+Agent 无需关心切换 —— helper 自动 fallback；返回的 DataFrame 列名完全一致（`日期 / 开盘 / 收盘 / 最高 / 最低 / 成交量 / 成交额`）。成功来源记录在 `df.attrs["_source"]`，值为 `"akshare"`（默认未标）或 `"baostock"`。
+
+**只有 akshare 独有的能力**（板块资金流 / 龙虎榜 / 两融 / 实时快照）无 fallback，网络断就直接抛 `AkShareError`。
+
 ## 常见坑
 
 1. **首次 import akshare 较慢**（~1.5s）—— 正常，之后缓存
-2. **AkShare 是爬虫**，目标网站改版会导致间歇失败 → helper 内置 1 次重试，还失败抛 `AkShareError`，**停下报告用户**，不要无限重试
-3. **中文字体**：helper 自动 fallback 到系统中文字体（PingFang SC / Microsoft YaHei / Heiti SC）。如果图里中文显示为方块，说明系统无中文字体，提示用户安装
-4. **`screen_stocks` 不是后端筛选**，是拉全市场快照后在内存过滤，股票池 5000+ 时约 2-3s
-5. **周末/节假日**：龙虎榜 / 实时行情可能为空，helper 对龙虎榜做了"往前找 5 天"fallback，其他函数需 agent 处理空结果
+2. **AkShare 失败 → 自动 baostock fallback**（见上一节）。若 baostock 也挂，抛 `AkShareError` 带两边错因，**停下报告用户**，不要无限重试
+3. **baostock 的 symbol 格式不同**：akshare `"000001"` → baostock `"sz.000001"`。helper 自动转换，调用方仍传 akshare 格式（6 位纯数字 / `sh000001` 指数）
+4. **中文字体**：helper 自动 fallback 到系统中文字体（PingFang SC / Microsoft YaHei / Heiti SC）。如果图里中文显示为方块，说明系统无中文字体，提示用户安装
+5. **`screen_stocks` 不是后端筛选**，是拉全市场快照后在内存过滤，股票池 5000+ 时约 2-3s
+6. **周末/节假日**：龙虎榜 / 实时行情可能为空，helper 对龙虎榜做了"往前找 5 天"fallback，其他函数需 agent 处理空结果
+7. **baostock 首次调用会 login**（自动），进程退出 atexit 自动 logout
 
 ---
 

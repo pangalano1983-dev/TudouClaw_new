@@ -74,9 +74,10 @@ if [ "$FULL_INSTALL" = true ]; then
     $PYTHON_CMD -m pip install beautifulsoup4>=4.12 lxml>=5.0
 
     # Stock market data (akshare-stock skill)
-    # akshare: Chinese A-share / 港股 / 美股 data
+    # akshare: Chinese A-share / 港股 / 美股 data (primary)
+    # baostock: free no-auth backup for when akshare is blocked/throttled
     # matplotlib: chart rendering in skill's plot_* helpers
-    $PYTHON_CMD -m pip install akshare>=1.15 matplotlib>=3.7 tabulate>=0.9
+    $PYTHON_CMD -m pip install akshare>=1.15 baostock>=0.8 matplotlib>=3.7 tabulate>=0.9
 
     # Skill converter (skill-converter skill)
     # readability-lxml + html2text: clean HTML → markdown extraction

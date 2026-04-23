@@ -145,6 +145,108 @@ def _with_retry(fn, *args, retries: int = 2, backoff_s: float = 1.5, **kwargs):
     ) from last
 
 
+# ── baostock backend (fallback when akshare blocked) ───────────────
+# AkShare 在国内部分网络环境会被限流 / 阻断（东方财富/新浪源）。Baostock
+# 是免费免注册的备选源，API 不同但覆盖 K 线/基本信息/财报/指数。这里做
+# 一层透明 fallback: akshare 失败 → 自动切 baostock → 翻译成 akshare 兼容
+# 的 DataFrame schema 返回上游。
+
+_bs = None
+_bs_logged_in = False
+
+
+def _bs_module():
+    global _bs
+    if _bs is not None:
+        return _bs
+    try:
+        import baostock as bs
+    except ImportError as e:
+        raise AkShareError(
+            f"baostock 未安装 (pip install baostock): {e}"
+        ) from e
+    _bs = bs
+    return _bs
+
+
+def _bs_login():
+    global _bs_logged_in
+    if _bs_logged_in:
+        return
+    bs = _bs_module()
+    rs = bs.login()
+    if rs.error_code != "0":
+        raise AkShareError(
+            f"baostock login failed: {rs.error_code} {rs.error_msg}"
+        )
+    _bs_logged_in = True
+    # Register logout on exit
+    import atexit
+    atexit.register(_bs_logout)
+
+
+def _bs_logout():
+    global _bs_logged_in
+    if not _bs_logged_in or _bs is None:
+        return
+    try:
+        _bs.logout()
+    except Exception:
+        pass
+    _bs_logged_in = False
+
+
+def _to_bs_symbol(ak_symbol: str) -> str:
+    """AkShare '000001' → Baostock 'sz.000001' / 'sh.000001'.
+    深交所: 0/3 开头; 上交所: 6/5/9 开头. 指数 (sh000001 等) 已是 bs 前缀样式, 补点."""
+    s = str(ak_symbol).strip().lower()
+    if s.startswith(("sh", "sz", "bj")) and "." not in s:
+        return f"{s[:2]}.{s[2:]}"
+    if s.startswith(("sh.", "sz.", "bj.")):
+        return s
+    if not s.isdigit():
+        return s  # give up, let baostock reject it
+    # Heuristic by leading digit
+    if s[0] in ("0", "3"):
+        return f"sz.{s}"
+    if s[0] in ("6", "5", "9"):
+        return f"sh.{s}"
+    if s[0] == "4" or s[0] == "8":
+        return f"bj.{s}"
+    return f"sz.{s}"
+
+
+def _bs_rs_to_df(rs, pd):
+    """baostock ResultSet → pandas DataFrame."""
+    rows = []
+    while (rs.error_code == "0") and rs.next():
+        rows.append(rs.get_row_data())
+    return pd.DataFrame(rows, columns=rs.fields)
+
+
+def _try_backend(primary_fn, fallback_fn=None, *args, **kwargs):
+    """Run primary (usually akshare), on AkShareError try fallback (baostock).
+    If both fail, raise the primary error with fallback as chained cause."""
+    try:
+        return primary_fn(*args, **kwargs)
+    except AkShareError as pri_err:
+        if fallback_fn is None:
+            raise
+        try:
+            result = fallback_fn(*args, **kwargs)
+            # Attach a hint on the result so callers can tell it came from bs
+            try:
+                result.attrs["_source"] = "baostock"
+            except Exception:
+                pass
+            return result
+        except AkShareError as sec_err:
+            raise AkShareError(
+                f"akshare 失败 + baostock fallback 也失败.\n"
+                f"akshare: {pri_err}\nbaostock: {sec_err}"
+            ) from sec_err
+
+
 # ── data fetchers ───────────────────────────────────────────────────
 
 
@@ -167,18 +269,56 @@ def get_stock_realtime(symbol: str):
 
 def get_stock_history(symbol: str, start: str, end: str,
                       freq: str = "daily", adjust: str = "qfq"):
-    """历史 K 线. freq: daily | weekly | monthly | 60 (60 分钟) | 5 | 15 | 30.
-    adjust: qfq (前复权) | hfq (后复权) | '' (不复权)."""
-    ak = _ak_module()
-    period_map = {"daily": "daily", "weekly": "weekly", "monthly": "monthly"}
-    period = period_map.get(freq, freq)  # 分钟线直接用字符串
-    start_d = str(start).replace("-", "")
-    end_d = str(end).replace("-", "")
-    return _with_retry(
-        ak.stock_zh_a_hist,
-        symbol=str(symbol), period=period,
-        start_date=start_d, end_date=end_d, adjust=adjust,
-    )
+    """历史 K 线. freq: daily | weekly | monthly | 60/30/15/5 (分钟线).
+    adjust: qfq (前复权) | hfq (后复权) | '' (不复权).
+
+    双后端: 优先 akshare (东方财富)，失败自动 fallback 到 baostock。
+    baostock 返回的 DataFrame 列名会标准化为 akshare 风格 (日期/开盘/收盘/最高/最低/成交量/成交额)."""
+
+    def _primary():
+        ak = _ak_module()
+        period_map = {"daily": "daily", "weekly": "weekly", "monthly": "monthly"}
+        period = period_map.get(freq, freq)
+        start_d = str(start).replace("-", "")
+        end_d = str(end).replace("-", "")
+        return _with_retry(
+            ak.stock_zh_a_hist,
+            symbol=str(symbol), period=period,
+            start_date=start_d, end_date=end_d, adjust=adjust,
+        )
+
+    def _fallback():
+        _bs_login()
+        bs = _bs_module()
+        pd = _pd_module()
+        freq_map = {"daily": "d", "weekly": "w", "monthly": "m",
+                    "5": "5", "15": "15", "30": "30", "60": "60"}
+        bs_freq = freq_map.get(freq, "d")
+        adjflag = {"qfq": "2", "hfq": "1", "": "3"}.get(adjust, "3")
+        bs_sym = _to_bs_symbol(symbol)
+        rs = bs.query_history_k_data_plus(
+            bs_sym,
+            "date,open,high,low,close,volume,amount",
+            start_date=start, end_date=end,
+            frequency=bs_freq, adjustflag=adjflag,
+        )
+        if rs.error_code != "0":
+            raise AkShareError(f"baostock K 线失败: {rs.error_msg}")
+        df = _bs_rs_to_df(rs, pd)
+        if df.empty:
+            raise AkShareError(f"baostock: {bs_sym} 无数据")
+        # Normalize to akshare column names
+        df = df.rename(columns={
+            "date": "日期", "open": "开盘", "high": "最高",
+            "low": "最低", "close": "收盘", "volume": "成交量",
+            "amount": "成交额",
+        })
+        # baostock returns strings; cast numerics
+        for col in ("开盘", "最高", "最低", "收盘", "成交量", "成交额"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        return df
+
+    return _try_backend(_primary, _fallback)
 
 
 def get_stock_info(symbol: str) -> dict:
@@ -241,15 +381,46 @@ def get_sector_flow(period: str = "today"):
 
 
 def get_index_history(index: str, start: str, end: str):
-    """指数历史 K 线. index 用代码: sh000001 (上证), sz399001 (深证), sh000300 (沪深300), sh000905 (中证500)."""
-    ak = _ak_module()
-    start_d = str(start).replace("-", "")
-    end_d = str(end).replace("-", "")
-    return _with_retry(
-        ak.stock_zh_index_daily_em,
-        symbol=str(index),
-        start_date=start_d, end_date=end_d,
-    )
+    """指数历史 K 线. index 用代码: sh000001 (上证), sz399001 (深证), sh000300 (沪深300), sh000905 (中证500).
+
+    双后端: akshare (东方财富) → baostock fallback."""
+
+    def _primary():
+        ak = _ak_module()
+        start_d = str(start).replace("-", "")
+        end_d = str(end).replace("-", "")
+        return _with_retry(
+            ak.stock_zh_index_daily_em,
+            symbol=str(index),
+            start_date=start_d, end_date=end_d,
+        )
+
+    def _fallback():
+        _bs_login()
+        bs = _bs_module()
+        pd = _pd_module()
+        bs_sym = _to_bs_symbol(index)
+        rs = bs.query_history_k_data_plus(
+            bs_sym,
+            "date,open,high,low,close,volume,amount",
+            start_date=start, end_date=end,
+            frequency="d", adjustflag="3",
+        )
+        if rs.error_code != "0":
+            raise AkShareError(f"baostock 指数失败: {rs.error_msg}")
+        df = _bs_rs_to_df(rs, pd)
+        if df.empty:
+            raise AkShareError(f"baostock: 指数 {bs_sym} 无数据")
+        df = df.rename(columns={
+            "date": "date", "open": "open", "high": "high",
+            "low": "low", "close": "close", "volume": "volume",
+            "amount": "amount",
+        })
+        for col in ("open", "high", "low", "close", "volume", "amount"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        return df
+
+    return _try_backend(_primary, _fallback)
 
 
 def get_top_list(date: Optional[str] = None):
