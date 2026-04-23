@@ -239,6 +239,27 @@ class ShadowRecorder:
                             c for c in candidates
                             if c.get("kind") not in _NON_DELIVERABLE_KINDS
                         ]
+                    # Reserved-name filter — skip workspace config files
+                    # (Project.md / Tasks.md / Skills.md / MCP.md /
+                    # Scheduled.md) and skill preview markdowns that are
+                    # already injected into the system prompt via XML
+                    # blocks. They're not deliverables, they're config.
+                    if candidates:
+                        _RESERVED_CFG = {
+                            "Project.md", "Tasks.md", "Skills.md",
+                            "MCP.md", "Scheduled.md",
+                        }
+
+                        def _keep(c) -> bool:
+                            val = str(c.get("value", "") or "")
+                            base = val.rsplit("/", 1)[-1] if val else ""
+                            if base in _RESERVED_CFG:
+                                return False
+                            if base.endswith("-skill.md") or base == "skill-full.md":
+                                return False
+                            return True
+
+                        candidates = [c for c in candidates if _keep(c)]
                     if not candidates:
                         # still record a tool turn so we can audit
                         self.state.conversation.append(
@@ -693,10 +714,51 @@ class ShadowRecorder:
                     ArtifactKind.DOCUMENT,
                     ArtifactKind.ARCHIVE,
                 }
+                # Reserved workspace filenames — these are config files
+                # already injected into the system prompt via XML blocks
+                # (<project>/<tasks>/<skills>/<mcp_servers>/<scheduled_tasks>).
+                # Rendering them as chat attachments is pure noise, since
+                # the agent already reads them every turn via the prompt.
+                _RESERVED_NAMES = {
+                    "Project.md", "Tasks.md", "Skills.md",
+                    "MCP.md", "Scheduled.md",
+                }
+                # Reserved path fragments — infrastructure directories whose
+                # contents are NEVER deliverables (spill cache, skill source,
+                # tool_outputs). Matches anywhere in the artifact's value/url.
+                _INFRA_PATH_FRAGMENTS = (
+                    "/tool_outputs/",
+                    "/.tudou_claw/",
+                    "/workspaces/meetings/",  # shared meeting workspace —
+                    # files the agent reads, not produces
+                )
+
+                def _is_reserved(art) -> bool:
+                    name = (getattr(art, "label", "") or "").strip()
+                    if name in _RESERVED_NAMES:
+                        return True
+                    val = str(getattr(art, "value", "") or "")
+                    base = val.rsplit("/", 1)[-1] if val else ""
+                    if base in _RESERVED_NAMES:
+                        return True
+                    for frag in _INFRA_PATH_FRAGMENTS:
+                        if frag in val:
+                            return True
+                    # Skill preview / draft markdowns that sometimes leak
+                    # through (LLM paste of prompt templates, etc.)
+                    if base.endswith("-skill.md") or base == "skill-full.md":
+                        return True
+                    return False
+
                 out: List[dict] = []
                 for aid in last_assistant.artifact_refs:
                     art = self.state.artifacts.get(aid)
                     if art is None or art.kind not in file_kinds:
+                        continue
+                    if _is_reserved(art):
+                        logger.debug(
+                            "shadow: skip reserved ref %s (%s)",
+                            aid, getattr(art, "label", ""))
                         continue
                     ref = self._artifact_to_ref(aid)
                     if ref is not None:
