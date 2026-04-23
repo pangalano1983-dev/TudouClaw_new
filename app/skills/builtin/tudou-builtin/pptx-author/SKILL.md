@@ -18,6 +18,31 @@ metadata:
 
 # pptx-author — 用 python-pptx 脚本生成 PPT（替代 create_pptx_advanced）
 
+## ⚠️ 防幻觉 — 先读这一段
+
+**这个 skill 没有任何 CLI 脚本**。不存在 `md2pptx.sh` / `md2pptx.py` /
+`convert.sh` / `md_to_pptx` / `pptx_gen.py` / 任何类似的 one-shot 转换命令。
+也**不要** `ls` / `find` 去找这些 —— 找了也只会浪费轮次然后回到这里。
+
+目录只有两个文件：
+
+```
+pptx-author/
+├── SKILL.md           ← 你现在读的这份
+└── _pptx_helpers.py   ← python-pptx 的封装库（函数导入用）
+```
+
+**工作流（没有捷径）**：
+1. 你自己写一段 python 脚本（`build_report.py` 或类似）
+2. 首行用 `from _pptx_helpers import *`（bash 工具已注入 PYTHONPATH）
+3. `bash` 工具跑 `python build_report.py`
+4. `bash` 工具跑 `python -c "from _pptx_helpers import verify_slides; verify_slides('out.pptx')"`
+
+用户说"把这份 md 转成 PPT"，正确动作是**立刻开始写 python 脚本**（可以用
+`parse_md_outline` 解析 md 结构），**不是**去找转换工具。
+
+---
+
 ## 📐 单页布局硬规范（verify_slides 会检测）
 
 生成出来的每一页都会经过 `verify_slides(strict=True)`，违反下列任意一条 → `SystemExit(2)` → bash ❌，你必须改。
