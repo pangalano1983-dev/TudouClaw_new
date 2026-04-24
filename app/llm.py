@@ -2005,7 +2005,41 @@ def _openai_chat(base_url: str, api_key: str,
                 err_msg = resp.text[:500]
             logger.error("OpenAI-compat %d error (model=%s, url=%s): %s",
                          resp.status_code, model, url, err_msg)
-            resp.raise_for_status()
+            # ── DeepSeek thinking-mode auto-recovery ──
+            # Error: "The reasoning_content in the thinking mode must be
+            # passed back". We can't always guarantee reasoning_content
+            # survives history transforms (memory compression, /new reset,
+            # cross-provider history from glm, etc.). Fallback: retry
+            # ONCE with history pruned to system + last user message —
+            # loses context but at least doesn't break the chat.
+            if (resp.status_code == 400
+                    and "reasoning_content" in str(err_msg).lower()):
+                logger.warning(
+                    "DeepSeek reasoning_content required but missing in "
+                    "history; retrying with trimmed messages (system + "
+                    "last user) — context will be reduced."
+                )
+                trimmed: list[dict] = []
+                # keep system messages
+                for m in safe_messages:
+                    if m.get("role") == "system":
+                        trimmed.append(m)
+                # keep only the last user message
+                for m in reversed(safe_messages):
+                    if m.get("role") == "user":
+                        trimmed.append(m)
+                        break
+                payload["messages"] = trimmed
+                resp2 = pool.request_with_retry(
+                    _provider_id, "POST", url, model=model,
+                    headers=headers, json=payload, timeout=_TIMEOUT)
+                if resp2.status_code < 400:
+                    resp = resp2
+                else:
+                    # Give up — surface original error
+                    resp.raise_for_status()
+            else:
+                resp.raise_for_status()
         data = resp.json()
         # ── Token usage logging ──
         try:
