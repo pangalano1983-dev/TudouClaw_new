@@ -22,6 +22,148 @@ from .agent_types import _ensure_str_content
 logger = logging.getLogger("tudou.agent")
 
 
+def _stream_chat_to_response(llm_mod, messages: list[dict],
+                              tools: list[dict] | None,
+                              *,
+                              provider: str, model: str,
+                              temperature: float | None,
+                              on_event: Any = None,
+                              is_aborted: Any = None) -> dict:
+    """Stream via chat_stream_events, emit text_delta to UI, collapse
+    into a chat_no_stream-shaped response dict so downstream code is
+    agnostic to stream vs non-stream.
+
+    Emits on_event({type: text_delta, content: chunk}) in real time for
+    each text token; tool_call JSON is NOT emitted (would be gibberish
+    in UI). Stream errors fall through to chat_no_stream with the same
+    payload — caller shouldn't see streaming as a new failure mode.
+
+    Returns: {
+        "message": {
+            "role": "assistant",
+            "content": <full text>,
+            "tool_calls": [...],           # present iff tool_use events fired
+            "reasoning_content": <str>,    # present iff model emitted it
+        },
+        "stop_reason": "end_turn|tool_use|length|...",
+    }
+    """
+    try:
+        AE = None
+        try:
+            from .agent_types import AgentEvent as AE
+        except Exception:
+            AE = None
+
+        text_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        # Accumulate tool_use stream events into canonical tool_calls
+        # shape matching chat_no_stream output. key = tool_use id
+        tool_buffers: dict[str, dict] = {}
+        tool_order: list[str] = []  # preserve arrival order
+        stop_reason = "end_turn"
+
+        for ev in llm_mod.chat_stream_events(
+                messages, tools=tools,
+                provider=provider, model=model,
+                temperature=temperature):
+            if callable(is_aborted) and is_aborted():
+                break
+            etype = ev.get("type")
+            if etype == "text_delta":
+                chunk = ev.get("text") or ""
+                if chunk:
+                    text_parts.append(chunk)
+                    # Live-emit text to UI for incremental rendering
+                    if on_event and AE is not None:
+                        try:
+                            on_event(AE(time.time(), "text_delta",
+                                         {"content": chunk}))
+                        except Exception:
+                            pass
+            elif etype == "reasoning_delta":
+                rc = ev.get("text") or ""
+                if rc:
+                    reasoning_parts.append(rc)
+            elif etype == "tool_use_start":
+                tid = ev.get("id") or f"call_{len(tool_buffers)}"
+                tool_buffers[tid] = {
+                    "id": tid,
+                    "type": "function",
+                    "function": {
+                        "name": ev.get("name") or "",
+                        "arguments": "",
+                    },
+                }
+                tool_order.append(tid)
+            elif etype == "tool_input_delta":
+                tid = ev.get("id") or ""
+                partial = ev.get("partial_json") or ""
+                if tid in tool_buffers and partial:
+                    tool_buffers[tid]["function"]["arguments"] += partial
+            elif etype == "tool_use_complete":
+                tid = ev.get("id") or ""
+                # Some providers only send _complete (no incremental
+                # deltas). Use the full input in that case.
+                inp = ev.get("input")
+                name = ev.get("name") or ""
+                if tid not in tool_buffers:
+                    tool_buffers[tid] = {
+                        "id": tid or f"call_{len(tool_buffers)}",
+                        "type": "function",
+                        "function": {"name": name, "arguments": ""},
+                    }
+                    tool_order.append(tid)
+                if inp is not None:
+                    try:
+                        tool_buffers[tid]["function"]["arguments"] = (
+                            json.dumps(inp, ensure_ascii=False)
+                            if not isinstance(inp, str) else inp
+                        )
+                    except Exception:
+                        tool_buffers[tid]["function"]["arguments"] = str(inp)
+                if name and not tool_buffers[tid]["function"]["name"]:
+                    tool_buffers[tid]["function"]["name"] = name
+            elif etype == "usage":
+                # Token-usage accounting handled inside chat_stream_events'
+                # provider callbacks via _log_token_usage; no-op here.
+                pass
+            elif etype == "stop":
+                stop_reason = ev.get("reason") or "end_turn"
+            elif etype == "error":
+                raise RuntimeError(ev.get("message") or "stream error")
+
+        tool_calls = [tool_buffers[tid] for tid in tool_order]
+        msg: dict = {
+            "role": "assistant",
+            "content": "".join(text_parts),
+        }
+        if tool_calls:
+            # Ensure arguments are well-formed JSON strings. Some providers
+            # emit empty strings for no-arg tools; downstream expects "{}".
+            for tc in tool_calls:
+                args = tc["function"].get("arguments") or ""
+                if not args.strip():
+                    tc["function"]["arguments"] = "{}"
+            msg["tool_calls"] = tool_calls
+        if reasoning_parts:
+            msg["reasoning_content"] = "".join(reasoning_parts)
+        return {"message": msg, "stop_reason": stop_reason}
+
+    except Exception as stream_err:
+        # Fall through to non-streaming so streaming is never a new
+        # failure surface vs the old path.
+        logger.info(
+            "chat_stream_events failed (%s) — falling back to chat_no_stream",
+            type(stream_err).__name__,
+        )
+        return llm_mod.chat_no_stream(
+            messages, tools=tools,
+            provider=provider, model=model,
+            temperature=temperature,
+        )
+
+
 def _text_similarity(a: str, b: str) -> float:
     """Character-ngram Jaccard similarity — works for CN + EN.
 
@@ -980,15 +1122,24 @@ class AgentExecutionMixin:
                         except Exception:
                             pass  # Fall through
 
-                    # Non-streaming path (with tools support)
+                    # Streaming path (with tool_use support).
+                    # Prefer chat_stream_events so the UI can render text
+                    # chunks incrementally (ChatGPT-like live typing) AND
+                    # we preserve tool_calls. Collapsed into a single
+                    # response dict (identical shape to chat_no_stream)
+                    # so the downstream parsing code stays unchanged.
+                    # Falls back to chat_no_stream if streaming fails.
                     if _is_aborted():
                         final_content = final_content or "[Aborted]"
                         break
                     try:
-                        response = llm.chat_no_stream(
-                            _msgs_to_send, tools=tool_defs,
-                            provider=_eff_provider, model=_eff_model,
+                        response = _stream_chat_to_response(
+                            llm, _msgs_to_send, tool_defs,
+                            provider=_eff_provider,
+                            model=_eff_model,
                             temperature=self._effective_temperature(),
+                            on_event=_emit,
+                            is_aborted=_is_aborted,
                         )
                     except Exception as llm_err:
                         # Fallback path — if this agent has a fallback

@@ -4031,6 +4031,86 @@ function _renderCompactToolCall(data) {
   );
 }
 
+// Read-only探查工具 — 用户不关心每一个, 只要知道"读了 N 个文件"
+// (和后端的 PARALLEL_SAFE_TOOLS 保持一致, 但这是视觉折叠, 不影响
+// 执行并发)
+var _READONLY_TOOL_NAMES = {
+  'read_file': 1, 'glob_files': 1, 'search_files': 1,
+  'memory_recall': 1, 'knowledge_lookup': 1,
+  'web_search': 1, 'web_fetch': 1,
+  'get_skill_guide': 1, 'list_skills': 1,
+  'datetime_calc': 1, 'json_process': 1, 'text_process': 1,
+};
+
+function _isReadOnlyToolCall(evt) {
+  if (!evt || evt.kind !== 'tool_call') return false;
+  var n = (evt.data && evt.data.name) || '';
+  return !!_READONLY_TOOL_NAMES[n];
+}
+
+// 把连续 ≥3 个只读工具调用折叠成一行 summary. 返回 new array of
+// blocks, 其中连续只读段替换为 {kind: '_readonly_group', count, names, firstArgs}.
+function _collapseReadOnlyToolCalls(blocks) {
+  if (!blocks || !blocks.length) return blocks || [];
+  var out = [];
+  var run = [];   // buffer of consecutive readonly events
+  var flushRun = function() {
+    if (run.length >= 3) {
+      // Group by tool name for a compact summary
+      var counts = {};
+      var firstArgs = {};
+      run.forEach(function(ev) {
+        var nm = ev.data && ev.data.name || '?';
+        counts[nm] = (counts[nm] || 0) + 1;
+        if (!firstArgs[nm]) firstArgs[nm] = ev.data && ev.data.args || '';
+      });
+      out.push({
+        kind: '_readonly_group',
+        data: {
+          count: run.length,
+          counts: counts,
+          firstArgs: firstArgs,
+        },
+      });
+    } else {
+      // <3 — just keep them individually
+      run.forEach(function(ev) { out.push(ev); });
+    }
+    run = [];
+  };
+  blocks.forEach(function(evt) {
+    if (_isReadOnlyToolCall(evt)) {
+      run.push(evt);
+    } else {
+      flushRun();
+      out.push(evt);
+    }
+  });
+  flushRun();
+  return out;
+}
+
+function _renderReadOnlyGroup(data) {
+  // Single-line summary. Expandable on click to show individual names.
+  var counts = data.counts || {};
+  var total = data.count || 0;
+  var parts = Object.keys(counts).map(function(n) {
+    return _escHtml(n) + (counts[n] > 1 ? '×' + counts[n] : '');
+  });
+  var summary = parts.join(', ');
+  // Full arg preview per tool type for tooltip
+  var tip = Object.keys(data.firstArgs || {}).map(function(n) {
+    return n + ': ' + String(data.firstArgs[n] || '').slice(0, 80);
+  }).join(' | ');
+  return (
+    '<div style="display:flex;gap:4px;padding:2px 0;font-size:12px;font-family:ui-monospace,monospace;opacity:0.75" title="' + _escHtml(tip) + '">' +
+      '<span style="color:var(--text3);flex-shrink:0">📖</span>' +
+      '<span style="color:var(--text2);flex-shrink:0">查了 ' + total + ' 处</span>' +
+      '<span style="color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + summary + '</span>' +
+    '</div>'
+  );
+}
+
 // Map plan_step.status → visual chip (icon + color).
 var _PLAN_STEP_CHIP = {
   'done':        {icon: '✓', color: 'var(--success,#5cb85c)'},
@@ -4138,6 +4218,10 @@ function _appendMessageBlocks(agentId, msgDiv, blocks) {
   if (!blocks || !blocks.length) return;
   var toolLog = null;  // Lazy-init — only created when we have a tool_call to show.
   var skillBar = null; // Lazy-init — only created if we have skill_match events.
+  // Collapse consecutive read-only探查 tool_calls into a single summary row
+  // so users aren't scrolling past 15 "read_file" cards. Write-type tools
+  // (write_file / bash / plan_update) stay individually visible.
+  blocks = _collapseReadOnlyToolCalls(blocks);
   blocks.forEach(function(evt) {
     if (!evt || !evt.kind) return;
     if (evt.kind === 'tool_call') {
@@ -4147,6 +4231,13 @@ function _appendMessageBlocks(agentId, msgDiv, blocks) {
         msgDiv.appendChild(toolLog);
       }
       toolLog.insertAdjacentHTML('beforeend', _renderCompactToolCall(evt.data || {}));
+    } else if (evt.kind === '_readonly_group') {
+      if (!toolLog) {
+        toolLog = document.createElement('div');
+        toolLog.style.cssText = 'margin-top:8px;padding:6px 10px;background:color-mix(in srgb, var(--text) 3%, transparent);border-left:2px solid var(--primary);border-radius:4px';
+        msgDiv.appendChild(toolLog);
+      }
+      toolLog.insertAdjacentHTML('beforeend', _renderReadOnlyGroup(evt.data || {}));
     } else if (evt.kind === 'skill_match') {
       // Skill badges render in a single horizontal bar above the
       // tool log, so users see "the agent brought X skill to bear"
