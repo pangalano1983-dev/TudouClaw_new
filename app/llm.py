@@ -360,29 +360,45 @@ def _sanitize_messages_for_openai(messages: list[dict]) -> list[dict]:
         sanitized.append(clean)
 
     # --- Pass 3: enforce tool_call ↔ tool message pairing ---
-    # Strict APIs require:
-    #   (a) every `tool` message's tool_call_id to reference a tool_call id
-    #       in an assistant message that appears BEFORE it
-    #   (b) every assistant tool_call id to be resolved by a following
-    #       tool message (otherwise the assistant message is orphaned and
-    #       some providers reject the request)
-    # We drop orphaned tool messages first, then drop / strip assistant
-    # tool_calls whose ids are never resolved.
-    known_ids: set = set()
+    # Strict APIs (DeepSeek, Volces Ark, OpenAI) require:
+    #   (a) tool messages must appear IMMEDIATELY after the assistant message
+    #       that produced the matching tool_calls — any user / system /
+    #       assistant-without-tool_calls in between breaks the pairing
+    #   (b) every tool_call_id in a tool message must match a tool_calls[].id
+    #       in the most recent assistant block
+    #   (c) assistant tool_calls with no following tool message are orphaned
+    #
+    # Old logic only did (b) — tool was kept whenever its id had EVER been
+    # seen in the history. DeepSeek rejects that: `Messages with role 'tool'
+    # must be a response to a preceding message with 'tool_calls'`.
+    #
+    # New: track the "active" tool_call block. Cleared by any non-tool, non-
+    # assistant-with-tool_calls message. Tool only survives if its id is in
+    # the currently active block.
+    active_ids: set = set()       # ids from the *most recent* assistant.tool_calls
     final: list = []
     for m in sanitized:
         r = m.get("role")
-        if r == "assistant" and m.get("tool_calls"):
-            for tc in m["tool_calls"]:
-                tid = tc.get("id") or ""
-                if tid:
-                    known_ids.add(tid)
+        if r == "assistant":
+            if m.get("tool_calls"):
+                # new active block — replace any previous
+                active_ids = {tc.get("id") or "" for tc in m["tool_calls"]}
+                active_ids.discard("")
+            else:
+                # plain text assistant — closes any open tool block
+                active_ids = set()
             final.append(m)
         elif r == "tool":
-            if m.get("tool_call_id") in known_ids:
+            tcid = m.get("tool_call_id") or ""
+            if tcid and tcid in active_ids:
                 final.append(m)
-            # else: orphaned — drop it
+                # NB: don't clear active_ids; multi-call blocks can have
+                # several tool responses in a row for different ids
+            # else: orphaned (no active assistant.tool_calls right before
+            # it, or tool_call_id not in current block) — drop entirely
         else:
+            # user / system / other — closes any open tool block
+            active_ids = set()
             final.append(m)
 
     # Pass 3b: strip assistant messages whose every tool_call has no
