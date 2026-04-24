@@ -2003,8 +2003,6 @@ def _openai_chat(base_url: str, api_key: str,
                     err_msg = str(err_msg)[:500]
             except Exception:
                 err_msg = resp.text[:500]
-            logger.error("OpenAI-compat %d error (model=%s, url=%s): %s",
-                         resp.status_code, model, url, err_msg)
             # ── DeepSeek thinking-mode auto-recovery ──
             # Error: "The reasoning_content in the thinking mode must be
             # passed back". We can't always guarantee reasoning_content
@@ -2012,12 +2010,22 @@ def _openai_chat(base_url: str, api_key: str,
             # cross-provider history from glm, etc.). Fallback: retry
             # ONCE with history pruned to system + last user message —
             # loses context but at least doesn't break the chat.
-            if (resp.status_code == 400
-                    and "reasoning_content" in str(err_msg).lower()):
-                logger.warning(
-                    "DeepSeek reasoning_content required but missing in "
-                    "history; retrying with trimmed messages (system + "
-                    "last user) — context will be reduced."
+            #
+            # When auto-recovery is attempted the FIRST-ATTEMPT error is
+            # expected/handled, so log at DEBUG, not ERROR. Only promote
+            # to ERROR if recovery also fails.
+            is_recoverable = (
+                resp.status_code == 400
+                and "reasoning_content" in str(err_msg).lower()
+            )
+            if is_recoverable:
+                logger.debug(
+                    "OpenAI-compat %d (recoverable, model=%s): %s",
+                    resp.status_code, model, err_msg)
+                logger.info(
+                    "DeepSeek thinking-mode: history missing "
+                    "reasoning_content — retrying with trimmed messages "
+                    "(system + last user)."
                 )
                 trimmed: list[dict] = []
                 # keep system messages
@@ -2036,9 +2044,18 @@ def _openai_chat(base_url: str, api_key: str,
                 if resp2.status_code < 400:
                     resp = resp2
                 else:
-                    # Give up — surface original error
+                    # Recovery also failed — NOW log the original error
+                    # as ERROR so ops can see it.
+                    logger.error(
+                        "OpenAI-compat %d error after recovery retry "
+                        "(model=%s, url=%s): %s",
+                        resp.status_code, model, url, err_msg)
                     resp.raise_for_status()
             else:
+                # Non-recoverable — log ERROR and raise.
+                logger.error(
+                    "OpenAI-compat %d error (model=%s, url=%s): %s",
+                    resp.status_code, model, url, err_msg)
                 resp.raise_for_status()
         data = resp.json()
         # ── Token usage logging ──
