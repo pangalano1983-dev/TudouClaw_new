@@ -1125,6 +1125,80 @@ class AgentExecutionMixin:
                         else:
                             self._dup_iter_count = 0
                         self._last_iter_content = _curr
+
+                        # ── Arm 3: same-tool-signature loop ──
+                        # User-observed failure: agent calls glob_files(**/*)
+                        # + memory_recall(same query) 20+ times in a row
+                        # while saying "让我先看看..." between each. Each
+                        # call uses the same args → same result → agent
+                        # loops. Detect: identical (tool_name, args_key)
+                        # signature repeated ≥ 3 times → abort.
+                        if tool_calls:
+                            try:
+                                import json as _json
+                                sigs = []
+                                for tc in tool_calls:
+                                    fn = tc.get("function", {}) or {}
+                                    nm = fn.get("name", "?")
+                                    args = fn.get("arguments", "")
+                                    if isinstance(args, dict):
+                                        args = _json.dumps(
+                                            args, sort_keys=True,
+                                            ensure_ascii=False)
+                                    elif not isinstance(args, str):
+                                        args = str(args)
+                                    sigs.append(f"{nm}:{args[:200]}")
+                                # Track a rolling window of last N signatures
+                                history = getattr(
+                                    self, "_tool_sig_history", None)
+                                if history is None:
+                                    history = []
+                                    self._tool_sig_history = history
+                                for s in sigs:
+                                    history.append(s)
+                                if len(history) > 20:
+                                    del history[:-20]
+                                # Count consecutive trailing repeats of the
+                                # most recent signature.
+                                if history:
+                                    tail = history[-1]
+                                    repeat = 0
+                                    for s in reversed(history):
+                                        if s == tail:
+                                            repeat += 1
+                                        else:
+                                            break
+                                    if repeat >= 3:
+                                        logger.error(
+                                            "Agent %s: same tool signature "
+                                            "called %d times in a row (%s) "
+                                            "— aborting turn",
+                                            self.id[:8], repeat, tail[:80])
+                                        self._tool_sig_history = []
+                                        self.messages.append({
+                                            "role": "system",
+                                            "content": (
+                                                "[SYSTEM] 你刚才连续 "
+                                                f"{repeat} 次调用同一个工具"
+                                                "带相同参数，陷入死循环。"
+                                                "这个工具对这组参数**已经返回"
+                                                "过结果**，再调不会有新信息。\n"
+                                                "请立刻做下面之一：\n"
+                                                "  (a) 用**不同的参数**调工具"
+                                                "（换关键词 / 换路径）\n"
+                                                "  (b) 用**不同的工具**\n"
+                                                "  (c) 承认信息不足，向用户"
+                                                "**直接提问**而不是再调工具\n"
+                                                "  (d) 基于已有信息**直接交付**，"
+                                                "不再探查"
+                                            ),
+                                            "_dynamic": True,
+                                            "_source": "tool_loop_guard",
+                                        })
+                                        _dup_abort = True
+                            except Exception as _loop_err:
+                                logger.debug(
+                                    "tool-loop-guard skipped: %s", _loop_err)
                     except Exception as _dup_err:
                         logger.debug("dup-guard skipped: %s", _dup_err)
 
