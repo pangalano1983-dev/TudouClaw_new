@@ -5127,12 +5127,8 @@ async function loadAuditLog() {
 // ============ Tokens ============
 function renderTokens(container) {
   const c = container || document.getElementById('content');
-  c.innerHTML = `
-    <div style="margin-bottom:20px">
-      <button class="btn btn-primary" onclick="showModal('create-token')">+ Create Token</button>
-    </div>
-    <div id="tokens-list"></div>
-  `;
+  // + Create Token lives in topbar (settings tab handler)
+  c.innerHTML = `<div id="tokens-list"></div>`;
   loadTokens();
 }
 
@@ -6912,12 +6908,12 @@ async function deleteTemplate(templateId) {
 async function renderScheduler() {
   const content = document.getElementById('content');
   content.style.padding = '24px';
-  // Inline header with title + action button (top-right) — matches other tabs
+  // "+ New Job" lives in the topbar (showView handler). Keep header
+  // title-only to avoid button duplication.
   const schedHeader = ''
-    + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">'
-    + '  <div><h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:22px;font-weight:800;margin:0">定时任务</h2>'
-    + '    <p style="font-size:12px;color:var(--text3);margin-top:4px">Scheduled Jobs · 按 cron 或间隔自动触发 agent</p></div>'
-    + '  <button class="btn btn-primary btn-sm" onclick="showCreateJob()"><span class="material-symbols-outlined" style="font-size:14px">add</span> New Job</button>'
+    + '<div style="margin-bottom:20px">'
+    + '  <h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:22px;font-weight:800;margin:0">定时任务</h2>'
+    + '  <p style="font-size:12px;color:var(--text3);margin-top:4px">Scheduled Jobs · 按 cron 或间隔自动触发 agent</p>'
     + '</div>';
   content.innerHTML = schedHeader + '<div style="color:var(--text3);padding:20px">Loading scheduled tasks...</div>';
   let jobsData, presetsData, agentsData;
@@ -7246,11 +7242,10 @@ async function renderMCPConfig(container) {
 
   let html = '';
 
-  // Page header with Add button
-  html += '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:28px">';
-  html += '<div><h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:28px;font-weight:800;letter-spacing:-0.5px">MCP Configuration</h2>';
-  html += '<p style="color:var(--text2);font-size:14px;margin-top:4px">Manage Model Context Protocol server bindings and catalog.</p></div>';
-  html += '<button class="btn btn-primary" onclick="showAddMCP()" style="flex-shrink:0"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle;margin-right:4px">add</span>Add MCP</button>';
+  // Page header (Add MCP button lives in topbar — single source of truth)
+  html += '<div style="margin-bottom:28px">';
+  html += '<h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:28px;font-weight:800;letter-spacing:-0.5px">MCP Configuration</h2>';
+  html += '<p style="color:var(--text2);font-size:14px;margin-top:4px">Manage Model Context Protocol server bindings and catalog.</p>';
   html += '</div>';
 
   // MCP Catalog — 分 Global / Node 两组
@@ -12769,11 +12764,10 @@ async function renderWorkflows() {
 
     var html = '<div style="max-width:1200px;margin:0 auto">';
 
-    // ── Header ──
-    html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">';
-    html += '<div><h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:24px;font-weight:800;margin:0">Workflows</h2>';
-    html += '<p style="font-size:12px;color:var(--text3);margin-top:4px">选择模板快速创建，或自定义工作流流程</p></div>';
-    html += '<button class="btn btn-primary btn-sm" onclick="showCreateWorkflowModal()"><span class="material-symbols-outlined" style="font-size:14px">add</span> 自定义创建</button>';
+    // ── Header ──（"自定义创建" 按钮在 topbar，这里只保留标题）
+    html += '<div style="margin-bottom:20px">';
+    html += '<h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:24px;font-weight:800;margin:0">Workflows</h2>';
+    html += '<p style="font-size:12px;color:var(--text3);margin-top:4px">选择模板快速创建，或自定义工作流流程</p>';
     html += '</div>';
 
     // ── My Workflows (已创建的) ──
