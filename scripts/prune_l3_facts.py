@@ -33,6 +33,17 @@ _GARBAGE_PATTERNS = [
     re.compile(r"^\[?[^\]]*\]?\s*(最终结果[:：])?\s*完成\s*\d+\s*次[^。]*和\s*\d+\s*次"),
     # "[步骤N] ..." — per-step action_plan (deprecated writer)
     re.compile(r"^\[步骤\s*\d+\]"),
+    # "[当前日期] 操作执行完毕，计划与命令均已成功处理，状态已更新，无失败原因"
+    # — LLM aggregator placeholder when it had nothing concrete to say
+    re.compile(r"操作执行完毕"),
+    # "未提供日期，最终结果未明确" variants
+    re.compile(r"未提供日期"),
+    re.compile(r"最终结果未明确"),
+    # "状态已更新，无失败原因" — generic non-content summary
+    re.compile(r"状态已?更新.{0,8}无失败"),
+    # "执行了该步骤" / "步骤完成无异常" — content-free
+    re.compile(r"执行了该步骤"),
+    re.compile(r"步骤完成无异常"),
     # Pure open bracket / single char / empty-ish content
     re.compile(r"^[\[\](){},，。.;；\s]*$"),
 ]

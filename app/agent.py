@@ -3957,21 +3957,16 @@ class Agent:
                     confidence=0.95,
                 ))
 
-            # 写入每个步骤为 action_plan
-            for step in plan.steps:
-                mm.save_fact(SemanticFact(
-                    agent_id=self.id,
-                    category="action_plan",
-                    content=f"[步骤{step.order + 1}] {step.title}"
-                             + (f" - {step.detail}" if step.detail else ""),
-                    source=f"execution_plan:{plan.id}:step:{step.id}",
-                    confidence=0.9,
-                ))
-
+            # 不再为每个 step 单独写 action_plan —— "步骤标题" 不是
+            # reusable 知识，只会挤占 L3 top-K 检索槽位. 单个 plan 只
+            # 保留一条 goal 承载任务上下文 (上方 task_summary 已写),
+            # 步骤交付物通过 _write_step_completion_to_memory 的 outcome
+            # 按需入库 (且有"≥12 字 + 非模板化" 门槛).
             self._log("memory", {
                 "action": "plan_to_memory",
                 "plan_id": plan.id,
                 "steps": len(plan.steps),
+                "facts_written": 1,
             })
         except Exception as e:
             logger.debug("Failed to write plan to memory: %s", e)
@@ -3993,6 +3988,28 @@ class Agent:
         # X", "tests pass: 52 green 0 failed").
         summary = (step.result_summary or "").strip()
         if len(summary) < 12:
+            return
+        # Reject templated LLM aggregator noise — these phrases appear
+        # when flush_action_buffer or step-summary LLM writes a generic
+        # "N operations executed" placeholder instead of a real result.
+        # Matching on normalized form so minor variations still hit.
+        import re as _re
+        _norm = _re.sub(r"[^\w\u4e00-\u9fa5]+", "", summary.lower())
+        _TEMPLATE_NOISE = (
+            "本次会话执行了",     # "本次会话执行了 N 个操作"
+            "操作执行完毕",       # "[当前日期] 操作执行完毕，计划与命令均已成功"
+            "最终结果未明确",     # "未提供日期，最终结果未明确"
+            "未提供日期",
+            "状态已更新无失败",   # "状态已更新，无失败原因"
+            "无失败原因",
+            "执行了该步骤",
+            "步骤完成无异常",
+        )
+        if any(tok in _norm for tok in _TEMPLATE_NOISE):
+            logger.debug(
+                "Skip templated step-summary from L3 write "
+                "(step=%s, summary=%r)", step.id[:8], summary[:80]
+            )
             return
 
         try:
