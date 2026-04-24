@@ -1,0 +1,24 @@
+name: file-ops
+version: 1.0.0
+description:
+  zh-CN: 读写文件、搜索、目录遍历 — 基础文件系统能力。
+  en: file ops — core tool bundle, auto-granted to all new agents by default.
+author: tudou-builtin
+runtime: declarative
+entry: SKILL.md
+tags:
+  - tool-bundle
+  - core
+  - file-ops
+source: official
+metadata:
+  emoji: "📁"
+  display_name_zh: "文件操作"
+  display_name_en: "file ops"
+  bundle_type: capability
+  tools:
+    - read_file
+    - write_file
+    - edit_file
+    - search_files
+    - glob_files

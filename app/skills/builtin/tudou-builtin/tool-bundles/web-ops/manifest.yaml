@@ -1,0 +1,21 @@
+name: web-ops
+version: 1.0.0
+description:
+  zh-CN: 搜索网页、抓取内容。研究类任务必备。
+  en: web ops — core tool bundle, auto-granted to all new agents by default.
+author: tudou-builtin
+runtime: declarative
+entry: SKILL.md
+tags:
+  - tool-bundle
+  - core
+  - web-ops
+source: official
+metadata:
+  emoji: "🌐"
+  display_name_zh: "网络操作"
+  display_name_en: "web ops"
+  bundle_type: capability
+  tools:
+    - web_search
+    - web_fetch

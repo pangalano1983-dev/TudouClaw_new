@@ -173,18 +173,20 @@ class Hub:
             try:
                 builtin_dir = os.path.join(os.path.dirname(__file__), "skills", "builtin")
                 if os.path.isdir(builtin_dir):
-                    for name in os.listdir(builtin_dir):
-                        sub = os.path.join(builtin_dir, name)
-                        if not os.path.isdir(sub):
-                            continue
-                        if not os.path.isfile(os.path.join(sub, "manifest.yaml")):
+                    # Recursive walk — a skill is any directory that
+                    # contains a manifest.yaml. Lets us nest bundles
+                    # under tudou-builtin/tool-bundles/<name>/ while
+                    # still auto-installing them.
+                    for root, dirs, files in os.walk(builtin_dir):
+                        if "manifest.yaml" not in files:
                             continue
                         try:
                             self.skill_registry.install_or_upgrade_from_directory(
-                                sub, installed_by="builtin", policy="upgrade")
+                                root, installed_by="builtin", policy="upgrade")
                         except Exception as _ie:
                             logger.warning(
-                                "Auto-install skill %s failed: %s", name, _ie)
+                                "Auto-install skill %s failed: %s",
+                                os.path.basename(root), _ie)
             except Exception as _ae:
                 logger.debug("Builtin skill auto-install failed: %s", _ae)
         except Exception as _e:

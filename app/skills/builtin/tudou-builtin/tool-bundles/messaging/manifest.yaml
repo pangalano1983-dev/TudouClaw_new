@@ -1,0 +1,23 @@
+name: messaging
+version: 1.0.0
+description:
+  zh-CN: 给其他 agent / 频道发消息、收消息。
+  en: messaging — core tool bundle, auto-granted to all new agents by default.
+author: tudou-builtin
+runtime: declarative
+entry: SKILL.md
+tags:
+  - tool-bundle
+  - core
+  - messaging
+source: official
+metadata:
+  emoji: "💬"
+  display_name_zh: "消息交互"
+  display_name_en: "messaging"
+  bundle_type: capability
+  tools:
+    - send_message
+    - ack_message
+    - reply_message
+    - check_inbox

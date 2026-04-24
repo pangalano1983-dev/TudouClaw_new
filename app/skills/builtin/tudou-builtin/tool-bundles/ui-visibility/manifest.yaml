@@ -1,0 +1,20 @@
+name: ui-visibility
+version: 1.0.0
+description:
+  zh-CN: 向 chat 发送结构化 UI 块 (表格、卡片、图等)。
+  en: rich UI — core tool bundle, auto-granted to all new agents by default.
+author: tudou-builtin
+runtime: declarative
+entry: SKILL.md
+tags:
+  - tool-bundle
+  - core
+  - ui-visibility
+source: official
+metadata:
+  emoji: "🎨"
+  display_name_zh: "富 UI 块"
+  display_name_en: "rich UI"
+  bundle_type: capability
+  tools:
+    - emit_ui_block

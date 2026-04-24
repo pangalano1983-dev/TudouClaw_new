@@ -1,0 +1,22 @@
+name: data-process
+version: 1.0.0
+description:
+  zh-CN: 日期计算、JSON/文本处理工具。
+  en: data process — core tool bundle, auto-granted to all new agents by default.
+author: tudou-builtin
+runtime: declarative
+entry: SKILL.md
+tags:
+  - tool-bundle
+  - core
+  - data-process
+source: official
+metadata:
+  emoji: "⚙️"
+  display_name_zh: "数据处理"
+  display_name_en: "data process"
+  bundle_type: capability
+  tools:
+    - datetime_calc
+    - json_process
+    - text_process

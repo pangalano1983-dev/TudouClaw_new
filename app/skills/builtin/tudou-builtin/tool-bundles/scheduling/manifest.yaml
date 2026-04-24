@@ -1,0 +1,20 @@
+name: scheduling
+version: 1.0.0
+description:
+  zh-CN: 创建提醒、延时任务、cron 定时任务。
+  en: scheduling — core tool bundle, auto-granted to all new agents by default.
+author: tudou-builtin
+runtime: declarative
+entry: SKILL.md
+tags:
+  - tool-bundle
+  - core
+  - scheduling
+source: official
+metadata:
+  emoji: "⏰"
+  display_name_zh: "任务调度"
+  display_name_en: "scheduling"
+  bundle_type: capability
+  tools:
+    - task_update

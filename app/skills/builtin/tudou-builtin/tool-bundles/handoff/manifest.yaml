@@ -1,0 +1,22 @@
+name: handoff
+version: 1.0.0
+description:
+  zh-CN: 结构化 baton-pass —— 把任务交给下一个 agent。
+  en: handoff — core tool bundle, auto-granted to all new agents by default.
+author: tudou-builtin
+runtime: declarative
+entry: SKILL.md
+tags:
+  - tool-bundle
+  - core
+  - handoff
+source: official
+metadata:
+  emoji: "🔀"
+  display_name_zh: "任务交接"
+  display_name_en: "handoff"
+  bundle_type: capability
+  tools:
+    - emit_handoff
+    - handoff_request
+    - team_create

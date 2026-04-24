@@ -17698,47 +17698,64 @@ async function loadSkillStore() {
       box.innerHTML = '<div style="padding:20px;text-align:center">目录为空。把 SKILL.md 或 manifest.yaml 放到 data/skill_catalog/ 下再点"重新扫描"。</div>';
       return;
     }
-    box.innerHTML = _skillStoreState.entries.map(function(e){
+    // 豆腐块 grid — responsive, 3-4 per row depending on viewport
+    var cards = _skillStoreState.entries.map(function(e){
       var srcColor = e.source === 'official' ? '#10b981'
                    : e.source === 'maintainer' ? '#a78bfa'
                    : e.source === 'community' ? '#60a5fa'
                    : e.source === 'agent' ? '#f59e0b' : '#94a3b8';
       var ann = annMap[e.id] || annMap[e.installed_id];
       var annBadge = (ann && ann.notes && ann.notes.length)
-        ? '<span title="本地笔记 " style="padding:2px 6px;font-size:10px;background:rgba(251,191,36,0.15);color:#f59e0b;border-radius:10px;margin-left:6px">💡 '+ann.notes.length+'</span>'
+        ? '<span title="本地笔记" style="padding:1px 5px;font-size:10px;background:rgba(251,191,36,0.15);color:#f59e0b;border-radius:8px;margin-left:4px">💡'+ann.notes.length+'</span>'
         : '';
       var actions = '';
       if (e.installed) {
-        actions = '<button class="btn btn-sm" onclick="openGrantModal(\''+esc(e.installed_id)+'\',\''+esc(e.name)+'\')">授权给 Agent</button>'
-                + '<button class="btn btn-sm" onclick="openAnnotateModal(\''+esc(e.installed_id)+'\',\''+esc(e.name)+'\')">📝 笔记</button>'
-                + '<button class="btn btn-sm" style="color:var(--error)" onclick="uninstallStoreEntry(\''+esc(e.id)+'\')">卸载</button>';
+        actions = '<button class="btn btn-sm" style="flex:1" onclick="event.stopPropagation();openGrantModal(\''+esc(e.installed_id)+'\',\''+esc(e.name)+'\')"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">badge</span> 授权</button>'
+                + '<button class="btn btn-sm" title="笔记" onclick="event.stopPropagation();openAnnotateModal(\''+esc(e.installed_id)+'\',\''+esc(e.name)+'\')">📝</button>'
+                + '<button class="btn btn-sm" title="卸载" style="color:var(--error)" onclick="event.stopPropagation();uninstallStoreEntry(\''+esc(e.id)+'\')"><span class="material-symbols-outlined" style="font-size:14px">delete</span></button>';
       } else {
-        actions = '<button class="btn btn-primary btn-sm" onclick="installStoreEntry(\''+esc(e.id)+'\')">安装到 Hub</button>';
+        actions = '<button class="btn btn-primary btn-sm" style="flex:1" onclick="event.stopPropagation();installStoreEntry(\''+esc(e.id)+'\')"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">download</span> 安装</button>';
       }
-      var sensitive = e.sensitive ? '<span style="padding:2px 6px;font-size:10px;background:rgba(239,68,68,0.15);color:#ef4444;border-radius:10px;margin-left:6px">敏感</span>' : '';
-      var tagList = (e.tags||[]).slice(0,6).map(function(t){ return '<span style="font-size:10px;padding:1px 6px;border:1px solid var(--border);border-radius:8px;margin-right:4px">'+esc(t)+'</span>'; }).join('');
-      return '<div style="border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:10px;background:var(--surface)">'
-        + '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">'
-        + '  <div style="flex:1;min-width:0">'
-        + '    <div style="font-weight:600;font-size:14px">'+esc(e.name)
-        + '      <span style="font-size:11px;color:var(--text3);font-weight:400;margin-left:6px">'+esc(e.id)+' v'+esc(e.version)+'</span>'
-        + '      <span style="padding:2px 8px;font-size:10px;background:'+srcColor+'20;color:'+srcColor+';border:1px solid '+srcColor+';border-radius:10px;margin-left:8px">'+esc(e.source)+'</span>'
-        + annBadge + sensitive
-        + '    </div>'
-        + '    <div style="font-size:12px;color:var(--text2);margin-top:4px">'+esc(e.description||'')+'</div>'
-        + '    <div style="font-size:11px;color:var(--text3);margin-top:6px">'
-        + 'spec: '+esc(e.spec)+' · runtime: '+esc(e.runtime)+' · entry: '+esc(e.entry||'')
-        + ' · author: '+esc(e.author)
-        + (e.size_bytes ? ' · '+_fmtSize(e.size_bytes) : '')
-        + (e.last_updated ? ' · '+new Date(e.last_updated*1000).toLocaleDateString() : '')
+      // Icon: from manifest metadata.emoji if present, else first char or 📦
+      var emoji = (e.metadata && e.metadata.emoji) || e.icon || '';
+      if (!emoji) {
+        // fallback by tags
+        var tagsStr = (e.tags || []).join(' ').toLowerCase();
+        emoji = /file|filesystem/.test(tagsStr) ? '📁'
+              : /web|http/.test(tagsStr) ? '🌐'
+              : /shell|bash/.test(tagsStr) ? '🖥️'
+              : /memory|knowledge/.test(tagsStr) ? '🧠'
+              : /message|chat/.test(tagsStr) ? '💬'
+              : /ppt|office|doc/.test(tagsStr) ? '📊'
+              : /screenshot|image/.test(tagsStr) ? '📷'
+              : /schedule|time|cron/.test(tagsStr) ? '⏰'
+              : /tool.?bundle|core/.test(tagsStr) ? '🧰'
+              : '📦';
+      }
+      var sensitive = e.sensitive ? '<span style="padding:1px 5px;font-size:10px;background:rgba(239,68,68,0.15);color:#ef4444;border-radius:8px;margin-left:4px">敏感</span>' : '';
+      var installedBadge = e.installed ? '<span style="position:absolute;top:10px;right:10px;padding:2px 6px;font-size:10px;background:rgba(16,185,129,0.15);color:#10b981;border-radius:8px">✓ 已安装</span>' : '';
+      var desc = esc(e.description || '').slice(0, 90);
+      if ((e.description || '').length > 90) desc += '…';
+      return (
+        '<div style="position:relative;border:1px solid var(--border);border-radius:12px;padding:16px;background:var(--surface);display:flex;flex-direction:column;gap:10px;transition:transform 0.15s,box-shadow 0.15s" '
+        +  'onmouseenter="this.style.transform=\'translateY(-2px)\';this.style.boxShadow=\'0 4px 12px rgba(0,0,0,0.08)\'" '
+        +  'onmouseleave="this.style.transform=\'\';this.style.boxShadow=\'\'" >'
+        +  installedBadge
+        +  '<div style="display:flex;align-items:flex-start;gap:12px">'
+        +    '<div style="font-size:32px;line-height:1;flex-shrink:0;padding-top:2px">'+emoji+'</div>'
+        +    '<div style="flex:1;min-width:0">'
+        +      '<div style="font-weight:700;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(e.name)+annBadge+sensitive+'</div>'
+        +      '<div style="font-size:10px;color:var(--text3);margin-top:2px">v'+esc(e.version)+' · <span style="color:'+srcColor+'">'+esc(e.source)+'</span></div>'
+        +    '</div>'
+        +  '</div>'
+        +  '<div style="font-size:12px;color:var(--text2);line-height:1.5;min-height:36px">'+desc+'</div>'
+        +  '<div style="display:flex;gap:6px;margin-top:auto">'+actions+'</div>'
         + '</div>'
-        + (e.languages && e.languages.length ? '<div style="font-size:10px;color:var(--text3);margin-top:3px">languages: '+esc(e.languages.join(', '))+'</div>' : '')
-        + (tagList ? '<div style="margin-top:6px">'+tagList+'</div>' : '')
-        + _renderSkillApplicabilityBlock(e, '')  // no agent context on the standalone store page
-        + '  </div>'
-        + '  <div style="display:flex;gap:6px;flex-shrink:0">'+actions+'</div>'
-        + '</div></div>';
+      );
     }).join('');
+    box.innerHTML =
+      '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px">'
+      + cards + '</div>';
   } catch(err) {
     box.innerHTML = '<div style="color:var(--error);padding:20px">加载失败: '+esc(String(err))+'</div>';
   }

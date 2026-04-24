@@ -1,0 +1,24 @@
+name: memory-ops
+version: 1.0.0
+description:
+  zh-CN: 检索知识库、保存经验、跨 agent 共享。
+  en: memory ops — core tool bundle, auto-granted to all new agents by default.
+author: tudou-builtin
+runtime: declarative
+entry: SKILL.md
+tags:
+  - tool-bundle
+  - core
+  - memory-ops
+source: official
+metadata:
+  emoji: "🧠"
+  display_name_zh: "记忆操作"
+  display_name_en: "memory ops"
+  bundle_type: capability
+  tools:
+    - knowledge_lookup
+    - save_experience
+    - share_knowledge
+    - learn_from_peers
+    - memory_recall

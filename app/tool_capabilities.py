@@ -315,7 +315,18 @@ def filter_tools_by_capability(
     """
     if global_defaults is None:
         global_defaults = load_global_default_capabilities()
-    effective_caps = set(global_defaults) | set(granted_skills or ())
+    # Normalize granted_skills — a registry-installed skill has id like
+    # "file-ops@1.0.0" while CAPABILITY_SKILLS keys are "file-ops".
+    # Accept either form by stripping @version.
+    raw_caps = set(global_defaults) | set(granted_skills or ())
+    effective_caps: set[str] = set()
+    for cap in raw_caps:
+        if not cap:
+            continue
+        # "name@1.0.0" → "name"; leave "name" alone
+        bare = cap.split("@", 1)[0] if "@" in cap else cap
+        effective_caps.add(bare)
+        effective_caps.add(cap)  # also keep original in case id form is used
     kept: list[dict] = []
     for t in tools_list:
         name = t.get("function", {}).get("name", "")

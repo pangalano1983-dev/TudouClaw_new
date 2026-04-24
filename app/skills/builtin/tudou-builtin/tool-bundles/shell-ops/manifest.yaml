@@ -1,0 +1,21 @@
+name: shell-ops
+version: 1.0.0
+description:
+  zh-CN: 执行 bash 命令、跑测试。需要谨慎,有副作用。
+  en: shell & tests — core tool bundle, auto-granted to all new agents by default.
+author: tudou-builtin
+runtime: declarative
+entry: SKILL.md
+tags:
+  - tool-bundle
+  - core
+  - shell-ops
+source: official
+metadata:
+  emoji: "🖥️"
+  display_name_zh: "Shell / 测试"
+  display_name_en: "shell & tests"
+  bundle_type: capability
+  tools:
+    - bash
+    - run_tests
