@@ -17,6 +17,7 @@ Write-back:
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -1290,23 +1291,25 @@ class MemoryManager:
     # ==================================================================
 
     # 分类优先级: 高优先级的记忆排在前面，模型更容易关注。
-    # preference=-1 表示"最高优先级 + 不受 top-K 限制"——每次都注入。
+    # priority ≤ 0 的类别"永远全量注入"（不受 top-K 裁剪）。
     _CATEGORY_PRIORITY = {
-        "preference": -1,  # ⭐ 用户画像 — 永远在最前，不裁剪
-        "intent": 0,       # 任务意图 — 理解用户到底要什么
-        "rule": 1,         # 经验规则 — 场景→方案，可复用知识
-        "reasoning": 2,    # 决策逻辑 — 为什么这么做，避免重复讨论
-        "reflection": 3,   # 反思改进 — Agent 进化，下次做得更好
-        "outcome": 4,      # 执行结果 — 了解进度和状态
+        "contact":    -2,  # 📇 联系方式 — 邮箱/手机/地址等结构化身份, 最顶
+        "preference": -1,  # 👤 用户画像 — 长期风格/禁忌/个性
+        "intent":      0,  # 🎯 任务意图
+        "rule":        1,  # 📏 经验规则
+        "reasoning":   2,  # 🧠 决策逻辑
+        "reflection":  3,  # 💡 反思改进
+        "outcome":     4,  # ✅ 执行结果
     }
 
     _CATEGORY_LABELS = {
+        "contact":    "📇 联系方式",
         "preference": "👤 偏好",
-        "intent": "🎯 意图",
-        "rule": "📏 规则",
-        "reasoning": "🧠 决策",
+        "intent":     "🎯 意图",
+        "rule":       "📏 规则",
+        "reasoning":  "🧠 决策",
         "reflection": "💡 反思",
-        "outcome": "✅ 结果",
+        "outcome":    "✅ 结果",
         # ── legacy categories (backward compat for existing DB rows) ──
         "decision": "🧠 决策",
         "goal": "🎯 意图",
@@ -1320,8 +1323,7 @@ class MemoryManager:
         "project_rule": "📏 规则",
     }
 
-    # Map legacy categories to new 6-layer system for new writes.
-    # user_pref 升格为 preference 一等公民（不再降级到 rule）。
+    # Map legacy categories to new 7-layer system for new writes.
     _LEGACY_CATEGORY_MAP = {
         "decision": "reasoning",
         "goal": "intent",
@@ -1330,16 +1332,20 @@ class MemoryManager:
         "context": "reasoning",
         "issue": "rule",
         "learned": "rule",
-        "user_pref": "preference",  # ⭐ 升格
+        "user_pref": "preference",
         "general": "outcome",
         "project_rule": "rule",
     }
 
     # Canonical categories — the set we emit for new writes.
     CANONICAL_CATEGORIES = (
-        "preference", "intent", "rule",
+        "contact", "preference", "intent", "rule",
         "reasoning", "reflection", "outcome",
     )
+
+    # Always-inject categories (bypass top-K retrieval limit in
+    # retrieve_for_prompt).
+    _ALWAYS_INJECT_CATEGORIES = ("contact", "preference")
 
     def retrieve_for_prompt(self, agent_id: str,
                             current_query: str,
@@ -1365,12 +1371,13 @@ class MemoryManager:
         # Choose search strategy: vector (ChromaDB) or FTS5
         use_vector = config.vector_search_enabled and self._check_chromadb_available()
 
-        # L3 事实检索 —— preference 永远全量注入（用户画像，不裁剪）
-        # + 其他 category 走 top-K 相似度检索
-        pref_facts = self.get_recent_facts(
-            agent_id, limit=50, category="preference")
-        # legacy: user_pref 在旧数据里存在，一并拉
-        pref_facts += self.get_recent_facts(
+        # L3 事实检索 —— contact + preference 永远全量注入（结构化身份 /
+        # 用户画像）. 其他 category 走 top-K 相似度检索.
+        pinned_facts: list = []
+        for cat in self._ALWAYS_INJECT_CATEGORIES:
+            pinned_facts += self.get_recent_facts(agent_id, limit=50, category=cat)
+        # legacy: user_pref 算 preference 的旧名
+        pinned_facts += self.get_recent_facts(
             agent_id, limit=50, category="user_pref")
 
         if use_vector:
@@ -1383,24 +1390,28 @@ class MemoryManager:
                 agent_id, current_query,
                 top_k=config.l3_retrieve_top_k,
             )
-        # 合并：preference 在前且去重（不重复进入 other 列表）
-        pref_ids = {f.id for f in pref_facts}
-        other_facts = [f for f in other_facts if f.id not in pref_ids]
-        facts = pref_facts + other_facts
+        # 合并：pinned 在前且去重
+        pinned_ids = {f.id for f in pinned_facts}
+        other_facts = [f for f in other_facts if f.id not in pinned_ids]
+        facts = pinned_facts + other_facts
 
         if facts:
-            # 按分类优先级排序 —— preference 的 priority = -1 自动置顶
             facts.sort(key=lambda f: self._CATEGORY_PRIORITY.get(f.category, 9))
+            contact_lines = []
             pref_lines = []
             other_lines = []
             for f in facts:
                 label = self._CATEGORY_LABELS.get(f.category, f"[{f.category}]")
                 line = f"- {label} {f.content}"
-                if f.category in ("preference", "user_pref"):
+                if f.category == "contact":
+                    contact_lines.append(line)
+                elif f.category in ("preference", "user_pref"):
                     pref_lines.append(line)
                 else:
                     other_lines.append(line)
-            # 独立分块：User Profile 放最前，其他走 Key Facts
+            # 独立分块: Contacts → User Profile → Key Facts
+            if contact_lines:
+                parts.append("## Contacts (永久)\n" + "\n".join(contact_lines))
             if pref_lines:
                 parts.append("## User Profile (永久)\n" + "\n".join(pref_lines))
             if other_lines:
@@ -1655,9 +1666,19 @@ class MemoryManager:
             )
             return []
 
+        # ── Contact auto-extraction (deterministic, pre-LLM) ──
+        # Emails / phones / URLs are high-signal structured identities that
+        # LLM-based extraction handles inconsistently (sometimes preference,
+        # sometimes intent, sometimes missed). Do a regex pass first and
+        # write each unique contact as a single `contact` fact. Idempotent
+        # via upsert_fact so "my email is X" in 5 turns still only leaves
+        # one row.
+        contacts_written = self._extract_contacts_deterministic(
+            agent_id, user_message)
+
         # 先检查是否值得提取（简单启发式）
         if not self._worth_extracting(user_message, assistant_response):
-            return []
+            return list(contacts_written)
 
         current_time = time.strftime("%Y-%m-%d %H:%M")
         # Minimal structural prompt only — category enum + response schema.
@@ -1850,6 +1871,82 @@ class MemoryManager:
         """
         # Delegate to buffer instead of direct L3 write
         self.buffer_agent_action(agent_id, tool_name, summary, details)
+
+    # Regex patterns for structured contact extraction.
+    _EMAIL_RE = re.compile(
+        r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
+    )
+    # Mobile phone: CN 11-digit starting with 1, or international +prefix form.
+    _PHONE_RE = re.compile(
+        r"(?:(?<!\d)1[3-9]\d{9}(?!\d))"
+        r"|(?:(?<!\d)\+\d{1,3}[-\s]?\d{3,4}[-\s]?\d{3,4}[-\s]?\d{3,4}(?!\d))"
+    )
+
+    def _extract_contacts_deterministic(self, agent_id: str,
+                                         user_message: str) -> list:
+        """Scan user message for structured identities (email, phone) and
+        write each unique one as a `contact` fact.
+
+        - Only pulls from USER messages (avoid agent echo).
+        - Uses upsert_fact with similarity threshold — repeat mentions
+          of the same email refresh one row instead of duplicating.
+        - Fact content is a one-line description with the raw value
+          preserved ("📧 邮箱: x@y.com").
+        - Returns the list of SemanticFact objects written (may be empty).
+        """
+        if not user_message:
+            return []
+        written: list = []
+        found_emails: set = set()
+        found_phones: set = set()
+        for m in self._EMAIL_RE.finditer(user_message):
+            found_emails.add(m.group(0).lower())
+        for m in self._PHONE_RE.finditer(user_message):
+            num = m.group(0).strip()
+            num_digits = "".join(
+                ch for ch in num if ch.isdigit() or ch == "+")
+            if len(num_digits) >= 7:
+                found_phones.add(num_digits)
+        if not found_emails and not found_phones:
+            return []
+
+        for email in found_emails:
+            fact = SemanticFact(
+                agent_id=agent_id,
+                category="contact",
+                content=f"📧 邮箱: {email}",
+                source="auto-extract:email",
+                confidence=0.98,
+            )
+            try:
+                res = self.upsert_fact(fact, threshold=0.82)
+                if res.get("fact"):
+                    written.append(res["fact"])
+            except Exception as e:
+                logger.debug("contact email upsert failed: %s", e)
+
+        for phone in found_phones:
+            fact = SemanticFact(
+                agent_id=agent_id,
+                category="contact",
+                content=f"📱 电话: {phone}",
+                source="auto-extract:phone",
+                confidence=0.98,
+            )
+            try:
+                res = self.upsert_fact(fact, threshold=0.82)
+                if res.get("fact"):
+                    written.append(res["fact"])
+            except Exception as e:
+                logger.debug("contact phone upsert failed: %s", e)
+
+        if written:
+            logger.info(
+                "contact auto-extract: agent=%s wrote %d contacts "
+                "(emails=%d, phones=%d)",
+                agent_id, len(written),
+                len(found_emails), len(found_phones))
+        return written
 
     def _worth_extracting(self, user_msg: str, assistant_resp: str) -> bool:
         """启发式判断这轮对话是否值得提取记忆。

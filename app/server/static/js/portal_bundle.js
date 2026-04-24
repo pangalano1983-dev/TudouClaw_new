@@ -17318,6 +17318,7 @@ function showAgentMemoryView(aid) {
       + _memStatCard('L3 长期记忆', l3, '#10b981', '结构化语义知识')
       + '</div>'
       + (l3 > 0 ? '<div style="display:flex;gap:6px;flex-wrap:wrap">'
+        + _catBadge('contact', '联系', l3cat.contact||0)
         + _catBadge('preference', '偏好', (l3cat.preference||0) + (l3cat.user_pref||0))
         + _catBadge('intent', '意图', l3cat.intent||0)
         + _catBadge('reasoning', '推理', l3cat.reasoning||0)
@@ -17358,8 +17359,8 @@ function showAgentMemoryView(aid) {
     // ── L3 Semantic facts ──
     var l3entries = mem.l3_entries || [];
     if (l3entries.length) {
-      var CAT_LABELS = {preference:'👤偏好',user_pref:'👤偏好',intent:'意图',reasoning:'推理',outcome:'结果',rule:'规则',reflection:'反思'};
-      var CAT_COLORS = {preference:'#ec4899',user_pref:'#ec4899',intent:'#3b82f6',reasoning:'#f59e0b',outcome:'#10b981',rule:'#ef4444',reflection:'#8b5cf6'};
+      var CAT_LABELS = {contact:'📇联系',preference:'👤偏好',user_pref:'👤偏好',intent:'意图',reasoning:'推理',outcome:'结果',rule:'规则',reflection:'反思'};
+      var CAT_COLORS = {contact:'#14b8a6',preference:'#ec4899',user_pref:'#ec4899',intent:'#3b82f6',reasoning:'#f59e0b',outcome:'#10b981',rule:'#ef4444',reflection:'#8b5cf6'};
       var l3rows = l3entries.map(function(f){
         var cat = f.category || 'unknown';
         var catLabel = CAT_LABELS[cat] || cat;
@@ -17477,7 +17478,7 @@ function _memStatCard(label, count, color, desc) {
 }
 
 function _catBadge(cat, label, count) {
-  var colors = {preference:'#ec4899',user_pref:'#ec4899',intent:'#3b82f6',reasoning:'#f59e0b',outcome:'#10b981',rule:'#ef4444',reflection:'#8b5cf6'};
+  var colors = {contact:'#14b8a6',preference:'#ec4899',user_pref:'#ec4899',intent:'#3b82f6',reasoning:'#f59e0b',outcome:'#10b981',rule:'#ef4444',reflection:'#8b5cf6'};
   var c = colors[cat] || 'var(--text3)';
   return '<span style="font-size:10px;padding:2px 6px;border-radius:3px;background:'+c+'15;color:'+c+'">'+label+' '+count+'</span>';
 }

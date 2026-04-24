@@ -2166,7 +2166,7 @@ def _build_memory_stats(agent) -> dict:
     l3_by_category = {}
     if mm:
         try:
-            for cat in ("preference", "user_pref",
+            for cat in ("contact", "preference", "user_pref",
                          "intent", "reasoning", "outcome",
                          "rule", "reflection"):
                 row = mm._conn.execute(
