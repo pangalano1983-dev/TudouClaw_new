@@ -213,15 +213,94 @@ def _ensure_str(content) -> str:
     return str(content)
 
 
-def _validate_tools(tools: list[dict] | None) -> list[dict] | None:
+def _compress_description(desc: str, max_chars: int = 160) -> str:
+    """Keep first sentence of a tool description, drop examples / rationale.
+
+    Tool `description` fields in the schema accumulated long-form prose over
+    time (use cases, comparisons, decision trees, example prompts). LLMs
+    only need a terse "what does this do" to decide calling. Everything
+    beyond the first sentence is ~75% of the schema weight.
+
+    Heuristic:
+      1. Take text up to first double-newline or \\n (break on paragraph).
+      2. Take first sentence (until '.' / '。' / '!' / '？') if still long.
+      3. Hard cap at max_chars, add '…' suffix if truncated.
+
+    LLM can still fetch the full description via `get_skill_guide` tool if
+    it needs more context.
+    """
+    if not desc:
+        return ""
+    s = desc.strip()
+    if len(s) <= max_chars:
+        return s
+    # Break on paragraph / line
+    for sep in ("\n\n", "\n"):
+        if sep in s:
+            head = s.split(sep, 1)[0].strip()
+            if head and len(head) <= max_chars:
+                return head
+            if head:
+                s = head
+                break
+    # Still too long — truncate on first sentence terminator
+    for punct in ("。", ". ", ".", "!", "？", "?", ";"):
+        idx = s.find(punct)
+        if 40 <= idx <= max_chars:
+            return s[:idx + len(punct.rstrip())].strip()
+    # Hard truncate
+    return s[:max_chars].rstrip() + "…"
+
+
+def _compress_parameter_properties(props: dict, per_prop_max: int = 100) -> dict:
+    """Shorten `description` on each parameter property. Keeps structural
+    info (type, enum, required) intact — only prose is trimmed."""
+    if not isinstance(props, dict):
+        return props
+    out = {}
+    for k, v in props.items():
+        if not isinstance(v, dict):
+            out[k] = v
+            continue
+        cp = dict(v)
+        if "description" in cp:
+            cp["description"] = _compress_description(
+                cp["description"], max_chars=per_prop_max)
+        # Recurse into nested objects (items / properties)
+        if isinstance(cp.get("items"), dict):
+            nested = cp["items"]
+            if "properties" in nested and isinstance(nested["properties"], dict):
+                nested = dict(nested)
+                nested["properties"] = _compress_parameter_properties(
+                    nested["properties"], per_prop_max)
+                cp["items"] = nested
+            elif "description" in nested:
+                ni = dict(nested)
+                ni["description"] = _compress_description(
+                    ni["description"], max_chars=per_prop_max)
+                cp["items"] = ni
+        if isinstance(cp.get("properties"), dict):
+            cp["properties"] = _compress_parameter_properties(
+                cp["properties"], per_prop_max)
+        out[k] = cp
+    return out
+
+
+def _validate_tools(tools: list[dict] | None,
+                     compress: bool = True) -> list[dict] | None:
     """Validate and clean tool definitions before sending to LLM.
 
     - Removes tools with empty/missing name, description, or parameters
     - Ensures each tool has a valid function-calling schema
+    - (NEW) If `compress=True` (default), shrinks tool `description` +
+      parameter-property `description` fields to first-sentence form.
+      Disable via env TUDOU_TOOL_SCHEMA_FULL=1 for debugging.
     - Returns None if no valid tools remain (so empty list won't be sent)
     """
     if not tools:
         return None
+    if compress:
+        compress = os.environ.get("TUDOU_TOOL_SCHEMA_FULL", "0") != "1"
     valid = []
     for t in tools:
         func = t.get("function", {}) if t.get("type") == "function" else t
@@ -235,13 +314,22 @@ def _validate_tools(tools: list[dict] | None) -> list[dict] | None:
         # Build clean tool definition
         clean_func = {"name": name.strip()}
         if desc and isinstance(desc, str) and desc.strip():
-            clean_func["description"] = desc.strip()
+            d = desc.strip()
+            if compress:
+                d = _compress_description(d, max_chars=160)
+            clean_func["description"] = d
         params = func.get("parameters")
         if params and isinstance(params, dict):
             # Only include parameters if it has actual properties
             props = params.get("properties")
             if props and isinstance(props, dict) and len(props) > 0:
-                clean_func["parameters"] = params
+                if compress:
+                    cleaned_params = dict(params)
+                    cleaned_params["properties"] = _compress_parameter_properties(
+                        props, per_prop_max=100)
+                    clean_func["parameters"] = cleaned_params
+                else:
+                    clean_func["parameters"] = params
             else:
                 # Empty parameters object — use minimal schema
                 clean_func["parameters"] = {"type": "object", "properties": {}}
