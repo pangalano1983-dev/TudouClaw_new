@@ -267,11 +267,19 @@ def _sanitize_messages_for_openai(messages: list[dict]) -> list[dict]:
     3. Strip non-standard fields (e.g. 'source', '_dynamic') that strict APIs reject
     4. Preserve only standard OpenAI fields per role
     """
-    # Standard fields per role
+    # Standard fields per role.
+    # `reasoning_content` (assistant): DeepSeek "thinking mode" requires the
+    # model's previous reasoning to be passed back on the next turn, else
+    # it returns:
+    #   "The reasoning_content in the thinking mode must be passed back"
+    # We treat it as a first-class assistant field — other providers either
+    # ignore it or error on unknown field; for safety we drop it at send
+    # time for non-DeepSeek providers (see _drop_reasoning_for_non_deepseek).
     _STANDARD_FIELDS = {
         "system": {"role", "content", "name"},
         "user": {"role", "content", "name"},
-        "assistant": {"role", "content", "tool_calls", "name", "refusal"},
+        "assistant": {"role", "content", "tool_calls", "name", "refusal",
+                      "reasoning_content"},
         "tool": {"role", "content", "tool_call_id"},
     }
     _DEFAULT_FIELDS = {"role", "content", "name"}
@@ -1929,6 +1937,16 @@ def _openai_chat(base_url: str, api_key: str,
     # Sanitize messages: ensure all content fields are plain strings
     # (local models like Qwen/LM Studio reject list-type content with 400)
     safe_messages = _sanitize_messages_for_openai(messages)
+
+    # DeepSeek thinking-mode models REQUIRE prior reasoning_content to be
+    # replayed. For every other provider, send-side strip the field —
+    # some strict APIs (e.g. some OpenAI-compat shims) reject unknown
+    # assistant fields. Detection: URL host contains 'deepseek'.
+    if "deepseek" not in url.lower():
+        for m in safe_messages:
+            if m.get("role") == "assistant" and "reasoning_content" in m:
+                m.pop("reasoning_content", None)
+
     valid_tools = _validate_tools(tools)
 
     # Log multimodal content status for debugging
@@ -2021,6 +2039,10 @@ def _openai_chat(base_url: str, api_key: str,
         result: dict = {"message": {"role": "assistant",
                                      "content": msg.get("content", "") or ""},
                          "stop_reason": stop_reason}
+        # DeepSeek thinking-mode: surface reasoning_content so caller can
+        # pass it back on the next turn (required by their API).
+        if msg.get("reasoning_content"):
+            result["message"]["reasoning_content"] = msg["reasoning_content"]
         # Detect truncation: finish_reason "length" means output was cut off
         if finish_reason == "length" and msg.get("tool_calls"):
             logger.warning(
@@ -2168,6 +2190,11 @@ def _openai_stream_events(base_url: str, api_key: str,
 
     messages = _apply_model_directives(messages, model)
     safe_messages = _sanitize_messages_for_openai(messages)
+    # Same reasoning_content gating as non-stream path (see chat_no_stream)
+    if "deepseek" not in url.lower():
+        for m in safe_messages:
+            if m.get("role") == "assistant" and "reasoning_content" in m:
+                m.pop("reasoning_content", None)
     valid_tools = _validate_tools(tools)
 
     payload: dict = {

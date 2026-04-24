@@ -6083,6 +6083,9 @@ Write only the summary body. Do not include any preamble or prefix."""
                     msg = response.get("message", {})
                     content = _ensure_str_content(msg.get("content"))
                     tool_calls = msg.get("tool_calls", [])
+                    # DeepSeek thinking-mode: capture reasoning_content for
+                    # round-trip (see agent_execution.py for full rationale).
+                    _reasoning_content = msg.get("reasoning_content") or ""
                     # Canonical stop_reason plumbed from llm.py:
                     # end_turn | tool_use | length | stop_sequence | content_filter
                     stop_reason = response.get("stop_reason") or ""
@@ -6205,6 +6208,8 @@ Write only the summary body. Do not include any preamble or prefix."""
                                            "content": content,
                                            "_source": "llm"}
                     assistant_msg["tool_calls"] = tool_calls
+                    if _reasoning_content:
+                        assistant_msg["reasoning_content"] = _reasoning_content
                     self.messages.append(assistant_msg)
 
                     # Check if all tool calls are parallel-safe

@@ -1002,6 +1002,13 @@ class AgentExecutionMixin:
                     msg = response.get("message", {})
                     content = _ensure_str_content(msg.get("content"))
                     tool_calls = msg.get("tool_calls", [])
+                    # DeepSeek thinking-mode models (v4-flash / v4-thinking)
+                    # return a `reasoning_content` field that MUST be passed
+                    # back on the next turn, otherwise DeepSeek returns:
+                    #   "reasoning_content in the thinking mode must be passed back"
+                    # Capture it here so the assistant msg we append to
+                    # self.messages carries it through.
+                    _reasoning_content = msg.get("reasoning_content") or ""
 
                     # Duplicate-output guard — run BEFORE the emit so we can
                     # suppress the bubble instead of letting the user see it
@@ -1106,13 +1113,17 @@ class AgentExecutionMixin:
                             _emit(evt)
                         self.messages.append({"role": "assistant",
                                               "content": content or final_content,
-                                              "_source": "llm"})
+                                              "_source": "llm",
+                                              **({"reasoning_content": _reasoning_content}
+                                                 if _reasoning_content else {})})
                         break
 
                     assistant_msg: dict = {"role": "assistant",
                                            "content": "" if _suppress_display else content,
                                            "_source": "llm"}
                     assistant_msg["tool_calls"] = tool_calls
+                    if _reasoning_content:
+                        assistant_msg["reasoning_content"] = _reasoning_content
                     self.messages.append(assistant_msg)
 
                     # Check if all tool calls are parallel-safe
