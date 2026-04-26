@@ -329,8 +329,11 @@ def test_diff_summary_empty_inputs():
 
 
 def test_default_catalog_size():
+    # Stage A: 13. Stage B added 5 blocks (file_display_short,
+    # workspace_context_full, image_display_long, plan_protocol,
+    # granted_skills_roster) for full v1-equivalence.
     cat = get_default_catalog()
-    assert len(cat) == 13
+    assert len(cat) == 18
     assert cat is not DEFAULT_BLOCKS  # 副本
 
 
@@ -453,3 +456,166 @@ def test_scope_change_alters_block_set():
     # casual_chat 不该有 image_display,pptx_authoring 应该有
     assert "image_display" not in res_a.included
     assert "image_display" in res_b.included
+
+
+# ── Stage B 新增块 ───────────────────────────────────────────────────
+
+
+def test_file_display_short_always_included():
+    """SHORT file_display 是 v1 ``compose_full_prompt`` 的一部分,catalog
+    必须 Always 装入。"""
+    cat = get_default_catalog()
+    ctx = AssemblyContext.make(extras={"agent_name": "x", "agent_role": "x"})
+    _, res = assemble_static_prompt(cat, ctx)
+    assert "file_display_short" in res.included
+    block = block_by_id(cat, "file_display_short")
+    assert block is not None
+    text = block.render(ctx)
+    # 真实文本,不是 placeholder
+    assert "<file_display>" in text
+    assert "FULL workspace-relative path" in text
+
+
+def test_file_display_long_real_text_not_placeholder():
+    """Stage A 是 placeholder,Stage B 应替换为真实文本。"""
+    cat = get_default_catalog()
+    ctx = AssemblyContext.make(
+        scope_tags=["pptx_authoring"],
+        granted_tools=frozenset({"write_file", "create_pptx"}),
+        extras={"agent_name": "x", "agent_role": "x", "language": "zh"},
+    )
+    _, res = assemble_static_prompt(cat, ctx)
+    assert "file_display_long" in res.included
+    block = block_by_id(cat, "file_display_long")
+    text = block.render(ctx)
+    # placeholder 用过 "to be extracted in Stage B" 字样,真实文本没有
+    assert "to be extracted in Stage B" not in text
+    # 真实长版包含 5 条规则 + 中文摘要
+    assert "1. NEVER write markdown image syntax" in text
+    assert "中文说明:你在 workspace 里产出文件后" in text
+
+
+def test_attachment_contract_real_text_zh_en_branches():
+    cat = get_default_catalog()
+    block = block_by_id(cat, "attachment_contract")
+    assert block is not None
+    # zh
+    ctx_zh = AssemblyContext.make(
+        granted_tools=frozenset({"send_email"}),
+        extras={"language": "zh"},
+    )
+    text_zh = block.render(ctx_zh)
+    assert "to be extracted in Stage B" not in text_zh
+    assert "当你调用发送类工具" in text_zh
+    # en
+    ctx_en = AssemblyContext.make(
+        granted_tools=frozenset({"send_email"}),
+        extras={"language": "en"},
+    )
+    text_en = block.render(ctx_en)
+    assert "When you call a send-type tool" in text_en
+    # 不同语言渲染不同字符串
+    assert text_zh != text_en
+
+
+def test_workspace_context_full_block():
+    """LONG workspace_context — solo 时不含共享目录关键字,project 时必须含。"""
+    cat = get_default_catalog()
+    block = block_by_id(cat, "workspace_context_full")
+    assert block is not None
+    # solo
+    ctx_solo = AssemblyContext.make(
+        ctx_type="solo",
+        extras={"working_dir": "/tmp/wd", "language": "zh"},
+    )
+    text_solo = block.render(ctx_solo)
+    assert "工作目录 (你自己的空间)" in text_solo
+    # project
+    ctx_proj = AssemblyContext.make(
+        ctx_type="project",
+        extras={
+            "working_dir": "/tmp/wd",
+            "shared_workspace": "/tmp/shared",
+            "project_name": "Q3", "project_id": "p1",
+            "language": "zh",
+        },
+    )
+    text_proj = block.render(ctx_proj)
+    assert "项目共享目录" in text_proj
+    assert "/tmp/shared" in text_proj
+    # empty inputs → empty render → block excluded by assembler
+    ctx_empty = AssemblyContext.make(extras={})
+    _, res_empty = assemble_static_prompt([block], ctx_empty)
+    excluded = [eid for eid, _ in res_empty.excluded]
+    assert "workspace_context_full" in excluded
+
+
+def test_image_display_long_zh_en_branches():
+    cat = get_default_catalog()
+    block = block_by_id(cat, "image_display_long")
+    assert block is not None
+    text_zh = block.render(AssemblyContext.make(extras={"language": "zh"}))
+    text_en = block.render(AssemblyContext.make(extras={"language": "en"}))
+    assert "前端会自动把它渲染成可点击放大的图片" in text_zh
+    assert "supported formats" in text_en.lower()
+    assert text_zh != text_en
+
+
+def test_plan_protocol_block_always_included():
+    cat = get_default_catalog()
+    ctx = AssemblyContext.make(extras={"agent_name": "x", "agent_role": "x"})
+    _, res = assemble_static_prompt(cat, ctx)
+    assert "plan_protocol" in res.included
+    block = block_by_id(cat, "plan_protocol")
+    text = block.render(ctx)
+    assert "## 任务分解 & 进度汇报协议" in text
+    assert "📋 计划" in text
+
+
+def test_granted_skills_roster_block_gated_by_extras():
+    cat = get_default_catalog()
+    block = block_by_id(cat, "granted_skills_roster")
+    assert block is not None
+    # 没 prefetch → 跳过
+    ctx_empty = AssemblyContext.make(extras={})
+    assert not block.applies_when.matches(ctx_empty)
+    # 有 prefetch → 装入
+    roster = "## 你已装配的技能 (Installed Skills)\n- pptx-author: PPT 制作"
+    ctx_with = AssemblyContext.make(extras={"granted_skills_roster": roster})
+    assert block.applies_when.matches(ctx_with)
+    assert block.render(ctx_with) == roster
+
+
+def test_stage_b_pptx_full_scenario_includes_new_blocks():
+    """Stage B 完整场景:project + 文件工具 + 发送工具 + skills roster
+    → 18 块里至少装 13 个(包括所有新增的 5 个块该装的部分)。"""
+    cat = get_default_catalog()
+    ctx = AssemblyContext.make(
+        scope_tags=["pptx_authoring"],
+        granted_tools={"write_file", "create_pptx", "send_email"},
+        granted_skills={"pptx-author"},
+        role_kind="analyst", ctx_type="project",
+        extras={
+            "agent_name": "Bob", "agent_role": "analyst", "language": "zh",
+            "agent_system_prompt": "资深分析师",
+            "working_dir": "/tmp/ws",
+            "shared_workspace": "/tmp/proj",
+            "project_name": "Q3", "project_id": "p1",
+            "project_context_files": [("PROJECT_CONTEXT.md", "目标")],
+            "model_guidance": "GPT-4o specific",
+            "granted_skills_roster": "## skills\n- pptx-author",
+            "retrieval_protocol": "## 检索",
+        },
+    )
+    _, res = assemble_static_prompt(cat, ctx)
+    for required in (
+        "identity", "tool_rules", "knowledge_rules",
+        "file_display_short", "file_display_long",
+        "image_display", "image_display_long",
+        "workspace_context_basic", "workspace_context_full",
+        "persona", "settings_block",
+        "project_context_md", "model_guidance",
+        "attachment_contract", "plan_protocol",
+        "granted_skills_roster", "retrieval_protocol",
+    ):
+        assert required in res.included, f"{required} missing"

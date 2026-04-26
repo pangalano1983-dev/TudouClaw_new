@@ -1,21 +1,30 @@
 """Default prompt block catalog — 把当前 ``agent._build_static_system_prompt``
-里 13+ 个无条件 ``parts.append`` 的块,转成有 ``BlockGate`` 元数据的
+里所有 ``parts.append`` 的块,转成有 ``BlockGate`` 元数据的
 ``PromptBlock`` 列表。
 
-Stage A 范围(本文件目前的状态)
-================================
-* **块 id + 装入条件**:精确,这是 Stage A 的核心产出
-* **块 text**:大部分块从 ``app.system_prompt`` 里复用现成字符串;少数
-  inline 在 ``agent.py`` 的块用 lambda 占位(返回 marker 字符串),
-  Stage B 切流量前再做精确文本提取
+Stage A 范围:13 个块 metadata,2 个 placeholder
+Stage B(本文件当前状态):**全部 18 个块用真实文本**,placeholder 已替换
+================================================================
+* **块 id + 装入条件**:精确
+* **块 text**:全部从 ``app.system_prompt`` 引用单一来源常量/函数;
+  agent.py inline 块(file_display_long / workspace_context_full /
+  image_display_long / attachment_contract / plan_protocol)对应文本已
+  抽到 system_prompt.py
 * **不读文件 / 不查 hub**:catalog 里所有块都是纯数据 / lambda(ctx),不
-  读任何 IO。文件类内容(PROJECT_CONTEXT.md 等)留给 caller 在构造
-  ``AssemblyContext`` 前 prefetch 进 ``extras``。
+  读任何 IO。文件类内容(PROJECT_CONTEXT.md / granted_skills_roster 等)
+  留给 caller 在构造 ``AssemblyContext`` 前 prefetch 进 ``extras``。
+
+跟 v1 的对照(v1=agent._build_static_system_prompt 的 parts 顺序)
+=================================================================
+* v1 emit 的所有内容,catalog 都覆盖了对应的 PromptBlock
+* v1 有的 **重复**(scene_prompts 在最前面被 prepend 一次,又在
+  compose_full_prompt 内 build_settings_block 时再 emit 一次)→ catalog
+  只 emit 一次,这是 v2 的**第一个有意去重**
 
 未来扩展
 ========
-* operator 可在 settings 里追加块(scene_prompts 已有结构,Stage B 把
-  它每个条目变成一个 PromptBlock 加到 catalog)
+* operator 可在 settings 里追加块(scene_prompts 已有结构,Stage B 后续
+  把每个条目变成一个 PromptBlock 加到 catalog)
 * 块的 owner 字段:让 reviewer 知道改某块要找谁
 """
 
@@ -160,25 +169,54 @@ def _retrieval_protocol_text(ctx: AssemblyContext) -> str:
     return ctx.extras.get("retrieval_protocol") or ""
 
 
-# 这些块的 text inline 在 agent.py,Stage B 再精确提取。Stage A 用现成
-# 占位,日志能看出"该不该装"已经够 Stage A 用。
-_FILE_DISPLAY_LONG_PLACEHOLDER = (
-    "<file_display>\n"
-    "When you produce a file in your workspace (video, image, audio, "
-    "document, archive, etc.) the portal automatically renders a "
-    "clickable FileCard for it in the chat UI — you do NOT need to "
-    "embed it yourself. (See agent.py 3478-3505 for full text — to be "
-    "extracted in Stage B.)\n"
-    "</file_display>"
-)
+def _file_display_short_text(ctx: AssemblyContext) -> str:
+    """SHORT-form file_display — 镜像 ``compose_full_prompt`` 里的 _FILE_DISPLAY,
+    跟 LONG 版互为补充(LONG 加 detail rules + 中文摘要)。Always 装入,
+    跟 v1 ``compose_full_prompt`` 行为一致。"""
+    return _sp._FILE_DISPLAY
 
-_ATTACHMENT_CONTRACT_PLACEHOLDER = (
-    "<attachment_contract>\n"
-    "当你调用发送类工具(send_email / send_message)且本轮已产出文件,"
-    "必须把文件路径放进 attachments 参数。(See agent.py 3645-3658 for "
-    "full text — to be extracted in Stage B.)\n"
-    "</attachment_contract>"
-)
+
+def _file_display_long_text(ctx: AssemblyContext) -> str:
+    """LONG-form file_display — 加 5 条详细规则 + 中文摘要。仅当 agent 有
+    文件产出工具时装,无文件产出工具的 agent 无须背这条 contract。"""
+    return _sp._FILE_DISPLAY_LONG
+
+
+def _attachment_contract_text(ctx: AssemblyContext) -> str:
+    """根据 ctx 选 zh / en 版,交回单一来源常量。"""
+    return _sp._ATTACHMENT_CONTRACT_ZH if _use_zh(ctx) else _sp._ATTACHMENT_CONTRACT_EN
+
+
+def _image_display_long_text(ctx: AssemblyContext) -> str:
+    """LONG-form image_display — 含前端 markdown 路径渲染细节。"""
+    return _sp._IMAGE_DISPLAY_LONG_ZH if _use_zh(ctx) else _sp._IMAGE_DISPLAY_LONG_EN
+
+
+def _workspace_context_full_text(ctx: AssemblyContext) -> str:
+    """LONG-form workspace context with deliverable routing — 来自 agent.py
+    inline,现在统一从 system_prompt 拉。空 working_dir + 空 shared 时返回
+    空串(assembler 自动跳过)。"""
+    return _sp._workspace_context_long(
+        ctx_type=ctx.ctx_type,
+        use_zh=_use_zh(ctx),
+        working_dir=ctx.extras.get("working_dir") or "",
+        shared_workspace=ctx.extras.get("shared_workspace") or "",
+        project_name=ctx.extras.get("project_name") or "",
+        project_id=ctx.extras.get("project_id") or "",
+    )
+
+
+def _plan_protocol_text(ctx: AssemblyContext) -> str:
+    """任务分解 + ✓ 步骤汇报协议。当前只有中文版(原 inline 也只有中文)。
+    驱动 UI TASK QUEUE 面板,所有 agent 都装。"""
+    return _sp._PLAN_PROTOCOL_ZH
+
+
+def _granted_skills_roster_text(ctx: AssemblyContext) -> str:
+    """已装配 skill roster — caller prefetch 到 extras['granted_skills_roster']。
+    内容是字符串(由 ``_build_granted_skills_roster`` 计算好;catalog 不
+    自己读 skill registry 避免 IO)。空时跳过。"""
+    return ctx.extras.get("granted_skills_roster") or ""
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -222,6 +260,14 @@ DEFAULT_BLOCKS: list[PromptBlock] = [
         owner="platform",
     ),
     PromptBlock(
+        id="file_display_short",
+        text=_file_display_short_text,
+        applies_when=Always(),
+        priority=30,
+        description="<file_display> 短版 — 跟 v1 ``compose_full_prompt`` 一致,所有 agent 装",
+        owner="ui",
+    ),
+    PromptBlock(
         id="image_display",
         text=_image_display_text,
         applies_when=BlockGate(
@@ -233,7 +279,7 @@ DEFAULT_BLOCKS: list[PromptBlock] = [
             },
         ),
         priority=32,
-        description="图片显示协议 — markdown 图片语法 + 工作区路径",
+        description="图片显示协议(短版) — markdown 图片语法 + 工作区路径",
         owner="ui",
     ),
     PromptBlock(
@@ -244,7 +290,7 @@ DEFAULT_BLOCKS: list[PromptBlock] = [
             # 会返回空,assembler 自动当 empty_render 跳过
         ),
         priority=40,
-        description="<workspace_context> 块 — 写文件去哪、共享/私有目录",
+        description="<workspace_context> 短版 — 写文件去哪、共享/私有目录",
         owner="platform",
     ),
     PromptBlock(
@@ -276,13 +322,23 @@ DEFAULT_BLOCKS: list[PromptBlock] = [
     ),
     PromptBlock(
         id="file_display_long",
-        text=_FILE_DISPLAY_LONG_PLACEHOLDER,
+        text=_file_display_long_text,
         applies_when=BlockGate(
             has_tools_in=set(_FILE_PRODUCING_TOOLS),
         ),
         priority=60,
         description="<file_display> 长版协议 — 仅当 agent 有文件产出工具时装",
         owner="ui",
+    ),
+    PromptBlock(
+        id="workspace_context_full",
+        text=_workspace_context_full_text,
+        applies_when=BlockGate(
+            # working_dir / shared_workspace 都空时返回空 → 自动跳过
+        ),
+        priority=62,
+        description="<workspace_context> 长版 — deliverable routing rules + 子 agent 提示",
+        owner="platform",
     ),
     PromptBlock(
         id="project_context_md",
@@ -306,14 +362,44 @@ DEFAULT_BLOCKS: list[PromptBlock] = [
         owner="platform",
     ),
     PromptBlock(
+        id="image_display_long",
+        text=_image_display_long_text,
+        applies_when=BlockGate(
+            # v1 unconditional emit。catalog 也保持 Always — 后续可加
+            # has_tools_in={create_pptx,...} 进一步收紧。
+        ),
+        priority=72,
+        description="<image_display> 长版 — markdown 图片语法 + 前端渲染细节",
+        owner="ui",
+    ),
+    PromptBlock(
         id="attachment_contract",
-        text=_ATTACHMENT_CONTRACT_PLACEHOLDER,
+        text=_attachment_contract_text,
         applies_when=BlockGate(
             has_tools_in=set(_MESSAGING_TOOLS),
         ),
         priority=75,
         description="<attachment_contract> — 调发送类工具时必须把文件放 attachments",
         owner="messaging",
+    ),
+    PromptBlock(
+        id="plan_protocol",
+        text=_plan_protocol_text,
+        applies_when=Always(),  # v1 unconditional;只有 zh 版本
+        priority=80,
+        description="任务分解 + ✓ 步骤汇报协议(驱动 TASK QUEUE 面板)",
+        owner="ui",
+    ),
+    PromptBlock(
+        id="granted_skills_roster",
+        text=_granted_skills_roster_text,
+        applies_when=BlockGate(
+            # 由 caller prefetch 到 extras;空时跳过
+            custom=lambda c: bool(c.extras.get("granted_skills_roster")),
+        ),
+        priority=85,
+        description="已装配 skill roster — list[skill] one-line-per-skill,装在静态 prompt 末尾",
+        owner="platform",
     ),
 ]
 

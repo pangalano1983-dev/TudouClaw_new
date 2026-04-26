@@ -1,7 +1,7 @@
 # Phase 2b — System Prompt 块化条件装入
 
-> 状态:**Stage A 已交付**(基础设施 + 13 块 metadata + dry-run wire-in,默认 OFF)。
-> Stage B/C(切流量)留下个 session 推进。
+> 状态:**Stage A + Stage B Step 1 已交付**。
+> Stage B 余项(scene_prompts schema + 1-2 周观察)+ Stage C(切流量)留下个 session。
 
 ## 为什么做这件事
 
@@ -90,7 +90,8 @@ def diff_summary(v1_text, v2_text) -> dict:
 
 ### 默认 catalog(`app/prompt_block_catalog.py`)
 
-13 个 PromptBlock,priority 10-75:
+**18 个 PromptBlock**,priority 10-85(Stage B 把 Stage A 的 13 块 + 2 个
+placeholder 真实化,新增 5 块完整覆盖 v1 的所有 inline 块):
 
 | id | priority | 条件 | text 来源 |
 |---|---|---|---|
@@ -98,17 +99,23 @@ def diff_summary(v1_text, v2_text) -> dict:
 | language_directive | 15 | Always | system_prompt._language_directive |
 | tool_rules | 20 ⚓ | Always | system_prompt._TOOL_RULES_ZH/EN |
 | knowledge_rules | 25 | Always | system_prompt._KNOWLEDGE_RULES_ZH/EN |
+| **file_display_short** 🆕 | 30 | Always | system_prompt._FILE_DISPLAY |
 | image_display | 32 | scopes={data_analysis, tech_review, prd_writing, pptx_authoring, one_on_one} | system_prompt._IMAGE_DISPLAY_ZH/EN |
 | workspace_context_basic | 40 | empty render auto-skip | system_prompt._workspace_context |
 | persona | 50 ⚓ | Always(三字段空时空 render)| system_prompt.build_persona_block |
 | retrieval_protocol | 55 | extras['retrieval_protocol'] 非空 | caller prefetch |
 | settings_block | 58 | Always(已有 role 过滤)| system_prompt.build_settings_block |
-| file_display_long | 60 | has_tools_in={write_file, edit_file, create_pptx, ...} | placeholder(Stage B 提取) |
+| file_display_long | 60 | has_tools_in={write_file, edit_file, create_pptx, ...} | **system_prompt._FILE_DISPLAY_LONG** ✅ Stage B 真实文本 |
+| **workspace_context_full** 🆕 | 62 | empty render auto-skip(working_dir+shared 都空才跳)| system_prompt._workspace_context_long |
 | project_context_md | 65 | ctx_type∈{project,meeting} + extras['project_context_files'] 非空 | caller prefetch |
 | model_guidance | 70 | extras['model_guidance'] 非空 | caller prefetch |
-| attachment_contract | 75 | has_tools_in={send_email, send_message, ...} | placeholder(Stage B 提取) |
+| **image_display_long** 🆕 | 72 | Always(后续可加 has_tools_in 收紧)| system_prompt._IMAGE_DISPLAY_LONG_ZH/EN |
+| attachment_contract | 75 | has_tools_in={send_email, send_message, ...} | **system_prompt._ATTACHMENT_CONTRACT_ZH/EN** ✅ Stage B 真实文本 |
+| **plan_protocol** 🆕 | 80 | Always(只有中文版)| system_prompt._PLAN_PROTOCOL_ZH |
+| **granted_skills_roster** 🆕 | 85 | extras['granted_skills_roster'] 非空 | caller prefetch(_build_granted_skills_roster) |
 
 ⚓ = `cache_anchor=True`(prefix 稳定边界标记)。
+🆕 = Stage B 新增。
 
 ### Dry-run wire-in(已加,默认 OFF)
 
@@ -128,31 +135,49 @@ v1 返回值不变 — agent 行为完全不变。
 
 ---
 
-## 三场景 token 节省(基于 Stage A 测试)
+## 三场景 token 节省
 
-| 场景 | v1 装入 | v2 装入 | 跳过原因 |
-|---|---|---|---|
-| casual_chat(无 persona / 无文件工具)| 13 块 | 5 块 | image_display(scope), workspace(empty), persona(empty), retrieval(custom), file_display_long(no tool), project_md(ctx), model_guidance(custom), attachment_contract(no tool)|
-| pptx_authoring(project + file 工具 + send_email)| 13 块 | 12 块 | retrieval_protocol(custom)|
-| meeting(send_email 但无文件工具)| 13 块 | 8 块 | image_display(scope), retrieval, file_display_long(no tool), project_md(custom), model_guidance(custom)|
+### Stage A 实测预期(基于 13 块 + placeholder)
+- casual_chat:~66%、data_analysis:~26%、pptx_authoring:~31%、加权平均:~39%
 
-预期 token 节省(根据条件命中率):
-- casual_chat:**~66%**
-- data_analysis:**~26%**
-- pptx_authoring:**~31%**
-- 加权平均:**~39%**
+### Stage B 实测(2026-04-26,18 块 + 真实文本 + dry-run)
+
+通过 `TUDOU_PROMPT_V2_DRYRUN=1` 跑 3 个 synthetic agent,实际 byte 对比:
+
+| 场景 | v1 chars | v2 chars | 节省 | v2_only_lines |
+|---|---|---|---|---|
+| casual_chat(zh,solo,无文件工具) | 12,748 | 6,633 | **-48%** | 0 |
+| pptx_authoring(zh,project,file+send) | 13,085 | 8,572 | **-34%** | 0 |
+| meeting(en,meeting,send 无文件) | 14,515 | 8,643 | **-40%** | 0 |
+
+**关键验证**:`v2_only_lines=0` — v2 是 v1 的真子集,不会"误装"v1 不会发的内容。
+所有节省全部来自有意 gating(scope / has_tools_in / extras-prefetch 为空)。
+
+平均节省 **-41%**,接近 Stage A 预期的 -39% 加权平均上限。
 
 ---
 
 ## 切流量路线图(Stage B → C)
 
-### Stage B: ghost(下个 session)
+### Stage B Step 1 ✅ 已完成(2026-04-26)
 
-1. **精确文本提取** — `file_display_long` / `attachment_contract` / agent.py inline 长块从 placeholder 替换为真实文本
-2. **scene_prompts schema 加 `scopes: [...]` 字段** — operator UI 也露出来
-3. **拓展 catalog** — 把 agent.py 里其他遗漏的块全部纳入(目前只覆盖了核心 13 块,实际可能还有 5-7 个零散块)
-4. v2 装入但 v1 仍是真返回值,日志双跑 1-2 周
-5. 与 Phase 1 cache_hit_rate 度量做对比验证
+1. ✅ **精确文本提取** — `file_display_long` / `attachment_contract` placeholder 替换为真实文本
+2. ✅ **拓展 catalog** — 5 个新块覆盖了 agent.py 里所有遗漏的 inline 块
+   (file_display_short, workspace_context_full, image_display_long,
+   plan_protocol, granted_skills_roster)
+3. ✅ **agent.py inline 块抽到 system_prompt.py** — 5 个常量 + 1 个 fn,
+   单一来源;byte-equivalent 重构,v1 行为不变
+4. ✅ **dry-run hook prefetch IO 数据** — retrieval_protocol / model_guidance /
+   granted_skills_roster / project_context_files 都 prefetch 到 extras,
+   diff_summary 反映真实差距
+5. ✅ **测试** — 51 个 unit test(原 43 + 新 8),全过
+
+### Stage B 余项(下个 session)
+
+1. **scene_prompts schema 加 `scopes: [...]` 字段** — operator UI 露出 scope 选择
+2. v2 装入但 v1 仍是真返回值,日志双跑 1-2 周收集线上数据
+3. 与 Phase 1 cache_hit_rate 度量对比验证(`get_token_totals().cache_hit_rate`
+   预期从 25% 涨到 65-75%)
 
 ### Stage C: 切流量(再下个 session)
 
@@ -160,6 +185,9 @@ v1 返回值不变 — agent 行为完全不变。
 2. 按 role 分桶切流量(先选无 deliverable 的 role 如 casual / 客服)
 3. 出问题:`TUDOU_PROMPT_V2=0` 即时回退
 4. 全量发布 — 同时把 v1 的 `_build_static_system_prompt` 删除或仅保留 fallback
+5. 顺手 dedup:v1 今天 emit `<file_display>` / `<image_display>` /
+   `<workspace_context>` 各 2 次(SHORT + LONG),v2 catalog 里 SHORT/LONG 都
+   保留是为了 Stage B 等价对比;Stage C 切完可以根据 LLM 表现决定保留哪个
 
 ---
 
@@ -198,22 +226,35 @@ v1 返回值不变 — agent 行为完全不变。
 
 ---
 
-## Stage B/C 工作量估算
+## Stage B Step 1 工作量(已完成 2026-04-26)
+
+| 文件 | LOC | 状态 |
+|---|---|---|
+| `app/system_prompt.py` 抽常量 + workspace_context_long fn | +180 | ✅ |
+| `app/agent.py` 重构 inline → 引用常量 | -130(净减)| ✅ byte-equiv |
+| `app/agent.py` dry-run hook prefetch IO 数据 | +60 | ✅ |
+| `app/prompt_block_catalog.py` 5 块 + placeholder 替换 | +130 | ✅ |
+| `tests/test_prompt_blocks.py` 8 个新测试 | +180 | ✅ 51 tests pass |
+| **合计** | **~+420 LOC 净** | ✅ |
+
+---
+
+## Stage B 余项 / Stage C 工作量估算
 
 | 任务 | LOC | 时间 |
 |---|---|---|
-| 文本精确提取(2 个 placeholder + 5-7 个 inline 块) | ~400 | 1-2 天 |
-| scene_prompts schema migration | ~150 | 0.5-1 天 |
-| dry-run 数据分析 + catalog 调优 | — | 1-2 天 |
+| scene_prompts schema migration(scopes 字段)| ~150 | 0.5-1 天 |
+| dry-run 数据分析 + catalog 调优 | — | 1-2 天(等线上数据)|
 | 切流量基础设施(ENV / per-role 分桶) | ~100 | 0.5 天 |
 | 灰度发布 + 监控 | — | 1 周窗口 |
-| **合计** | **~650 LOC + 1 周观察** | **3-5 天 + 1 周** |
+| 切完 v1/v2 dedup | ~50 | 0.5 天 |
+| **合计** | **~300 LOC + 1 周观察** | **2 天 + 1 周** |
 
 ---
 
 ## 当前测试覆盖
 
-`tests/test_prompt_blocks.py` 共 43 个测试:
+`tests/test_prompt_blocks.py` 共 **51 个测试**(Stage A 43 + Stage B 8):
 
 - BlockGate 各维度:scopes / tools / skills / role_kind / ctx_type / requires_image / custom
 - AND 语义、custom 异常 fail-safe
@@ -223,5 +264,14 @@ v1 返回值不变 — agent 行为完全不变。
 - 7 种 exclusion reason 全覆盖
 - assemble_with_log 不崩
 - diff_summary 基本场景
-- 默认 catalog:size、唯一 id、3 场景集成
+- 默认 catalog:size(18)、唯一 id、3 场景集成
 - scope 切换导致装入集合变化(cache 稳定性核心)
+- **Stage B 新增**:
+  - `file_display_short` Always 装入 + 真实文本(非 placeholder)
+  - `file_display_long` 真实文本(去掉 placeholder)+ 5 条规则 + 中文摘要
+  - `attachment_contract` zh/en 分支真实文本
+  - `workspace_context_full` solo/project 分支 + empty render skip
+  - `image_display_long` zh/en 分支
+  - `plan_protocol` Always 装入
+  - `granted_skills_roster` extras-prefetch gating
+  - Stage B 完整 17 块场景集成(pptx_authoring + project + 全 prefetch)

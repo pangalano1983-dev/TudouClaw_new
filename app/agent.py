@@ -3474,35 +3474,10 @@ class Agent:
         # the chat" prose. The portal renders FileCards automatically
         # from the deliverable_dir, so the agent does not need to (and
         # must not) try to embed media inline in its reply text.
+        # Text lives in app.system_prompt._FILE_DISPLAY_LONG so the v2
+        # block catalog (Phase 2b) can mirror it without copy-paste.
         parts.append("")
-        parts.append(
-            "<file_display>\n"
-            "When you produce a file in your workspace (video, image, audio, "
-            "document, archive, etc.) the portal automatically renders a "
-            "clickable FileCard for it in the chat UI — you do NOT need to "
-            "embed it yourself. Follow these rules:\n"
-            "  1. NEVER write markdown image syntax `![name](path)` for "
-            "non-image files (mp4, mp3, pdf, docx, zip, etc.). It always "
-            "renders as a broken image.\n"
-            "  2. NEVER tell the user to drag the file into the chat window, "
-            "or to copy/move the file manually. The card is already there.\n"
-            "  3. NEVER fabricate `/api/portal/attachment?path=...` URLs in "
-            "your reply text. Use the file's plain relative or absolute "
-            "path if you must mention it; the FileCard handles the link.\n"
-            "  4. Keep your reply short: a one-line summary of what the file "
-            "is and (if relevant) what makes it interesting. The card "
-            "carries the filename, size, kind, and click-to-open action.\n"
-            "  5. For images specifically, you MAY use markdown image "
-            "syntax — but it is still optional, the card already includes "
-            "a thumbnail.\n"
-            "中文说明:你在 workspace 里产出文件后(视频/图片/音频/文档/压缩包等),"
-            "聊天界面会自动渲染一个可点击的 FileCard 卡片。你不需要、也不要试图自己"
-            "把文件嵌入消息里。规则:不要给非图片文件写 ![名字](路径) 的 markdown "
-            "图片语法(永远显示为破损图标);不要叫用户把文件拖进聊天框或手动复制;"
-            "不要在回复里编造 /api/portal/attachment?path=... 链接;一句话说明文件"
-            "做了什么就够,卡片自带文件名/大小/打开按钮。\n"
-            "</file_display>"
-        )
+        parts.append(_sp._FILE_DISPLAY_LONG)
 
         # Project context files — persistent project knowledge pinned into
         # every turn.  Modeled after Claude Code's CLAUDE.md convention:
@@ -3560,187 +3535,44 @@ class Agent:
         # Routing rule (driven by Agent.context_type; see dataclass docstring):
         #   solo     → all produced files go to private working_dir
         #   project  → ALL produced files go to project shared_workspace
-        #              (agent does NOT decide per-file; shared is the one place)
         #   meeting  → ALL produced files go to meeting shared_workspace
-        #              (same contract as project, different origin)
         #
-        # This replaces the old "agent decides whether peers need this file"
-        # heuristic, which produced confusing save locations (e.g. a PPTX
-        # ending up in shared even when user expected private workspace).
-        ws_lines = []
+        # Text + zh/en branches + project/meeting→solo degradation are all
+        # in app.system_prompt._workspace_context_long so the v2 block
+        # catalog mirrors it without duplicating ~60 lines.
         use_zh = is_zh or (p.language and p.language.startswith("zh"))
         ctx_type = (self.context_type or "solo").lower()
-        # Guard: only honor project/meeting routing if shared_workspace is
-        # actually set. Otherwise degrade to solo to avoid pointing the
-        # agent at an empty path.
-        if ctx_type in ("project", "meeting") and not self.shared_workspace:
-            ctx_type = "solo"
-        if use_zh:
-            ws_lines.append("\n<workspace_context>")
-            if ctx_type == "solo":
-                ws_lines.append(f"工作目录 (你自己的空间): {wd}")
-                ws_lines.append("")
-                ws_lines.append("⚠️ 文件写入规则 (必须遵守):")
-                ws_lines.append(f"• 所有产出文件写入工作目录: {wd}")
-            elif ctx_type == "project":
-                ws_lines.append(f"私有工作目录 (scratch/日志用): {wd}")
-                ws_lines.append(f"项目共享目录 (所有产出必须写这里): {self.shared_workspace}")
-                if self.project_name:
-                    ws_lines.append(f"所属项目: {self.project_name} (ID: {self.project_id})")
-                ws_lines.append("")
-                ws_lines.append("⚠️ 文件写入规则 (必须遵守):")
-                ws_lines.append(f"• 所有交付物 / 产出文件 → 必须写入项目共享目录: {self.shared_workspace}")
-                ws_lines.append("  （PPT、文档、报告、代码、图片等，一律放这里，不要自行判断"
-                                "是否只有你会用到）")
-                ws_lines.append(f"• 仅供你自己临时使用的 scratch / 日志 → 可写入私有目录: {wd}")
-            else:  # meeting
-                ws_lines.append(f"私有工作目录 (scratch/日志用): {wd}")
-                ws_lines.append(f"会议共享目录 (所有产出必须写这里): {self.shared_workspace}")
-                ws_lines.append("")
-                ws_lines.append("⚠️ 文件写入规则 (必须遵守):")
-                ws_lines.append(f"• 所有交付物 / 产出文件 → 必须写入会议共享目录: {self.shared_workspace}")
-                ws_lines.append("  （会议纪要、行动项、附件等，一律放这里）")
-                ws_lines.append(f"• 仅供你自己临时使用的 scratch / 日志 → 可写入私有目录: {wd}")
-            ws_lines.append("• 使用相对路径（如 src/main.py）而非绝对路径。")
-            ws_lines.append("• 创建子Agent (team_create) 时不要指定 working_dir，自动继承。")
-            ws_lines.append("</workspace_context>")
-        else:
-            ws_lines.append("\n<workspace_context>")
-            if ctx_type == "solo":
-                ws_lines.append(f"Workspace (your own): {wd}")
-                ws_lines.append("")
-                ws_lines.append("⚠️ File write rules (MUST follow):")
-                ws_lines.append(f"• All produced files go to your workspace: {wd}")
-            elif ctx_type == "project":
-                ws_lines.append(f"Private workspace (scratch/logs only): {wd}")
-                ws_lines.append(f"Project shared directory (ALL deliverables go here): {self.shared_workspace}")
-                if self.project_name:
-                    ws_lines.append(f"Project: {self.project_name} (ID: {self.project_id})")
-                ws_lines.append("")
-                ws_lines.append("⚠️ File write rules (MUST follow):")
-                ws_lines.append(f"• ALL deliverables / produced files → MUST go to shared dir: {self.shared_workspace}")
-                ws_lines.append("  (PPTs, docs, reports, code, images — all go here. Do NOT second-guess "
-                                "whether peers need the file.)")
-                ws_lines.append(f"• Your own scratch / logs only → may go to private dir: {wd}")
-            else:  # meeting
-                ws_lines.append(f"Private workspace (scratch/logs only): {wd}")
-                ws_lines.append(f"Meeting shared directory (ALL deliverables go here): {self.shared_workspace}")
-                ws_lines.append("")
-                ws_lines.append("⚠️ File write rules (MUST follow):")
-                ws_lines.append(f"• ALL deliverables / produced files → MUST go to meeting shared dir: {self.shared_workspace}")
-                ws_lines.append("  (Meeting notes, action items, attachments — all go here.)")
-                ws_lines.append(f"• Your own scratch / logs only → may go to private dir: {wd}")
-            ws_lines.append("• Use relative paths (e.g., src/main.py), not absolute paths.")
-            ws_lines.append("• When spawning sub-agents (team_create), do NOT set working_dir.")
-            ws_lines.append("</workspace_context>")
-        parts.append("\n".join(ws_lines))
+        parts.append("\n" + _sp._workspace_context_long(
+            ctx_type=ctx_type,
+            use_zh=bool(use_zh),
+            working_dir=str(wd),
+            shared_workspace=self.shared_workspace or "",
+            project_name=self.project_name or "",
+            project_id=self.project_id or "",
+        ))
 
         # --- Attachment contract: reminds the agent to actually attach
-        # files when calling send_* tools.  Failure mode this prevents:
-        # agent produces a file, then calls send_email/send_message but
-        # only mentions the filename in the email body — recipient gets
-        # no attachment.  The tool description alone is not enough; the
-        # behavior drifts without an explicit system-level contract.
-        if use_zh:
-            parts.append(
-                "\n<attachment_contract>\n"
-                "当你调用发送类工具（send_email / send_message / 类似的 IM "
-                "发送工具）且本轮对话中你刚产出了文件（PPT、文档、报告、图片等）"
-                "或用户明确要求发送某个文件时，必须：\n"
-                "  1. 把文件的完整路径放进工具调用的 `attachments` 参数"
-                "（数组）。\n"
-                "  2. 不要只在邮件/消息正文里写文件名 —— 收件人不会因为正文"
-                "提到文件名就自动收到附件。\n"
-                "  3. 如果工具有多个附件参数名（如 attachments / files / "
-                "attach_paths），任选一个支持的即可，但不能留空。\n"
-                "  4. 如果不确定文件是否需要作为附件发送，先问用户；不要"
-                "静默省略。\n"
-                "</attachment_contract>"
-            )
-        else:
-            parts.append(
-                "\n<attachment_contract>\n"
-                "When you call a send-type tool (send_email / send_message / "
-                "any IM send tool) AND you produced a file in this turn "
-                "(PPT, doc, report, image, etc.) OR the user explicitly asked "
-                "you to send a file, you MUST:\n"
-                "  1. Put the file's full path into the tool call's "
-                "`attachments` parameter (an array).\n"
-                "  2. Do NOT rely on mentioning the filename in the email/"
-                "message body — recipients will not get the file just "
-                "because you named it in prose.\n"
-                "  3. If the tool exposes multiple attachment-like "
-                "parameters (attachments / files / attach_paths), pick any "
-                "supported one, but it must not be empty.\n"
-                "  4. If unsure whether a file should be attached, ask the "
-                "user — don't silently omit it.\n"
-                "</attachment_contract>"
-            )
+        # files when calling send_* tools. Text in app.system_prompt
+        # so the v2 catalog can gate it on has_tools_in={send_*} without
+        # copy-pasting.
+        parts.append("\n" + (
+            _sp._ATTACHMENT_CONTRACT_ZH if use_zh else _sp._ATTACHMENT_CONTRACT_EN
+        ))
 
         # --- Inline image display: tell the agent how to surface images ---
         # Portal chat renders markdown `![alt](path)` as an inline <img> by
-        # routing the path through /api/portal/attachment. The agent doesn't
-        # need to know that detail — just that emitting the markdown is the
-        # correct way to show a picture in the reply.
-        if use_zh:
-            parts.append(
-                "\n<image_display>\n"
-                "当你需要给用户展示本地图片/截图（例如你生成、下载、找到的 "
-                "PNG/JPG/GIF/WEBP 文件）时，直接在回复里用 markdown 图片语法："
-                "  ![简短描述](相对路径或绝对路径)\n"
-                "前端会自动把它渲染成可点击放大的图片。\n"
-                "• 优先使用相对于你工作目录的路径，例如 `./blog-screenshot.png`；\n"
-                "• 也可以写绝对路径，只要文件在你的工作目录下；\n"
-                "• 不要只说「文件保存在 xxx」，要同时贴出 ![](path)，这样用户能立即看到；\n"
-                "• 远端 URL（http/https）直接写即可，同样会渲染成图片；\n"
-                "• 只支持 png/jpg/jpeg/gif/webp/svg/bmp/ico，其他类型走普通文件链接。\n"
-                "</image_display>"
-            )
-        else:
-            parts.append(
-                "\n<image_display>\n"
-                "When you need to show the user a local image/screenshot (e.g. a "
-                "PNG/JPG/GIF/WEBP file you generated, downloaded, or found), embed "
-                "it directly in your reply with markdown image syntax:\n"
-                "  ![short description](relative-or-absolute-path)\n"
-                "The portal chat UI will render it inline as a clickable, zoomable image.\n"
-                "• Prefer paths relative to your working directory, e.g. `./blog-screenshot.png`.\n"
-                "• Absolute paths are fine as long as the file lives inside your workspace.\n"
-                "• Don't just say \"saved to xxx\" — always paste ![](path) so the user sees it.\n"
-                "• Remote http/https URLs work too and render the same way.\n"
-                "• Supported formats: png, jpg, jpeg, gif, webp, svg, bmp, ico.\n"
-                "</image_display>"
-            )
+        # routing the path through /api/portal/attachment. Long-form text
+        # lives in app.system_prompt for catalog reuse.
+        parts.append("\n" + (
+            _sp._IMAGE_DISPLAY_LONG_ZH if use_zh else _sp._IMAGE_DISPLAY_LONG_EN
+        ))
 
         # ── Plan + step tracking protocol (for UI task-queue visuals) ─
-        # We ask the agent to emit a structured plan block at the very
-        # start of a complex reply, and a ✓ marker as each step
-        # finishes. The host (app.agent) observes these markers and
-        # updates the TASK QUEUE panel in real time. If the agent
-        # forgets, no harm done — the conversation still works, the
-        # UI just won't show step progress for that turn.
-        parts.append(
-            "\n"
-            "## 任务分解 & 进度汇报协议\n"
-            "当用户请求是一个多步任务（比如研究 + 写报告、搜索 + 生成文件 + 发邮件），"
-            "请在**开始执行之前**先输出一个计划块，然后再开始动手：\n"
-            "\n"
-            "```\n"
-            "📋 计划\n"
-            "1. [第一步做什么] — 工具: <tool_name>\n"
-            "2. [第二步做什么] — 工具: <tool_name>\n"
-            "3. ...\n"
-            "```\n"
-            "\n"
-            "规则：\n"
-            "- 计划块只在**首次响应**里出现一次；后续轮次无需重复。\n"
-            "- 每完成一步，单独一行写 `✓ 第 N 步：<一句话说做了什么>`。\n"
-            "- 如果用户只是闲聊/一次问答（不涉及多步交付），**跳过**计划块，直接回答。\n"
-            "- 工具名要和你后续实际调用的工具一致（如 `web_search` / `bash` / `write_file`）。\n"
-            "- 步骤数 1–6 个，不要拆得太细；一个「搜 3 个来源」算一步，不要写成 3 步。\n"
-            "\n"
-            "这个协议只是让 UI 能把工具调用归到对应步骤——你该说的话、用的工具都不变。"
-        )
+        # Drives the TASK QUEUE panel: agent emits 📋 plan + ✓ markers,
+        # host observes & updates UI. Forget → no harm, just no step
+        # progress visualization that turn. Text in system_prompt for
+        # catalog reuse.
+        parts.append("\n" + _sp._PLAN_PROTOCOL_ZH)
 
         result = "\n".join(parts)
 
@@ -3784,18 +3616,78 @@ class Agent:
         return result
 
     def _dry_run_prompt_v2(self, v1_text: str) -> None:
-        """Compute v2 prompt assembly + log diff vs v1. No side effect on v1."""
+        """Compute v2 prompt assembly + log diff vs v1. No side effect on v1.
+
+        Prefetches IO-bound block data (project_context_files,
+        retrieval_protocol, model_guidance, granted_skills_roster) into
+        ``extras`` so v2's output reflects what it WOULD produce in
+        production. Without prefetch the diff_summary over-estimates the
+        delta.
+        """
         from .prompt_blocks import AssemblyContext
         from .prompt_block_catalog import get_default_catalog
         from .system_prompt_v2 import assemble_with_log, diff_summary
 
-        # Build AssemblyContext from current agent state. We don't have
-        # scope_tags here (it's a per-turn signal); leave empty so blocks
-        # gated on scope are excluded — this gives a "lower bound" of
-        # what v2 would include.
         p = self.profile
         granted_tools = set(getattr(self, "_granted_tool_names", None) or [])
         granted_skills = set(getattr(p, "granted_skills", None) or [])
+
+        # ── Prefetch IO-bound block content ─────────────────────────
+        # retrieval_protocol — RAG advisor only
+        try:
+            retrieval_protocol = _build_retrieval_protocol(p) or ""
+        except Exception:
+            retrieval_protocol = ""
+
+        # model_guidance — model-specific
+        try:
+            from . import security as _sec
+            model_guidance = _sec.get_model_tool_guidance(self.model or "") or ""
+        except Exception:
+            model_guidance = ""
+
+        # granted_skills_roster — uses the same builder as v1
+        try:
+            granted_skills_roster = _build_granted_skills_roster(self) or ""
+        except Exception:
+            granted_skills_roster = ""
+
+        # project_context_files — only for project/meeting agents.
+        # Read PROJECT_CONTEXT.md / TUDOU_CLAW.md / CLAW.md / README.md
+        # from working_dir + shared_workspace, mirroring agent.py inline.
+        project_context_files: list = []
+        try:
+            from pathlib import Path as _PCPath
+            wd = self._effective_working_dir()
+            _ctx_dirs: list[_PCPath] = [wd]
+            if getattr(self, "shared_workspace", None):
+                try:
+                    _sw = _PCPath(self.shared_workspace)
+                    if _sw.resolve() != wd.resolve():
+                        _ctx_dirs.append(_sw)
+                except (OSError, ValueError):
+                    pass
+            _seen: set[str] = set()
+            for _dir in _ctx_dirs:
+                for name in ("PROJECT_CONTEXT.md", "TUDOU_CLAW.md",
+                             "CLAW.md", "README.md"):
+                    f = _dir / name
+                    try:
+                        if not f.exists():
+                            continue
+                        _rp = str(f.resolve())
+                        if _rp in _seen:
+                            continue
+                        _seen.add(_rp)
+                        project_context_files.append(
+                            (name, f.read_text(encoding="utf-8",
+                                               errors="replace")[:4000]),
+                        )
+                        break  # one file per dir, priority order
+                    except OSError:
+                        continue
+        except Exception:
+            project_context_files = []
 
         ctx = AssemblyContext.make(
             scope_tags=[],  # empty in dry-run; real wire-in passes scopes
@@ -3815,6 +3707,11 @@ class Agent:
                 "project_name": getattr(self, "project_name", "") or "",
                 "project_id": getattr(self, "project_id", "") or "",
                 "meeting_id": getattr(self, "source_meeting_id", "") or "",
+                # Phase 2b Stage B — prefetched IO-bound block data
+                "retrieval_protocol": retrieval_protocol,
+                "model_guidance": model_guidance,
+                "granted_skills_roster": granted_skills_roster,
+                "project_context_files": project_context_files,
             },
         )
         v2_text, _result = assemble_with_log(
