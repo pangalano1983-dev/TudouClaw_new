@@ -100,6 +100,23 @@ _LEAK_SCANNERS: list[tuple[str, "re.Pattern", str]] = [
 ]
 
 
+# Documentation-example markers. A leak match whose value (case-folded)
+# contains any of these is treated as a doc example, not a real secret.
+# RFC 2606 reserves *.test / *.example / *.invalid / *.localhost +
+# example.{com,org,net} for use in documentation. Skill READMEs and
+# wiki pages frequently show ``alice@example.com`` or ``yourname@host``
+# as placeholders — without this filter the ssh_target / local_path
+# patterns would block them.
+_DOC_EXAMPLE_MARKERS = (
+    "example.com", "example.org", "example.net",
+    ".test", ".example", ".invalid", ".localhost",
+    "localhost",
+    "your_username", "your-username", "your_email", "yourname",
+    "<your", "{your",
+    "user@host", "user@server",
+)
+
+
 # Env vars never worth flagging as leaks — universal shell vars
 # whose values are not really sensitive.
 _ENV_SCAN_SKIP_KEYS = frozenset({
@@ -136,6 +153,12 @@ def scan_for_leaks(content: str) -> dict:
             if key in seen:
                 continue
             seen.add(key)
+            # Skip RFC 2606 / common documentation placeholders so a
+            # README mentioning ``alice@example.com`` doesn't trip
+            # ssh_target, etc.
+            val_lc = val.lower()
+            if any(marker in val_lc for marker in _DOC_EXAMPLE_MARKERS):
+                continue
             display = val if len(val) <= 60 else val[:57] + "..."
             leaks.append({
                 "type": typ,

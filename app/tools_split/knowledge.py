@@ -36,6 +36,214 @@ _LEARN_LIMIT_MIN = 1
 _LEARN_LIMIT_MAX = 20
 
 
+# ── Per-turn semantic query dedup ────────────────────────────────────
+# Agents often call memory_recall / knowledge_lookup 4-5 times in one turn
+# with tiny query variations ("海外共享中心 业务规划" vs "海外云共享服务中心
+# 业务规划 共享中心") — the same-signature detector requires EXACT match so
+# these slip through. Each call hits ChromaDB + embedding model (slow),
+# so the UI spins at ⏳ while the agent fires yet another variant.
+#
+# Solution: short-circuit at the tool entry. Track normalized queries in
+# a per-agent-per-turn bucket; if a new query has char-3gram Jaccard ≥
+# 0.75 with any prior query in the same turn, return the previous result
+# verbatim with a note.
+
+def _norm_query(q: str) -> str:
+    """Lowercase + strip spaces/punct; keep CJK + alphanum."""
+    import re as _re
+    return _re.sub(r"[^\w\u4e00-\u9fa5]+", "", (q or "").lower())
+
+
+def _query_similarity(a: str, b: str) -> float:
+    """Char-3gram Jaccard similarity of normalized queries (0-1)."""
+    na, nb = _norm_query(a), _norm_query(b)
+    if len(na) < 3 or len(nb) < 3:
+        return 1.0 if na == nb else 0.0
+    ga = {na[i:i+3] for i in range(len(na) - 2)}
+    gb = {nb[i:i+3] for i in range(len(nb) - 2)}
+    if not ga or not gb:
+        return 0.0
+    return len(ga & gb) / len(ga | gb)
+
+
+_MAX_SAME_TOOL_PER_TURN = 5  # hard cap, beyond this we refuse
+
+# Per-tool strict caps (Nov 2026): memory_recall / knowledge_lookup should
+# be called EXACTLY ONCE per turn with the widest possible query.
+# Calling them repeatedly with variant keywords burns tokens without new info.
+_STRICT_ONE_SHOT = frozenset({"memory_recall", "knowledge_lookup"})
+
+# ── Exploration-group budget ──
+# memory_recall / knowledge_lookup / web_search / glob_files are all
+# "look around" tools. The LLM treats them as independent budgets, but
+# from the USER's perspective they're the same "I'm still exploring" bucket.
+# So we count them TOGETHER and show the LLM a unified view via
+# [TOOL_CALL_STATE]. At 5 total cross-tool calls, all start returning
+# a "stop exploring, start delivering" banner.
+_EXPLORATION_TOOLS = frozenset({
+    "memory_recall", "knowledge_lookup", "web_search", "glob_files",
+})
+_EXPLORATION_HARD_CAP = 5
+
+
+def _build_tool_call_state(agent, tool_name: str, current_query: str) -> str:
+    """Produce a [TOOL_CALL_STATE] banner to prepend to the tool_result.
+
+    Makes the LLM see:
+      - How many times it has called exploration tools this turn
+      - What queries it has already tried (any tool in the exploration group)
+      - Whether it's over budget
+
+    Returns "" if no state to show (first call, or agent unavailable).
+    """
+    if agent is None:
+        return ""
+    cache = getattr(agent, "_turn_query_cache", None)
+    if cache is None:
+        return ""
+
+    # Count exploration calls across all tools in the group
+    total = 0
+    queries: list[str] = []
+    for tn in _EXPLORATION_TOOLS:
+        bucket = cache.get(tn) or []
+        total += len(bucket)
+        for q, _ in bucket:
+            if q:
+                queries.append(q)
+    if total == 0 and not current_query:
+        return ""
+
+    # Deduplicate queries by normalized form for display
+    seen: set = set()
+    uniq_queries: list[str] = []
+    for q in queries:
+        nq = _norm_query(q)
+        if nq in seen:
+            continue
+        seen.add(nq)
+        uniq_queries.append(q[:40])
+
+    remaining = max(0, _EXPLORATION_HARD_CAP - total)
+    lines = [
+        "[TOOL_CALL_STATE]",
+        f"- exploration_calls_this_turn: {total}  (memory_recall + knowledge_lookup + web_search + glob_files)",
+    ]
+    if uniq_queries:
+        # Show up to 8 unique queries — enough for LLM to see the pattern
+        shown = uniq_queries[-8:]
+        lines.append(f"- queries_so_far: {shown}")
+    lines.append(f"- budget_remaining: {remaining} (hard cap {_EXPLORATION_HARD_CAP})")
+    if total >= _EXPLORATION_HARD_CAP:
+        lines.append("")
+        lines.append("[DECISION]")
+        lines.append("你已到达探查预算硬上限。立即停止信息搜集,基于已有结果开始产出:")
+        lines.append("  (1) 如果信息足够 → 直接写交付物 (write_file)")
+        lines.append("  (2) 如果不够    → 用一句话告诉用户缺什么,不要再调工具")
+    elif total >= 3:
+        lines.append("")
+        lines.append("[DECISION]")
+        lines.append(f"你已调用 {total} 次探查工具。再看一眼 queries_so_far:")
+        lines.append("  - 如果关键词重叠度高 → 换明显不同的角度,或直接停止搜集开始产出")
+        lines.append("  - 如果每次都是近义词换排列组合 → 这是死循环, 必须停下")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _check_turn_dedup(agent, tool_name: str, query: str,
+                       threshold: float = 0.45) -> str | None:
+    """If ``query`` is >threshold similar to a prior query of the same
+    tool in the current turn, return the cached result string (with a
+    note prepended). Also enforces _MAX_SAME_TOOL_PER_TURN hard cap —
+    beyond 5 calls the tool refuses to run in the same turn.
+
+    Bucket is cleared at turn start by agent.chat() via `_turn_query_cache = {}`.
+    """
+    if agent is None or not query:
+        return None
+    cache = getattr(agent, "_turn_query_cache", None)
+    if cache is None:
+        cache = {}
+        try:
+            setattr(agent, "_turn_query_cache", cache)
+        except Exception:
+            return None
+    bucket = cache.setdefault(tool_name, [])
+
+    # Strict one-shot tools: memory_recall / knowledge_lookup must be
+    # called EXACTLY ONCE per turn. Second call always refuses regardless
+    # of query similarity — LLM must reuse first result or move on.
+    if tool_name in _STRICT_ONE_SHOT and len(bucket) >= 1:
+        prev_q, prev_result = bucket[0]
+        return (
+            f"[ONE_SHOT_VIOLATION — {tool_name} 本轮已调用 1 次,不允许再调]\n"
+            f"**规则**: memory_recall / knowledge_lookup 一轮只能调一次,"
+            f"第一次就必须用**最广的分词关键词**(把所有相关词拼在一起)。\n"
+            f"你第一次的查询是: {prev_q!r}\n"
+            f"如果当时没想全,只能基于已有结果继续;不要再调。\n\n"
+            f"--- 首次查询结果(必须复用) ---\n{prev_result}"
+        )
+
+    # Hard cap: other read-only tools called too many times this turn.
+    if len(bucket) >= _MAX_SAME_TOOL_PER_TURN:
+        return (
+            f"[RATE_LIMIT — {tool_name} already ran {len(bucket)} times "
+            f"this turn, hard cap reached]\n"
+            f"你这一轮调用 `{tool_name}` 已达 {_MAX_SAME_TOOL_PER_TURN} 次,"
+            f"继续调用**不会有新信息**。请立即:\n"
+            f"  (a) 基于已掌握的信息直接交付(写文档 / 给结论),\n"
+            f"  (b) 或明确告知用户信息不足,需要 TA 补充。\n"
+            f"已查过的关键词: {[q[:20] for q, _ in bucket[-5:]]}"
+        )
+
+    for prev_q, prev_result in bucket:
+        sim = _query_similarity(prev_q, query)
+        if sim >= threshold:
+            return (
+                f"[DUPLICATE_QUERY within same turn — similarity={sim:.2f} "
+                f"to earlier query {prev_q!r}]\n"
+                f"Reusing previous result to save tokens. 如果需要不同角度,"
+                f"请换**明显不同的关键词**(不要只加/减词;相似度 <0.45),或"
+                f"直接基于已有结果往下做;不要再用近义词重试同一查询。\n\n"
+                f"--- previous result ---\n{prev_result}"
+            )
+    return None
+
+
+def _cache_turn_result(agent, tool_name: str, query: str, result: str):
+    """Record (query, result) in this turn's bucket."""
+    if agent is None or not query:
+        return
+    cache = getattr(agent, "_turn_query_cache", None)
+    if cache is None:
+        cache = {}
+        try:
+            setattr(agent, "_turn_query_cache", cache)
+        except Exception:
+            return
+    bucket = cache.setdefault(tool_name, [])
+    bucket.append((query, result))
+    # Cap per-tool bucket to avoid unbounded growth
+    if len(bucket) > 10:
+        del bucket[:-10]
+
+
+def _wrap_with_state(agent, tool_name: str, query: str, result: str) -> str:
+    """Prepend a [TOOL_CALL_STATE] banner to the tool result so the LLM
+    sees cross-tool exploration count and budget. Idempotent — if result
+    already starts with [TOOL_CALL_STATE], return unchanged.
+    """
+    if not isinstance(result, str):
+        return result
+    if result.startswith("[TOOL_CALL_STATE]") or result.startswith("[DUPLICATE_QUERY") \
+            or result.startswith("[RATE_LIMIT"):
+        return result
+    banner = _build_tool_call_state(agent, tool_name, query)
+    if not banner:
+        return result
+    return banner + result
+
+
 # ── memory_recall (新 A.3) ──────────────────────────────────────────
 # Agent-PRIVATE L3 semantic memory lookup. Deliberately separate from
 # knowledge_lookup (which hits the ROLE-wide shared knowledge base):
@@ -60,6 +268,26 @@ def _tool_memory_recall(query: str = "",
     q = (query or "").strip()
     if not q:
         return "Error: query is required (what are you trying to remember?)."
+
+    # Per-turn dedup: if user already ran a near-identical query this turn,
+    # reuse. Stops the "海外共享中心 业务规划" ↔ "海外云共享服务中心 业务规划
+    # 共享中心" loop.
+    hub = _get_hub()
+    _agent = hub.get_agent(caller_id) if hub else None
+    logger.info(
+        "memory_recall dedup check: hub=%s agent=%s caller_id=%s q=%r "
+        "bucket_size=%s",
+        bool(hub), bool(_agent), caller_id[:8],
+        q[:40],
+        (len(getattr(_agent, "_turn_query_cache", {}).get("memory_recall", []))
+         if _agent is not None else "N/A"),
+    )
+    _cached = _check_turn_dedup(_agent, "memory_recall", q)
+    if _cached is not None:
+        logger.info("memory_recall dedup HIT → returning cached")
+        return _cached
+    logger.info("memory_recall dedup MISS → proceeding to real query")
+
     try:
         from ..core.memory import get_memory_manager as _get_mm
         mm = _get_mm()
@@ -80,19 +308,17 @@ def _tool_memory_recall(query: str = "",
 
     # ── 新 A.7: 把本轮用到的记忆 id 记在 agent 上，供响应合成时
     # 挂到 assistant 消息，UI 能渲染 🧠 badge + 删除按钮。
+    # (hub/_agent already resolved above for the dedup check, reuse.)
     try:
-        hub = _get_hub()
-        agent = hub.get_agent(caller_id) if hub else None
-        if agent is not None:
-            bucket = getattr(agent, "_turn_memory_refs", None)
+        if _agent is not None:
+            bucket = getattr(_agent, "_turn_memory_refs", None)
             if bucket is None:
                 bucket = []
-                setattr(agent, "_turn_memory_refs", bucket)
+                setattr(_agent, "_turn_memory_refs", bucket)
             for h in hits:
                 fid = h.get("id") or ""
                 if not fid:
                     continue
-                # Skip already-recorded refs within the same turn.
                 if any(r.get("id") == fid for r in bucket):
                     continue
                 bucket.append({
@@ -107,12 +333,14 @@ def _tool_memory_recall(query: str = "",
         logger.debug("memory_recall bucket tracking skipped: %s", _trk_err)
 
     if not hits:
-        return (
+        _no_hit = (
             f"No prior memory found for query '{q[:60]}'. "
             "You'll need to explore fresh — consider web_search or "
             "knowledge_lookup, and save_experience afterward so the "
             "next turn can skip it."
         )
+        _cache_turn_result(_agent, "memory_recall", q, _no_hit)
+        return _wrap_with_state(_agent, "memory_recall", q, _no_hit)
 
     lines = [f"Memory recall for '{q[:80]}' — {len(hits)} hit(s):"]
     for i, h in enumerate(hits, 1):
@@ -137,7 +365,9 @@ def _tool_memory_recall(query: str = "",
         "out-of-date or wrong, run your own verification and then "
         "save_experience with the corrected finding — it'll refresh the old one."
     )
-    return "\n".join(lines)
+    _result = "\n".join(lines)
+    _cache_turn_result(_agent, "memory_recall", q, _result)
+    return _wrap_with_state(_agent, "memory_recall", q, _result)
 
 
 # ── save_experience ──────────────────────────────────────────────────
@@ -155,13 +385,50 @@ def _tool_save_experience(
     evidence: list[str] | None = None,
     **ctx: Any,
 ) -> str:
-    """Persist an experience entry into the role-based experience library.
+    """[DEPRECATED] Persist via legacy experience library.
 
-    Skills (installable capability packages) are managed by the Skill
-    Registry and are NOT written through this tool. Experiences are
-    short, scene-anchored lessons that get auto-injected into the
-    relevant role's system prompt.
+    New code should call ``wiki_ingest(kind='experience', title, body)``
+    which writes a markdown page to the wiki layer. This handler now
+    auto-redirects to wiki_ingest so legacy callers transparently land
+    in the new store. Set env ``TUDOU_DISABLE_LEGACY_EXPERIENCE=0`` to
+    keep the old JSON-write behaviour.
     """
+    # ── Auto-redirect to wiki_ingest (default) ─────────────────────
+    import os as _os
+    if _os.environ.get("TUDOU_DISABLE_LEGACY_EXPERIENCE", "1") != "0":
+        try:
+            from .knowledge import _tool_wiki_ingest  # type: ignore
+        except Exception:
+            try:
+                # Fallback: same module
+                _tool_wiki_ingest = globals().get("_tool_wiki_ingest")
+            except Exception:
+                _tool_wiki_ingest = None
+        if _tool_wiki_ingest is not None:
+            # Compose body from the legacy experience fields
+            body_parts = [str(core_knowledge or "")]
+            if action_rules:
+                body_parts.append("\n## 行动规则")
+                for r in action_rules:
+                    body_parts.append(f"- {r}")
+            if taboo_rules:
+                body_parts.append("\n## 禁忌规则")
+                for r in taboo_rules:
+                    body_parts.append(f"- {r}")
+            if evidence:
+                body_parts.append("\n## 证据 / 来源")
+                for e in evidence:
+                    body_parts.append(f"- {e}")
+            return _tool_wiki_ingest(
+                kind="experience",
+                title=str(scene or "")[:80],
+                body="\n".join(body_parts),
+                tags=tags or [],
+                scope="" if not role or role == "default" else f"role:{role}",
+                **ctx,
+            ) + " (auto-redirected from save_experience)"
+
+    # ── Legacy path (only if explicitly opted-in) ───────────────────
     try:
         if not scene or not core_knowledge:
             return "Error: 'scene' and 'core_knowledge' are required"
@@ -420,6 +687,63 @@ def _tool_knowledge_lookup(query: str = "", entry_id: str = "",
     shared KB. Otherwise searches / counts / lists by query using the
     agent's configured RAG routing.
     """
+    # Per-turn dedup (same as memory_recall): avoid near-identical
+    # query variants hitting the RAG pipeline in a single turn.
+    _caller_id = kw.get("_caller_agent_id") or agent_id or ""
+    _hub = _get_hub()
+    _kl_agent = _hub.get_agent(_caller_id) if _hub and _caller_id else None
+    _q_str = (query or "").strip()
+    if _q_str and not entry_id:
+        _dup = _check_turn_dedup(_kl_agent, "knowledge_lookup", _q_str)
+        if _dup is not None:
+            return _dup
+
+    # ── Wiki layer search (PRIMARY for agent-written knowledge) ──
+    # The wiki holds everything wiki_ingest writes (experience /
+    # methodology / template / pattern / reference). Search it BEFORE
+    # the legacy KB so wiki hits — agent-authored, curated — surface
+    # at the top. Best-effort: any error keeps falling through to KB.
+    wiki_lines: list[str] = []
+    if mode == "search" and _q_str and not entry_id:
+        try:
+            from ..knowledge.wiki_store import get_wiki_store
+            _hits = get_wiki_store().search(_q_str, limit=5)
+            if _hits:
+                wiki_lines.append("[wiki layer hits]")
+                for p in _hits:
+                    body_preview = (p.body or "")[:400].replace("\n", " ")
+                    wiki_lines.append(
+                        f"- {p.kind}/{p.slug} · {p.title} "
+                        f"(scope={p.scope}, ✓{p.success_count}/✗{p.fail_count})\n"
+                        f"  {body_preview}"
+                        + ("..." if len(p.body or "") > 400 else "")
+                    )
+        except Exception as _we:
+            logger.debug("wiki search in knowledge_lookup skipped: %s", _we)
+
+    # Existing KB impl runs unchanged.
+    _result = _knowledge_lookup_impl(query=query, entry_id=entry_id,
+                                      agent_id=agent_id, mode=mode, **kw)
+
+    # Prepend wiki block if non-empty.
+    if wiki_lines:
+        _result = "\n".join(wiki_lines) + "\n\n[knowledge base]\n" + _result
+
+    if _q_str and not entry_id:
+        try:
+            _cache_turn_result(_kl_agent, "knowledge_lookup", _q_str, _result)
+            _result = _wrap_with_state(_kl_agent, "knowledge_lookup", _q_str, _result)
+        except Exception:
+            pass
+    return _result
+
+
+def _knowledge_lookup_impl(query: str = "", entry_id: str = "",
+                            agent_id: str = "", mode: str = "search",
+                            **kw: Any) -> str:
+    """Inner impl of knowledge_lookup (no dedup). Kept as a separate
+    function so the dedup wrapper can always cache the final result
+    regardless of which early-return path fires."""
     try:
         # If entry_id is provided, fetch that entry directly from shared KB.
         if entry_id:
@@ -658,3 +982,120 @@ def _tool_learn_from_peers(source_role: str, topic: str = "",
         return "\n".join(lines)
     except Exception as e:
         return f"Failed to learn from peers: {e}"
+
+
+# ── wiki_ingest (V2 Karpathy-pattern wiki write) ──────────────────────
+
+def _tool_wiki_ingest(kind: str = "",
+                      title: str = "",
+                      body: str = "",
+                      tags: Any = None,
+                      scope: str = "",
+                      slug: str = "",
+                      sources: Any = None,
+                      related: Any = None,
+                      **ctx: Any) -> str:
+    """Write or update a markdown page in the wiki layer.
+
+    kind  ∈ experience | methodology | template | pattern | reference
+    scope ∈ "global" | "" (auto = role:<caller_role>)
+    """
+    try:
+        from ..knowledge.wiki_store import (
+            get_wiki_store, WikiPage, slugify, VALID_KINDS,
+        )
+    except Exception as e:
+        return f"Error: wiki layer unavailable ({e})"
+
+    kind = (kind or "").strip().lower()
+    if kind not in VALID_KINDS:
+        return (f"Error: kind must be one of {list(VALID_KINDS)}, got {kind!r}")
+    title = (title or "").strip()
+    if not title:
+        return "Error: 'title' is required"
+    body = (body or "").strip()
+    if not body:
+        return "Error: 'body' is required (markdown content)"
+
+    # ── Pre-publish leak check (via guardrail protocol) ─────
+    # wiki pages get auto-injected into other agents' system
+    # prompts as titles + on-demand reads of full body. A page
+    # carrying a hardcoded API key / .env path / internal IP
+    # would leak to every same-role agent + their LLM provider.
+    try:
+        from ..v2.core.guardrails import wiki_leak_guardrail
+        out = wiki_leak_guardrail.run(title + "\n\n" + body)
+        if out.tripwire_triggered:
+            leak_report = out.output_info or {}
+            leaks = leak_report.get("leaks", [])
+            samples = ", ".join(
+                f"{l['type']}={l['value'][:30]}" for l in leaks[:3]
+            )
+            return (
+                "Error: wiki_ingest rejected — body contains "
+                f"{len(leaks)} potential leak(s) ({samples}). "
+                "Replace hardcoded secrets/paths/ips with env-var "
+                "references and retry. Use the `scan_for_leaks` "
+                "debug helper if unsure."
+            )
+    except Exception as _le:
+        # Fail-open: leak detection MUST NOT break the legitimate
+        # ingest path. Log + continue.
+        import logging as _logging
+        _logging.getLogger("tudou.security").debug(
+            "leak_check on wiki_ingest skipped: %s", _le,
+        )
+
+    # Resolve scope: explicit "global" OR auto-derive role from caller.
+    if scope == "global":
+        resolved_scope = "global"
+    elif scope and scope.startswith("role:"):
+        resolved_scope = scope
+    else:
+        # Auto-resolve to caller's role
+        caller_role = ""
+        try:
+            caller_id = ctx.get("_caller_agent_id", "") if isinstance(ctx, dict) else ""
+            if caller_id:
+                hub = _get_hub()
+                agent = hub.get_agent(caller_id) if hub else None
+                if agent is not None:
+                    caller_role = (getattr(agent, "role", "") or "").strip()
+        except Exception:
+            pass
+        resolved_scope = f"role:{caller_role}" if caller_role else "global"
+
+    # Normalize list args
+    if isinstance(tags, str):
+        tags_list = [t.strip() for t in tags.split(",") if t.strip()]
+    elif isinstance(tags, list):
+        tags_list = [str(t).strip() for t in tags if str(t).strip()]
+    else:
+        tags_list = []
+    sources_list = sources if isinstance(sources, list) else (
+        [sources] if sources else []
+    )
+    related_list = related if isinstance(related, list) else (
+        [related] if related else []
+    )
+
+    final_slug = slug.strip() if slug else slugify(title)
+
+    page = WikiPage(
+        scope=resolved_scope,
+        kind=kind,
+        slug=final_slug,
+        title=title,
+        body=body,
+        tags=tags_list,
+        sources=[str(s) for s in sources_list if s],
+        related=[str(r) for r in related_list if r],
+    )
+
+    store = get_wiki_store()
+    saved = store.write_page(page, log_action="ingest")
+    return (
+        f"Wiki page saved: scope={saved.scope} kind={saved.kind} "
+        f"slug={saved.slug} (use knowledge_lookup or wiki path "
+        f"{saved.kind}/{saved.slug} to retrieve)"
+    )

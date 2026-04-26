@@ -1163,6 +1163,45 @@ class SkillRegistry:
                                    reason="manifest.yaml not found"))
         manifest = parse_manifest_file(str(manifest_path))
 
+        # ── Leak check on prompt-visible content ───────────────
+        # manifest.description and SKILL.md / README.md content get
+        # auto-injected into the system prompts of every granted agent.
+        # A hardcoded API key / .env path / internal IP in any of these
+        # leaks to every agent + the LLM provider they call. Block install
+        # when the visible surface contains anything suspicious.
+        try:
+            from ..v2.core.guardrails import wiki_leak_guardrail
+            scan_parts: list[str] = [manifest.description or ""]
+            for md_name in ("SKILL.md", "README.md"):
+                md_path = src / md_name
+                if md_path.exists():
+                    try:
+                        scan_parts.append(
+                            md_path.read_text(encoding="utf-8", errors="ignore")
+                        )
+                    except Exception:
+                        pass
+            scan_blob = "\n\n".join(p for p in scan_parts if p.strip())
+            if scan_blob:
+                out = wiki_leak_guardrail.run(scan_blob)
+                if out.tripwire_triggered:
+                    leak_report = out.output_info or {}
+                    leaks = leak_report.get("leaks", [])
+                    samples = ", ".join(
+                        f"{l['type']}={l['value'][:30]}" for l in leaks[:3]
+                    )
+                    raise ManifestError(
+                        f"skill install rejected — manifest description / "
+                        f"SKILL.md / README.md contains {len(leaks)} "
+                        f"potential leak(s) ({samples}). Replace hardcoded "
+                        f"secrets/paths with env-var references and retry."
+                    )
+        except ManifestError:
+            raise
+        except Exception as _le:
+            # Fail-open: leak detection MUST NOT break legitimate installs.
+            self._logger(f"leak_check on skill install skipped: {_le}")
+
         # Detect agent-submitted skills (source: agent in manifest)
         _is_agent_skill = (manifest.raw or {}).get("source") == "agent"
 
