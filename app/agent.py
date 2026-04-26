@@ -41,9 +41,20 @@ from .chat_task import (                                          # noqa: F401
     get_chat_task_manager,
 )
 # ── Import mixins (Agent class inherits from these) ──
-from .agent_llm import AgentLLMMixin                              # noqa: F401
+# DEAD CODE — kept for reference, not actually used.
+# Agent class below does NOT inherit AgentLLMMixin (verified by audit).
+# All methods that AgentLLMMixin would provide are implemented directly
+# on Agent (see _build_static_system_prompt, etc.). Commenting out the
+# import so accidental future code can't depend on it; keep the file
+# itself in tree until the next cleanup pass.
+# from .agent_llm import AgentLLMMixin                              # noqa: F401
 from .agent_execution import AgentExecutionMixin                  # noqa: F401
-from .agent_growth import AgentGrowthMixin                        # noqa: F401
+from .agent_execution import _stream_chat_to_response             # noqa: F401
+# DEAD CODE — kept for reference, not actually used.
+# Same situation as agent_llm above. enable_enhancement / disable_enhancement
+# / enable_self_improvement / trigger_retrospective are all defined on
+# Agent directly; agent_growth.py duplicates them with no inheritance.
+# from .agent_growth import AgentGrowthMixin                        # noqa: F401
 
 def _ensure_str_content(content) -> str:
     """Normalize message content to string.
@@ -132,8 +143,13 @@ def _strip_old_images(messages: list[dict]) -> list[dict]:
 
 # Knobs for _compress_old_tool_results. Surface-level constants so
 # anyone tuning prompt-size behavior doesn't have to read the function.
-_KEEP_LAST_TOOL_RESULTS = 4        # most recent N tool results preserved in full
-_OLD_TOOL_RESULT_HEAD_CHARS = 600  # older tool results trimmed to this many head chars
+_KEEP_LAST_TOOL_RESULTS = 3        # most recent N tool results preserved in full
+_OLD_TOOL_RESULT_HEAD_CHARS = 300  # older tool results trimmed to this many head chars
+
+# NB: image-base64 elision lives in ``_strip_old_images`` (line ~84
+# above). It WAS only wired into the iteration>0 compression chain
+# (line ~7033); turn 0 leaked all historical image bytes through. The
+# first-call path below (around line 6916) now calls it too.
 
 
 def _compress_old_tool_results(messages: list[dict],
@@ -278,6 +294,595 @@ def _compress_old_write_tool_calls(messages: list[dict],
     return result
 
 
+# ── History summarization (Nov 2026) ─────────────────────────────────────
+# 真正的"摘要+滑窗"裁剪。老的 compression 只是截头 600 字符,丢失上下文,
+# 结果 LLM 再读一次 → 又生成新 tool_result → 死循环。 这里用 agent 自己的
+# LLM 把老段落压成 300-500 字结构化摘要 (一次性成本) 换掉 5-15 KB 历史,
+# 之后每轮省 ~10k input tokens。
+#
+# 触发条件(任一):
+#   - messages 字符总数超过 threshold_chars (默认 30k,约 7.5k token)
+#   - tool message 数量超过 8 个
+#
+# 切分规则:
+#   [0..N-keep_last-1]  → 摘要替换 (但保留 role==system 原样)
+#   [N-keep_last..N-1]  → 最近 keep_last 条原样保留
+#
+# tool_call/tool_result 配对保护:
+#   切点如果落在一个 assistant(tool_calls) + tool(result) 配对的中间,
+#   把整个配对都留到 "recent" 这一侧,避免 OpenAI-compat API 的 orphan tool 400。
+#
+# 摘要失败时直接返回原 messages (fail-safe, 不能阻塞 chat 循环)。
+# 可通过 TUDOU_HISTORY_SUMMARY_OFF=1 关闭。
+
+# Tuned Nov 2026 after observing 6k→9k→15k→17k/call linear growth —
+# summary thresholds were too lax; trigger earlier to flatten the curve.
+_HISTORY_SUMMARY_CHARS = int(
+    os.environ.get("TUDOU_HISTORY_SUMMARY_CHARS", "25000"))
+_HISTORY_SUMMARY_KEEP_LAST = int(
+    os.environ.get("TUDOU_HISTORY_SUMMARY_KEEP_LAST", "6"))
+_HISTORY_SUMMARY_MAX_TOOLS = int(
+    os.environ.get("TUDOU_HISTORY_SUMMARY_MAX_TOOLS", "6"))
+# Old slice 必须至少这么大才值得摘要 (LLM call 本身 ~2k tokens,
+# old_slice < 这个值时摘要本身比省下的还贵)
+_HISTORY_SUMMARY_MIN_OLD_CHARS = int(
+    os.environ.get("TUDOU_HISTORY_SUMMARY_MIN_OLD_CHARS", "5000"))
+# 上次摘要后,old_slice 至少多这么多消息或字符,才值得重新摘要。
+# 不达标就复用缓存,新增消息自然挤进 recent 窗口处理。
+_HISTORY_SUMMARY_RESUM_DELTA_MSGS = int(
+    os.environ.get("TUDOU_HISTORY_SUMMARY_RESUM_DELTA_MSGS", "10"))
+_HISTORY_SUMMARY_RESUM_DELTA_CHARS = int(
+    os.environ.get("TUDOU_HISTORY_SUMMARY_RESUM_DELTA_CHARS", "8000"))
+_HISTORY_SUMMARY_OFF = os.environ.get("TUDOU_HISTORY_SUMMARY_OFF", "0") == "1"
+
+
+def _estimate_messages_chars(messages: list[dict]) -> int:
+    """粗略估算 messages 的字符总数 (content + tool_calls)."""
+    import json as _json
+    total = 0
+    for m in messages:
+        c = m.get("content") or ""
+        if isinstance(c, list):
+            try:
+                c = _json.dumps(c, ensure_ascii=False)
+            except Exception:
+                c = str(c)
+        total += len(str(c))
+        tcs = m.get("tool_calls") or []
+        if tcs:
+            try:
+                total += len(_json.dumps(tcs, ensure_ascii=False))
+            except Exception:
+                pass
+    return total
+
+
+def _count_tool_messages(messages: list[dict]) -> int:
+    return sum(1 for m in messages if m.get("role") == "tool")
+
+
+def _build_recent_file_refs(agent, turn_started_at: float) -> list[dict]:
+    """Fallback FileCard envelope for files produced by side-channel tools.
+
+    `_shadow.build_envelope_refs()` only sees files attached to the last
+    assistant turn (i.e. files produced via the `write_file` tool). But
+    bash scripts (`python build_pptx.py`) generate output files as a side
+    effect — those land in the workspace but aren't on a turn.
+
+    This helper scans the agent's workspace for files whose mtime falls
+    within the current turn (mtime >= turn_started_at - 5s grace),
+    filters out infrastructure files, and returns FileCard refs the
+    same shape as `build_envelope_refs`.
+
+    Returns [] silently on any error — the chat must not break.
+    """
+    import os as _os
+    from pathlib import Path as _P
+
+    if turn_started_at <= 0:
+        return []
+    grace = 5.0   # mtime can be slightly before turn_started_at on slow disks
+    cutoff = turn_started_at - grace
+
+    # Workspace dirs to scan: agent's working dir + shared workspace
+    dirs: list[str] = []
+    wd = getattr(agent, "working_dir", "") or ""
+    if wd and _os.path.isdir(wd):
+        dirs.append(wd)
+    sw = getattr(agent, "shared_workspace", "") or ""
+    if sw and _os.path.isdir(sw) and sw != wd:
+        dirs.append(sw)
+    if not dirs:
+        return []
+
+    # File-extension → ref kind mapping
+    _EXT_KIND = {
+        ".pptx": "document", ".pdf": "document", ".docx": "document",
+        ".xlsx": "document", ".xls": "document", ".csv": "document",
+        ".md": "document", ".txt": "document", ".html": "document",
+        ".png": "image", ".jpg": "image", ".jpeg": "image",
+        ".gif": "image", ".svg": "image", ".webp": "image",
+        ".mp4": "video", ".mov": "video", ".webm": "video",
+        ".mp3": "audio", ".wav": "audio",
+        ".zip": "archive", ".tar": "archive", ".gz": "archive",
+    }
+    _EXT_MIME = {
+        ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ".pdf":  "application/pdf",
+        ".md":   "text/markdown",
+        ".txt":  "text/plain",
+        ".png":  "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    }
+    _SKIP_NAMES = frozenset({
+        "MCP.md", "Project.md", "Scheduled.md", "Skills.md", "Tasks.md",
+        "AGENT.md", "agent.json",
+    })
+    _SKIP_DIRS = frozenset({"skills", "tool_outputs", "session", "logs",
+                            "memory", ".git", "__pycache__"})
+
+    out: list[dict] = []
+    seen_paths: set = set()
+    for d in dirs:
+        try:
+            for entry in _os.scandir(d):
+                if not entry.is_file():
+                    continue
+                if entry.name in _SKIP_NAMES or entry.name.startswith("."):
+                    continue
+                p = _P(entry.path)
+                if p.parent.name in _SKIP_DIRS:
+                    continue
+                ext = p.suffix.lower()
+                kind = _EXT_KIND.get(ext)
+                if kind is None:
+                    continue   # only surface known doc/image/etc kinds
+                try:
+                    st = entry.stat()
+                except OSError:
+                    continue
+                if st.st_mtime < cutoff:
+                    continue   # not produced this turn
+                abs_path = str(p)
+                if abs_path in seen_paths:
+                    continue
+                seen_paths.add(abs_path)
+                # Build FileCard ref shape matching _artifact_to_ref output
+                from urllib.parse import quote as _q
+                url = "/api/portal/attachment?path=" + _q(abs_path)
+                out.append({
+                    "id": f"recent_{abs(hash(abs_path)) & 0xffffffff:x}",
+                    "url": url,
+                    "path": abs_path,
+                    "filename": p.name,
+                    "label": p.name,
+                    "kind": kind,
+                    "mime": _EXT_MIME.get(ext, "application/octet-stream"),
+                    "render_hint": "card",
+                    "category": "auto_recent",
+                    "size": st.st_size,
+                    "produced_at": st.st_mtime,
+                })
+        except OSError:
+            continue
+    # Sort newest first, cap at 8 cards
+    out.sort(key=lambda r: -float(r.get("produced_at", 0)))
+    return out[:8]
+
+
+def _drop_orphan_tool_messages(messages: list[dict]) -> list[dict]:
+    """Drop any `role:tool` whose tool_call_id doesn't point at an
+    IMMEDIATELY-PRECEDING assistant(tool_calls) with that id.
+
+    DeepSeek rejects with `'tool' must be a response to a preceding message
+    with 'tool_calls'` if there's ANY non-tool message between an assistant
+    and its tool response. Our own sanitizer in llm.py uses 'active_ids'
+    which handles most cases, but my recent summarize/hoist changes can
+    occasionally drop the anchoring assistant(tc) while leaving the tool —
+    producing an orphan that sneaks past. This is a belt-and-suspenders pass
+    applied INSIDE the message pipeline to guarantee no orphans leave here.
+    """
+    if not messages:
+        return messages
+    active_ids: set = set()
+    out: list[dict] = []
+    dropped = 0
+    for m in messages:
+        r = m.get("role")
+        if r == "assistant":
+            tcs = m.get("tool_calls") or []
+            if tcs:
+                active_ids = {tc.get("id") or "" for tc in tcs}
+                active_ids.discard("")
+            else:
+                active_ids = set()
+            out.append(m)
+        elif r == "tool":
+            tcid = m.get("tool_call_id") or ""
+            if tcid and tcid in active_ids:
+                out.append(m)
+            else:
+                dropped += 1
+                # don't clear active_ids — other tools in same batch OK
+        else:
+            active_ids = set()
+            out.append(m)
+    if dropped:
+        logger.warning(
+            "pipeline: dropped %d orphan tool message(s) before LLM send",
+            dropped)
+    return out
+
+
+def _find_safe_cut_idx(messages: list[dict], want_idx: int) -> int:
+    """
+    Find the largest cut idx <= want_idx that does NOT sever a
+    tool_call/tool_result pair. Returns the idx to use as start of 'recent'.
+
+    Rule: a 'tool' message requires its preceding assistant(tool_calls) to
+    also be in the kept range. So walk backwards from want_idx: if we land
+    on a 'tool', move cut back to just before the owning assistant.
+    """
+    if want_idx <= 0 or want_idx >= len(messages):
+        return want_idx
+    cut = want_idx
+    # If cut points at a tool message, walk back past its assistant.
+    while cut < len(messages) and messages[cut].get("role") == "tool":
+        cut -= 1
+        if cut < 0:
+            return 0
+    # Walk back past any assistant that has tool_calls (to grab whole batch)
+    # only if cut is currently assistant(tool_calls) — we want the pair whole.
+    while cut > 0:
+        m = messages[cut]
+        prev = messages[cut - 1]
+        # If prev is assistant(tool_calls) and m is tool, we'd be severing.
+        # Protect by moving cut back to include prev.
+        if (m.get("role") == "tool"
+                and prev.get("role") == "assistant"
+                and prev.get("tool_calls")):
+            cut -= 1
+            continue
+        break
+    return max(0, cut)
+
+
+def _summarize_old_history(messages: list[dict],
+                            agent,
+                            threshold_chars: int = _HISTORY_SUMMARY_CHARS,
+                            keep_last: int = _HISTORY_SUMMARY_KEEP_LAST,
+                            max_tool_msgs: int = _HISTORY_SUMMARY_MAX_TOOLS
+                            ) -> list[dict]:
+    """If messages are too big, summarize old range into one system message.
+
+    The summary is cached on the agent under ``_history_summary_cache`` keyed
+    by ``(old_range_hash, old_len)`` so iterations of the SAME chat turn don't
+    re-pay the summarize call. When more messages later shift from 'recent'
+    into 'old', the hash changes and we re-summarize.
+
+    Never mutates the input. Returns the same list (identity) if no change.
+    """
+    if _HISTORY_SUMMARY_OFF:
+        return messages
+    if not messages:
+        return messages
+    total_chars = _estimate_messages_chars(messages)
+    tool_count = _count_tool_messages(messages)
+    # AND 逻辑: 总字符超阈值 AND tool 数也超(两者都说明历史真的膨胀了才动手)。
+    # 旧的 OR 逻辑太激进,只要 tool_count>8 就触发,而 tool_count 在正常跑
+    # 任务时很容易 8 (随便几次 glob+read 就到) → 频繁误触发。
+    if total_chars < threshold_chars or tool_count <= max_tool_msgs:
+        return messages
+
+    # Split point: keep last `keep_last` messages + the leading system prefix.
+    # Find where system prefix ends.
+    sys_prefix_end = 0
+    for i, m in enumerate(messages):
+        if m.get("role") == "system":
+            sys_prefix_end = i + 1
+        else:
+            break
+    # Target start of "recent" block
+    want_recent_start = max(sys_prefix_end, len(messages) - keep_last)
+    # Protect tool pairs
+    recent_start = _find_safe_cut_idx(messages, want_recent_start)
+    if recent_start <= sys_prefix_end:
+        # Nothing to summarize between system prefix and recent range.
+        return messages
+    old_slice = messages[sys_prefix_end:recent_start]
+    if not old_slice:
+        return messages
+
+    # ── Min-benefit gate ── 老 slice 太小时摘要调用本身 (~2k token) 比省下的贵。
+    old_chars = sum(len(str(m.get("content") or "")) for m in old_slice)
+    if old_chars < _HISTORY_SUMMARY_MIN_OLD_CHARS:
+        return messages
+
+    # Cache check with INCREMENTAL REUSE.
+    # 上次摘要覆盖了 cached_n 条 old 消息,本次 old_slice 可能只多了
+    # 几条 (最常见:每轮 iter 多 1-2 条新 tool_result 挤进 old)。
+    # 不达 RESUM_DELTA 就直接复用缓存的摘要文本,把新增的 delta 挤进 recent
+    # 保持原样 (调整 recent_start 往前移),避免反复摘要。
+    cache = getattr(agent, "_history_summary_cache", None)
+    summary_text = ""
+    if isinstance(cache, dict):
+        cached_n = int(cache.get("covers_n") or 0)
+        cached_chars = int(cache.get("covers_chars") or 0)
+        delta_msgs = len(old_slice) - cached_n
+        delta_chars = old_chars - cached_chars
+        if (cached_n > 0
+                and 0 <= delta_msgs < _HISTORY_SUMMARY_RESUM_DELTA_MSGS
+                and delta_chars < _HISTORY_SUMMARY_RESUM_DELTA_CHARS):
+            # Reuse cached summary; shrink old_slice to the originally-
+            # covered prefix so the delta stays as verbatim messages
+            # between the summary and 'recent'.
+            summary_text = str(cache.get("text") or "")
+            if summary_text:
+                # Shift recent_start left so the delta messages are
+                # preserved as-is. Protect tool pairs at the new boundary.
+                new_recent_start = _find_safe_cut_idx(
+                    messages, sys_prefix_end + cached_n)
+                if new_recent_start > sys_prefix_end:
+                    old_slice = messages[sys_prefix_end:new_recent_start]
+                    recent_start = new_recent_start
+                    logger.debug(
+                        "HISTORY_SUMMARY reused cache (covers=%d, "
+                        "delta_msgs=%d, delta_chars=%d) agent=%s",
+                        cached_n, delta_msgs, delta_chars,
+                        agent.id[:8] if agent else "?")
+
+    if not summary_text:
+        import json as _json
+        # Compose a compact transcript. Truncate each message aggressively
+        # — we're sending this to the LLM to BE summarized, so we can afford
+        # bigger cuts than in the real prompt.
+        lines: list[str] = []
+        for m in old_slice:
+            role = m.get("role") or "?"
+            content = m.get("content") or ""
+            if isinstance(content, list):
+                try:
+                    content = _json.dumps(content, ensure_ascii=False)
+                except Exception:
+                    content = str(content)
+            content = str(content)
+            # Inline tool_calls as a short marker
+            tcs = m.get("tool_calls") or []
+            if tcs:
+                names = [((tc.get("function") or {}).get("name") or "?")
+                         for tc in tcs]
+                content = (content + " " if content else "") \
+                    + f"[tool_calls: {', '.join(names)}]"
+            if len(content) > 1500:
+                content = content[:1500] + f"…({len(content)}c)"
+            lines.append(f"[{role}] {content}")
+        transcript = "\n".join(lines)
+
+        prompt = (
+            "以下是一段 agent 对话历史。请压缩成一份事实性摘要,下一轮用于给"
+            "该 agent 做上下文提示。\n\n"
+            "要求:\n"
+            "1. 用中文,300-500 字。\n"
+            "2. 只记事实,不要评论或润色。\n"
+            "3. 分 3 节:\n"
+            "   ## 用户意图: (1-2 句概括整条对话用户想达成什么)\n"
+            "   ## 已完成: (bullet 列表: 调用了什么工具,得到什么关键结果,"
+            "写入了哪些文件/路径)\n"
+            "   ## 关键数据: (保留必须记住的字段/路径/数字/ID,不要省略)\n"
+            "4. 禁止编造。历史里没写的不要加。\n\n"
+            "--- 历史开始 ---\n"
+            f"{transcript}\n"
+            "--- 历史结束 ---"
+        )
+        summary_text = ""
+        try:
+            from . import llm as _llm
+            # Use the agent's resolved provider/model (non-stream)
+            try:
+                _prov, _mdl = agent._resolve_effective_provider_model()
+            except Exception:
+                _prov, _mdl = "", ""
+            resp = _llm.chat_no_stream(
+                messages=[
+                    {"role": "system",
+                     "content": ("你是一个事实性对话摘要器。忠实压缩,"
+                                 "不编造,不润色。")},
+                    {"role": "user", "content": prompt},
+                ],
+                model=_mdl, provider=_prov,
+            )
+            if isinstance(resp, dict):
+                _m = resp.get("message") or {}
+                summary_text = str(_m.get("content") or "").strip()
+                if not summary_text:
+                    summary_text = str(_m.get("reasoning_content") or "").strip()
+            logger.info(
+                "HISTORY_SUMMARY: compressed %d old messages (~%d chars) "
+                "into %d-char summary (agent=%s)",
+                len(old_slice),
+                sum(len(str(m.get("content") or "")) for m in old_slice),
+                len(summary_text), agent.id[:8] if agent else "?")
+        except Exception as e:
+            logger.warning("history summarize failed: %s — keeping full history", e)
+            return messages
+        if not summary_text:
+            return messages
+        try:
+            # 记下本次摘要覆盖的消息数 + 字符数,下次用于"增量复用"判定:
+            # 只要新 old_slice 没比这个多 RESUM_DELTA_MSGS 条或
+            # RESUM_DELTA_CHARS 字符,就直接复用 summary_text,不再 re-summarize。
+            agent._history_summary_cache = {
+                "text": summary_text,
+                "covers_n": len(old_slice),
+                "covers_chars": sum(
+                    len(str(m.get("content") or "")) for m in old_slice),
+            }
+        except Exception:
+            pass
+
+    # Assemble: [system prefix ..., summary system msg, recent messages ...]
+    summary_msg = {
+        "role": "system",
+        "content": (
+            f"[HISTORY_SUMMARY — 覆盖 {len(old_slice)} 条旧消息]\n"
+            f"{summary_text}"
+        ),
+    }
+    result = list(messages[:sys_prefix_end])
+    result.append(summary_msg)
+    result.extend(messages[recent_start:])
+    return result
+
+
+# ── C: Skill-guide hoisting (Nov 2026) ───────────────────────────────────
+# LLM 通过 `get_skill_guide(name)` 读取 SKILL.md 后,结果 (几 KB 的
+# markdown) 会以 tool_result 形式留在 messages 里,每一轮迭代都随
+# messages 全量重发给 LLM。这是 19-iter 场景下巨大的 token 浪费。
+#
+# 本函数做两件事:
+#   1. 把 messages 里所有 get_skill_guide 的 tool_result 内容,统一抽
+#      出来放到一块,塞进消息头部作为一个 system 块。
+#   2. 原 tool_result 的 content 替换成短占位符 `[skill X 指南已加载 →
+#      见消息头 LOADED_SKILLS]`,从这一步开始不再占几 KB。
+#
+# 为什么不放到 static system prompt?  因为 skill guide 是"按需拉取"
+# 的 —— agent 没调 get_skill_guide 就不该付这个钱。只有实际拉过的才
+# 挂到本 turn 的消息头。
+#
+# KV-cache 友好:  consolidated system 块放在系统前缀之后 (位置稳定),
+# 后续 iteration 这块内容 hash 相同 → LM Studio / Anthropic prompt
+# caching 可以命中。
+#
+# 不 mutate 输入 messages —— 返回新列表。
+
+_SKILL_GUIDE_TOOL_NAMES = frozenset({
+    "get_skill_guide", "skill_guide", "load_skill", "read_skill",
+})
+
+
+def _hoist_skill_guides(messages: list[dict]) -> list[dict]:
+    """Pull get_skill_guide tool_result bodies into ONE consolidated
+    system block at the front; replace the originals with placeholders.
+
+    Returns a NEW list; never mutates input.
+    """
+    if not messages:
+        return messages
+    import json as _json
+
+    # Pass 1: find tool_call_id -> skill_name for every get_skill_guide call.
+    id_to_name: dict[str, str] = {}
+    for m in messages:
+        if m.get("role") != "assistant":
+            continue
+        for tc in (m.get("tool_calls") or []):
+            fn = tc.get("function") or {}
+            if fn.get("name") not in _SKILL_GUIDE_TOOL_NAMES:
+                continue
+            call_id = tc.get("id") or ""
+            if not call_id:
+                continue
+            name = ""
+            args = fn.get("arguments")
+            if isinstance(args, str):
+                try:
+                    args = _json.loads(args)
+                except Exception:
+                    args = {}
+            if isinstance(args, dict):
+                # Canonical arg is `name`; be generous — accept a few variants.
+                name = str(args.get("name")
+                            or args.get("skill")
+                            or args.get("skill_name")
+                            or "").strip()
+            id_to_name[call_id] = name or call_id[:8]
+
+    if not id_to_name:
+        return messages  # no guide calls → nothing to do
+
+    # Pass 2: collect bodies + build placeholder messages.
+    # Idempotence: if this function already ran on these messages, the tool
+    # contents are already placeholders starting with `[skill `. Detect and
+    # skip so running twice doesn't produce a 2nd LOADED_SKILLS block.
+    loaded: dict[str, str] = {}   # skill_name → content (latest wins)
+    new_msgs: list[dict] = []
+    any_replaced = False
+    already_hoisted = False
+    for m in messages:
+        if m.get("role") == "tool":
+            tcid = m.get("tool_call_id") or ""
+            if tcid in id_to_name:
+                body = m.get("content")
+                if isinstance(body, str) and body:
+                    # Already a placeholder? skip reprocessing.
+                    if body.startswith("[skill ") and "指南已加载" in body:
+                        already_hoisted = True
+                        new_msgs.append(m)
+                        continue
+                    skill = id_to_name[tcid]
+                    loaded[skill] = body
+                    any_replaced = True
+                    placeholder = (
+                        f"[skill `{skill}` 指南已加载 ({len(body)} chars) "
+                        f"→ 内容见消息开头的 <LOADED_SKILLS> 块,不要再重复调用 "
+                        f"get_skill_guide({skill})]"
+                    )
+                    new_msgs.append({**m, "content": placeholder})
+                    continue
+        new_msgs.append(m)
+
+    # If we found existing placeholders AND there's already a LOADED_SKILLS
+    # system block, treat as already-hoisted and return unchanged.
+    if already_hoisted and not loaded:
+        has_block = any(
+            m.get("role") == "system"
+            and isinstance(m.get("content"), str)
+            and m["content"].startswith("<LOADED_SKILLS>")
+            for m in messages)
+        if has_block:
+            return messages
+
+    if not any_replaced or not loaded:
+        return messages
+
+    # Pass 3: find end of initial system prefix; insert consolidated block.
+    sys_prefix_end = 0
+    for i, m in enumerate(new_msgs):
+        if m.get("role") == "system":
+            sys_prefix_end = i + 1
+        else:
+            break
+
+    parts = [
+        "<LOADED_SKILLS>",
+        "本轮已通过 get_skill_guide 拉取过的 skill 指南汇总。后续消息里看到 "
+        "'[skill X 指南已加载 → 见消息头 LOADED_SKILLS]' 占位符就到这里查。",
+        "",
+    ]
+    for name in sorted(loaded.keys()):
+        body = loaded[name]
+        # Cap each guide at 6KB so a pathological >20KB SKILL.md doesn't
+        # blow up the prompt. 6KB ≈ 1.5k tokens per skill.
+        if len(body) > 6000:
+            body = body[:6000].rstrip() + "\n…(truncated, 原始 {0} chars)".format(
+                len(loaded[name]))
+        parts.append(f"### {name}")
+        parts.append(body)
+        parts.append("")
+    parts.append("</LOADED_SKILLS>")
+
+    consolidated = {
+        "role": "system",
+        "content": "\n".join(parts),
+    }
+
+    out = list(new_msgs[:sys_prefix_end])
+    out.append(consolidated)
+    out.extend(new_msgs[sys_prefix_end:])
+    return out
+
+
 # ── Narrator-stall detection (weak-model nudge) ────────────────────────────
 # Weak / quantized / open-source models frequently reply with phrases like
 # "Let me fix the errors:" or "让我检查一下：" and then end the turn *without*
@@ -319,6 +924,58 @@ def _looks_like_narrator_stall(text: str) -> bool:
         return False
     last_line = t.rsplit("\n", 1)[-1].lower()
     return any(p in last_line for p in _NARRATOR_STALL_PATTERNS)
+
+
+# ── B: Granted-skills roster (Nov 2026) ──────────────────────────────────
+# 一个短小的 "你有哪些技能" 清单 (name + 1 行描述), 注入到 static
+# system prompt。让 LLM 不用再通过 get_skill_guide 探索就知道自己有
+# 哪些能力。每个 skill ~40 tokens, 10-15 个约 500 tokens, 且因为是
+# 静态 prompt 的一部分, 能被 KV cache / Anthropic prompt cache 吃掉。
+
+def _build_granted_skills_roster(agent) -> str:
+    """Short roster of all skills granted to this agent."""
+    try:
+        from .skills.engine import get_registry as _get_skill_registry
+        reg = _get_skill_registry()
+        if reg is None:
+            return ""
+        installs = reg.list_for_agent(agent.id)
+    except Exception:
+        return ""
+    if not installs:
+        return ""
+
+    lines = [
+        "## 你已装配的技能 (Installed Skills)",
+        "以下是你可用的技能包。**需要执行时才调 `get_skill_guide(name)`** "
+        "拿详细用法。不要在没必要时调用,也不要重复调用同一个。",
+        "",
+    ]
+    # Stable order for KV cache: sort by name
+    sorted_installs = sorted(
+        installs,
+        key=lambda i: ((i.manifest.name or i.id or "").lower(), i.id))
+    for inst in sorted_installs:
+        m = inst.manifest
+        name = m.name or inst.id or "?"
+        # Prefer zh-CN description; else fall back to generic description.
+        desc = ""
+        try:
+            if hasattr(m, "get_description"):
+                desc = m.get_description("zh-CN") or ""
+        except Exception:
+            pass
+        if not desc:
+            desc = getattr(m, "description", "") or ""
+        # Flatten multi-line desc to first sentence + cap length.
+        desc = str(desc).replace("\n", " ").strip()
+        if len(desc) > 80:
+            desc = desc[:80].rstrip() + "…"
+        if desc:
+            lines.append(f"- `{name}`: {desc}")
+        else:
+            lines.append(f"- `{name}`")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -688,6 +1345,11 @@ class ExecutionPlan:
     created_at: float = field(default_factory=time.time)
     completed_at: float = 0.0
     status: str = "active"        # active | completed | failed
+    # Index into agent.messages at the moment this plan was created.
+    # Used by ``Agent._fold_completed_plan_into_recap`` to identify which
+    # messages belong to this plan's lifecycle. -1 = no anchor recorded
+    # (older plans pre-fold-feature, or plan loaded from disk).
+    msg_anchor_idx: int = -1
 
     def add_step(self, title: str, detail: str = "",
                  parent_step_id: str = "",
@@ -927,6 +1589,16 @@ class AgentProfile:
     sop_template_id: str = ""
     # References a WorkflowTemplate used as this role's SOP (state machine).
     # Empty = no SOP (free-form execution).
+    use_langgraph: bool = False
+    # Legacy field, kept for back-compat. The default path is now
+    # LangGraph; see ``force_v1`` below for the inverse opt-out.
+    force_v1: bool = False
+    # When True (or env TUDOU_USE_LEGACY_V1=1 globally), this agent's
+    # chat_async runs through the V1 chat loop instead of the new
+    # LangGraph state machine. Default False — LangGraph is the
+    # production path. Use this only as a kill switch when a graph
+    # bug surfaces and you need to keep an agent running on V1 while
+    # the bug is fixed.
     quality_rules: list = field(default_factory=list)
     # List of QualityCheckRule dicts (see app/quality_gate.py).
     # Empty = no quality gate.
@@ -2638,7 +3310,7 @@ class Agent:
     # adding/editing a system-wide section like <file_display>.
     # This guarantees cache freshness even when no profile field
     # changed between two code versions running in the same process.
-    _STATIC_PROMPT_BUILD_VERSION = "v4-project_context_freshness"
+    _STATIC_PROMPT_BUILD_VERSION = "v7-no_plan_repeat"
 
     def _get_global_system_prompt(self) -> str:
         """Legacy compat — returns empty if global_system_prompt migrated to scene_prompts."""
@@ -2763,114 +3435,39 @@ class Agent:
         p = self.profile
         wd = self._effective_working_dir()
 
-        # --- Build prompt based on whether we have a rich persona ---
-        if self.system_prompt and len(self.system_prompt) > 200:
-            parts = [self.system_prompt]
-            parts.append("")
-            # NOTE (Opt 3 — Nov 2026): removed ~700 chars of tool-use prose
-            # and the "记忆/知识三件套" explainer that duplicated info
-            # already present in the OpenAI function schemas (sent as a
-            # separate `tools` parameter). The tool descriptions carry
-            # when-to-use / when-NOT-to-use / output / gotcha inline.
-            # Keeping only what the schemas DON'T cover:
-            #   1. Approval-UX hint (not in schemas)
-            #   2. 3-件套 分流一行 (shorthand routing guidance)
-            parts.append(
-                "⚠️ 某些工具调用（bash / 敏感路径写入）可能需要人工审批；被拒时请告知用户并给替代方案。"
-            )
-            parts.append(
-                "💾 记忆分流：存场景经验→save_experience；查沉淀资料→knowledge_lookup；"
-                "装能力包→让用户去技能库 UI 安装（不要自建 skill 或写 SKILL.md）。"
-            )
-            if p.custom_instructions:
-                parts.append("")
-                parts.append(p.custom_instructions)
-            # Auto-inject Retrieval Protocol for RAG-bound advisors.
-            _rp = _build_retrieval_protocol(p)
-            if _rp:
-                parts.append("")
-                parts.append(_rp)
-            if p.language and p.language != "auto":
-                lang_map = {"zh-CN": "中文", "en": "English",
-                            "ja": "日本語", "ko": "한국어", "es": "Español",
-                            "fr": "Français", "de": "Deutsch"}
-                lang_name = lang_map.get(p.language, p.language)
-                parts.append(f"\n始终使用 {lang_name} 回复。")
-        else:
-            # Default build (no rich persona)
-            parts = [
-                f"You are {self.name}, an AI programming assistant.",
-                f"Your role: {self.role}.",
-            ]
-            if p.personality != "helpful":
-                parts.append(f"Your personality: {p.personality}.")
-            if p.communication_style != "technical":
-                parts.append(f"Your communication style: {p.communication_style}.")
-            if p.expertise:
-                parts.append(f"Your areas of expertise: {', '.join(p.expertise)}.")
-            if p.skills:
-                parts.append(f"Your specialized skills: {', '.join(p.skills)}.")
-            if p.language and p.language != "auto":
-                lang_map = {"zh-CN": "Chinese (Simplified)", "en": "English",
-                            "ja": "Japanese", "ko": "Korean", "es": "Spanish",
-                            "fr": "French", "de": "German"}
-                lang_name = lang_map.get(p.language, p.language)
-                parts.append(f"Always respond in {lang_name}.")
-            parts.append("")
-            parts.append(
-                "You have access to tools for reading/writing files, running shell commands, "
-                "searching code, web search, and web fetch."
-            )
-            parts.append(
-                "Multi-agent coordination tools: team_create (spawn sub-agents for parallel "
-                "task execution), send_message (inter-agent messaging), task_update (shared task list)."
-            )
-            parts.append(
-                "Execution Plan tool: plan_update — at the START of any multi-step task, "
-                "ALWAYS use plan_update(action='create_plan') to decompose the task into steps. "
-                "Then call plan_update(action='complete_step') after each step completes. "
-                "This lets the user see your real-time progress."
-            )
-            parts.append(
-                "Always use tools when the user asks you to interact with files or run commands."
-            )
-            parts.append(
-                "When a task can be decomposed into independent sub-tasks, use team_create to "
-                "spawn sub-agents that execute in parallel (3 sub-agents ~1 min vs serial ~3 min)."
-            )
-            parts.append("Be concise and helpful. Use markdown formatting for code.")
-            parts.append("")
-            parts.append(
-                "IMPORTANT: Some tool calls (especially bash commands that modify the system, "
-                "writes to sensitive paths) may require human approval. If a tool call is denied, "
-                "inform the user and suggest an alternative approach."
-            )
-            parts.append("")
-            parts.append(
-                "[Memory/Knowledge trio — keep these strictly separated]\n"
-                "1) skill — installable capability package, managed exclusively via the Skill "
-                "Registry UI (lives under ~/.tudou_claw/skills/). DO NOT use tools to create, "
-                "save, or write SKILL.md. Never persist retrospective/experience content as a skill.\n"
-                "2) experience — structured lesson (scene → core knowledge → action/taboo rules) "
-                "produced by retrospectives or active learning. Use the save_experience tool; it "
-                "writes to your role's experience library and is auto-injected into same-role prompts.\n"
-                "3) knowledge — global reference wiki shared across roles (design specs, tech stack, "
-                "site lists). Query on-demand via knowledge_lookup; do NOT copy its contents into "
-                "experience or skill.\n"
-                "Quick rule: 'next time I hit scene X, do Y' → save_experience; "
-                "'look up official/standing reference' → knowledge_lookup; "
-                "'install a reusable capability' → tell the user to install via the Skill Registry UI."
-            )
-            if self.system_prompt:
-                parts.append("")
-                parts.append(self.system_prompt)
-            if p.custom_instructions:
-                parts.append("")
-                parts.append(p.custom_instructions)
-            _rp = _build_retrieval_protocol(p)
-            if _rp:
-                parts.append("")
-                parts.append(_rp)
+        # ── DEFAULT + SETTINGS + PERSONA ────────────────────────────
+        # Single source of truth: app/system_prompt.py composes the
+        # platform contract (DEFAULT, hardcoded), the operator-config
+        # block (SETTINGS — scene_prompts), and the per-agent persona
+        # (system_prompt + soul_md + custom_instructions). Replaces
+        # ~125 lines of branching here with one call.
+        #
+        # 3 persona fields with distinct semantics:
+        #   self.system_prompt        → identity & expertise (what)
+        #   self.soul_md              → communication & behavior (how)
+        #   p.custom_instructions     → ad-hoc additions / overrides
+        from . import system_prompt as _sp
+        parts = [_sp.compose_full_prompt(
+            name=self.name,
+            role=self.role,
+            language=p.language or "auto",
+            ctx_type=getattr(self, "context_type", "solo") or "solo",
+            working_dir=str(wd),
+            shared_workspace=getattr(self, "shared_workspace", "") or "",
+            project_name=getattr(self, "project_name", "") or "",
+            project_id=getattr(self, "project_id", "") or "",
+            meeting_id=getattr(self, "source_meeting_id", "") or "",
+            agent_system_prompt=self.system_prompt or "",
+            agent_soul_md=getattr(self, "soul_md", "") or "",
+            agent_custom_instructions=p.custom_instructions or "",
+        )]
+
+        # Auto-inject Retrieval Protocol for RAG-bound advisors (lives
+        # outside system_prompt.py because it depends on profile.rag_*
+        # fields — agent-runtime data).
+        _rp = _build_retrieval_protocol(p)
+        if _rp:
+            parts.append(_rp)
 
         # File display contract — keeps the agent from writing broken
         # markdown image syntax for binary files, or "drag the file into
@@ -3154,11 +3751,84 @@ class Agent:
         if system_prompts_text:
             result = system_prompts_text + "\n\n" + result
 
+        # ── B (Nov 2026): granted-skills roster ─────────────────────────
+        # Short one-line-per-skill list so the LLM knows its toolkit
+        # without having to call get_skill_guide to discover. ~40 tokens
+        # per skill; at 10-15 skills that's ~500 tokens. Lives in static
+        # prompt so it rides the KV-cache across all iterations.
+        try:
+            _roster = _build_granted_skills_roster(self)
+            if _roster:
+                result = result + "\n\n" + _roster
+        except Exception as _rerr:
+            logger.debug("granted skills roster build failed: %s", _rerr)
+
         self._cached_static_prompt = result
         self._static_prompt_hash = current_hash
         logger.debug("Static system prompt rebuilt (hash=%s, len=%d, sys_prompts=%d)",
                      current_hash[:8], len(result), len(system_prompts_text))
+
+        # ── Phase 2b dry-run hook ───────────────────────────────────
+        # When TUDOU_PROMPT_V2_DRYRUN=1, also compute the v2 declarative
+        # assembly result and log a diff summary. v1 (this method's
+        # return value) is unchanged — this is observation-only.
+        # Used to verify v2 catalog conditions are correct before the
+        # Stage B/C cutover. ALWAYS catches exceptions — dry-run must
+        # not break the live path.
+        if os.environ.get("TUDOU_PROMPT_V2_DRYRUN", "0") == "1":
+            try:
+                self._dry_run_prompt_v2(v1_text=result)
+            except Exception as _e:
+                logger.debug("prompt_v2 dry-run skipped: %s", _e)
+
         return result
+
+    def _dry_run_prompt_v2(self, v1_text: str) -> None:
+        """Compute v2 prompt assembly + log diff vs v1. No side effect on v1."""
+        from .prompt_blocks import AssemblyContext
+        from .prompt_block_catalog import get_default_catalog
+        from .system_prompt_v2 import assemble_with_log, diff_summary
+
+        # Build AssemblyContext from current agent state. We don't have
+        # scope_tags here (it's a per-turn signal); leave empty so blocks
+        # gated on scope are excluded — this gives a "lower bound" of
+        # what v2 would include.
+        p = self.profile
+        granted_tools = set(getattr(self, "_granted_tool_names", None) or [])
+        granted_skills = set(getattr(p, "granted_skills", None) or [])
+
+        ctx = AssemblyContext.make(
+            scope_tags=[],  # empty in dry-run; real wire-in passes scopes
+            granted_tools=granted_tools,
+            granted_skills=granted_skills,
+            role_kind=(self.role or "").lower(),
+            ctx_type=(getattr(self, "context_type", "solo") or "solo"),
+            extras={
+                "agent_name": self.name,
+                "agent_role": self.role,
+                "language": getattr(p, "language", "auto") or "auto",
+                "agent_system_prompt": self.system_prompt or "",
+                "agent_soul_md": getattr(self, "soul_md", "") or "",
+                "agent_custom_instructions": getattr(p, "custom_instructions", "") or "",
+                "working_dir": str(self._effective_working_dir()),
+                "shared_workspace": getattr(self, "shared_workspace", "") or "",
+                "project_name": getattr(self, "project_name", "") or "",
+                "project_id": getattr(self, "project_id", "") or "",
+                "meeting_id": getattr(self, "source_meeting_id", "") or "",
+            },
+        )
+        v2_text, _result = assemble_with_log(
+            get_default_catalog(), ctx, agent_id=self.id,
+        )
+        # Diff summary at INFO so operator can see in-flight comparison
+        d = diff_summary(v1_text, v2_text)
+        logger.info(
+            "[prompt_v2_diff] agent=%s v1=%dch v2=%dch delta=%+dch "
+            "v1_only_lines=%d v2_only_lines=%d",
+            self.id[:8],
+            d["v1_chars"], d["v2_chars"], d["delta_chars"],
+            d["only_in_v1_count"], d["only_in_v2_count"],
+        )
 
     def _build_dynamic_context(self, current_query: str = "") -> str:
         """Build the DYNAMIC portion injected as a separate context message.
@@ -3181,8 +3851,11 @@ class Agent:
 
         parts = []
         total_chars = 0
+        # ── Per-section size tracking for the breakdown log ──
+        # Helps locate which dynamic section is bloating the prompt.
+        section_sizes: dict[str, int] = {}
 
-        def _try_add(text: str) -> bool:
+        def _try_add(text: str, section: str = "_misc") -> bool:
             """Add text to parts if within budget. Returns True if added."""
             nonlocal total_chars
             if not text:
@@ -3191,11 +3864,18 @@ class Agent:
                 # Try truncated version
                 remaining = max_dynamic_chars - total_chars
                 if remaining > 200:
-                    parts.append(text[:remaining] + "\n...[truncated]")
+                    truncated = text[:remaining] + "\n...[truncated]"
+                    parts.append(truncated)
+                    section_sizes[section] = (
+                        section_sizes.get(section, 0) + len(truncated)
+                    )
                     total_chars = max_dynamic_chars
                 return False
             parts.append(text)
             total_chars += len(text)
+            section_sizes[section] = (
+                section_sizes.get(section, 0) + len(text)
+            )
             return True
 
         # Priority order: most important context first
@@ -3208,7 +3888,7 @@ class Agent:
         try:
             plan_ctx = self.format_plan_state_for_llm()
             if plan_ctx:
-                _try_add(plan_ctx)
+                _try_add(plan_ctx, "plan")
         except Exception as _pe:
             try:
                 logger.debug("plan state injection skipped: %s", _pe)
@@ -3219,13 +3899,13 @@ class Agent:
         try:
             from . import knowledge as _kb
             kb_summary = _kb.get_prompt_summary()
-            _try_add(kb_summary)
+            _try_add(kb_summary, "kb_wiki")
         except Exception:
             pass
 
         # 2. Workspace files (MCP, Tasks, Scheduled — needed for tool usage)
         sched_ctx = self._get_scheduled_context()
-        _try_add(sched_ctx)
+        _try_add(sched_ctx, "scheduled")
 
         # 2.5 Recent artifacts in workspace (deliverables agent produced).
         # Without this, agent forgets files it created earlier in the same
@@ -3236,7 +3916,7 @@ class Agent:
         try:
             artifacts_ctx = self._build_recent_artifacts_context()
             if artifacts_ctx:
-                _try_add(artifacts_ctx)
+                _try_add(artifacts_ctx, "recent_artifacts")
         except Exception as _ae:
             logger.debug("recent-artifacts injection skipped: %s", _ae)
 
@@ -3245,7 +3925,7 @@ class Agent:
         if now - self._git_context_ts >= self._GIT_CONTEXT_COOLDOWN:
             self._cached_git_context = self._get_git_context()
             self._git_context_ts = now
-        _try_add(self._cached_git_context)
+        _try_add(self._cached_git_context, "git")
 
         # 4. Three-layer memory: L2 + L3 retrieval (query-dependent)
         mm = self._get_memory_manager()
@@ -3255,7 +3935,7 @@ class Agent:
                 memory_context = mm.retrieve_for_prompt(
                     self.id, current_query, config=mem_config,
                 )
-                _try_add(memory_context or "")
+                _try_add(memory_context or "", "memory_l2l3")
                 # ── 记录本次记忆注入的体量，供 portal 展示"记忆使用比例" ──
                 try:
                     mem_chars = len(memory_context or "")
@@ -3290,17 +3970,43 @@ class Agent:
 
         # 5. SKILL.md knowledge
         if total_chars < max_dynamic_chars:
-            _try_add(self._get_skill_context())
+            _try_add(self._get_skill_context(), "skill_md")
 
         # 6. Enhancement module knowledge
         if total_chars < max_dynamic_chars and self.enhancer and self.enhancer.enabled:
             enhanced = self.enhancer.enhance_system_prompt("", context_hint=self.role)
-            _try_add(enhanced or "")
+            _try_add(enhanced or "", "enhance")
 
-        # 7. Self-improvement experience library
+        # 7. Self-improvement experience library (LEGACY — index-only)
         if total_chars < max_dynamic_chars and self.self_improvement and self.self_improvement.enabled:
             exp_ctx = self.self_improvement.build_experience_context()
-            _try_add(exp_ctx or "")
+            _try_add(exp_ctx or "", "experience")
+
+        # 7.5. Wiki index injection (Karpathy pattern). Per-role + global
+        # markdown pages indexed by title — agent calls knowledge_lookup or
+        # reads pages on-demand when it actually needs the content. Index
+        # alone is ~50 chars per page so 30 pages = ~1.5K. Empty wiki returns
+        # "" — no waste. Coexists with experience library above during
+        # migration; eventually wiki replaces it.
+        if total_chars < max_dynamic_chars:
+            try:
+                from .knowledge import get_wiki_store
+                store = get_wiki_store()
+                role_idx = store.render_index_for_prompt(
+                    f"role:{self.role}", max_pages=20,
+                )
+                global_idx = store.render_index_for_prompt(
+                    "global", max_pages=15,
+                )
+                if role_idx or global_idx:
+                    parts_idx = []
+                    if role_idx:
+                        parts_idx.append(role_idx)
+                    if global_idx:
+                        parts_idx.append(global_idx)
+                    _try_add("\n\n".join(parts_idx), "wiki_index")
+            except Exception as _we:
+                logger.debug("wiki index injection skipped: %s", _we)
 
         # 8. Granted skills (from skill registry)
         if total_chars < max_dynamic_chars:
@@ -3312,13 +4018,32 @@ class Agent:
                     skill_block = hub.skill_registry.build_prompt_block(
                         self.id, agent_workspace=str(self._get_agent_workspace()))
                     if skill_block:
-                        _try_add(skill_block)
+                        _try_add(skill_block, "skills_registry")
             except Exception as _se:
                 logger.debug("skill prompt injection failed: %s", _se)
 
         if not parts:
             return ""
         result = "\n\n".join(parts)
+        # ── Stash per-section sizes on the agent so the LLM-layer breakdown
+        #    logger can include them. Stays in-process; not persisted.
+        try:
+            self._dynamic_section_sizes = dict(section_sizes)
+        except Exception:
+            pass
+        # ── Per-section breakdown log (INFO level — this is the data needed
+        #    to know which section is bloating dynamic context).
+        try:
+            sec_str = " ".join(
+                f"{k}={v}" for k, v in sorted(
+                    section_sizes.items(), key=lambda kv: -kv[1])
+            )
+            logger.info(
+                "DYNAMIC_CONTEXT_BREAKDOWN agent=%s total=%d/%d sections[%s]",
+                self.id[:8], len(result), max_dynamic_chars, sec_str,
+            )
+        except Exception:
+            pass
         logger.debug("Dynamic context: %d chars / %d budget (%.0f%%)",
                      len(result), max_dynamic_chars,
                      len(result) / max(max_dynamic_chars, 1) * 100)
@@ -4663,12 +5388,27 @@ Write only the summary body. Do not include any preamble or prefix."""
     # ── P0-B: auto-spill large tool results ─────────────────────────
     # Tool outputs over this many chars get written to
     # $workspace/tool_outputs/<ts>_<name>.md and replaced with a compact
-    # ref + 300-char preview in the conversation. Agent can still read
-    # the full content via read_file(<path>) when needed — but we stop
-    # paying for 5-10k tokens of raw HTML/CSV/log on every subsequent
-    # LLM call. Configurable via profile.spill_tool_result_chars.
-    _SPILL_TOOL_RESULT_THRESHOLD: int = 1500
-    _SPILL_PREVIEW_CHARS: int = 300
+    # ref + preview in the conversation. Agent can still read full
+    # content via read_file(<path>) when needed.
+    #
+    # Threshold history:
+    #   1500   (initial)  — ROOT CAUSE of the read_file death-loop in
+    #                       小专 audit (30+ identical reads on a 5K
+    #                       outline). 5K results got spilled, agent
+    #                       re-read the spill file, that read also
+    #                       got spilled, infinite bounce.
+    #   20000  (interim)  — still too aggressive; routine 10-50K results
+    #                       (web_fetch HTML, large docs extracted from
+    #                       PDFs/PPTs) got spilled, forcing follow-up
+    #                       read_file on the spill file.
+    #   262144 (current)  — 256K chars (~64K tokens). Only spill when
+    #                       a single result genuinely won't fit in a
+    #                       reasonable LLM context budget. Most
+    #                       day-to-day tool outputs flow inline.
+    _SPILL_TOOL_RESULT_THRESHOLD: int = 262144   # 256K chars
+    # Preview chars when we DO spill — 4K is enough for a meaningful
+    # summary so the LLM rarely needs to read the full file.
+    _SPILL_PREVIEW_CHARS: int = 4000
 
     # Tools whose outputs we never spill — usually because the full body
     # is itself the output the LLM must reason on (small JSON ACKs) or
@@ -4977,9 +5717,11 @@ Write only the summary body. Do not include any preamble or prefix."""
         "web_search", "web_fetch",
         "plan_update", "complete_step",
         "get_skill_guide",
-        # Agent-private memory probe (新 A) — cheap way to check
-        # "have I seen this before" before expensive web lookups.
-        "memory_recall",
+        # Memory tools — cheap way to check "have I seen this?" before
+        # expensive web lookups. memory_recall: per-agent L3 semantic;
+        # knowledge_lookup: global shared knowledge wiki;
+        # save_experience: write retrospective to role's experience lib.
+        "memory_recall", "knowledge_lookup", "save_experience",
     )
 
     def _get_effective_tools(self) -> list[dict]:
@@ -5048,7 +5790,14 @@ Write only the summary body. Do not include any preamble or prefix."""
                 self.id, len(allowed),
             )
 
-        allowed_set = set(allowed)
+        # Add infra tools to allowed set so their schemas also ship to LLM
+        # (otherwise LLM doesn't know they exist and never calls them).
+        # Matches the bypass in _execute_tool_with_policy above.
+        _INFRA_TOOLS_SCHEMA = frozenset({
+            "memory_recall", "knowledge_lookup", "save_experience",
+            "get_skill_guide", "plan_update", "complete_step",
+        })
+        allowed_set = set(allowed) | _INFRA_TOOLS_SCHEMA
         all_tools = [t for t in all_tools
                      if t["function"]["name"] in allowed_set]
 
@@ -5109,12 +5858,21 @@ Write only the summary body. Do not include any preamble or prefix."""
     def _resolve_effective_provider_model(self, user_message: Any = None) -> tuple[str, str]:
         """Re-resolve provider/model from registry before each LLM call.
 
-        If the configured provider is empty, disabled, or removed, falls back
-        to the global default. This ensures agents pick up live config changes
-        (new API key, URL, etc.) without needing a restart or re-create.
+        Resolution order (top → bottom; first non-empty wins):
 
-        P2 #8: if `user_message` is provided and contains vision/audio parts,
-        route to the multimodal provider/model when configured.
+          1. Per-task explicit override (``current_task.provider/model``)
+          2. ★ V2 LLMRouter slot pick (5 slots: default/analysis/reasoning/
+             coding/multimodal). Reads from agent's V1 fields via
+             ``slots_from_v1_agent`` + signals from the user_message and
+             current plan step. Replaces the legacy ``extra_llms`` label
+             routing + ``auto_route`` score table — same contract, single
+             entry point.
+          3. ``agent.provider/model`` (the configured primary)
+          4. Global default from ``config.yaml``
+
+        Step 2 is opt-out: setting ``TUDOU_DISABLE_LLM_ROUTER=1`` skips
+        the router and falls straight to step 3 — useful as a kill switch
+        if a routing bug surfaces in prod.
         """
         # Per-task override takes top priority — task A uses LLM A, task B uses LLM B.
         ct = self._current_task
@@ -5124,6 +5882,86 @@ Write only the summary body. Do not include any preamble or prefix."""
         else:
             prov = self.provider
             mdl = self.model
+
+        # ── V2 LLMRouter (5-slot pick) ────────────────────────────────
+        # Single entry point that replaces extra_llms label routing +
+        # auto_route scoring. Builds slots from V1 agent fields, classifies
+        # signals from the call, picks the best slot. Falls through to
+        # legacy paths when slots are empty / router disabled.
+        if os.environ.get("TUDOU_DISABLE_LLM_ROUTER", "0") != "1":
+            try:
+                from .v2.agent.llm_slots import slots_from_v1_agent
+                from .v2.bridges.llm_router import get_router
+                slots = slots_from_v1_agent(self)
+                # Allow per-task explicit slot pick via llm_label
+                explicit_function = ""
+                if ct is not None:
+                    explicit_function = (getattr(ct, "llm_label", "") or "").strip()
+                # Compose signals
+                signals: dict[str, Any] = {}
+                if user_message is not None:
+                    try:
+                        signals["has_image_or_audio"] = self._message_is_multimodal(user_message)
+                    except Exception:
+                        pass
+                    text = ""
+                    if isinstance(user_message, str):
+                        text = user_message
+                    elif isinstance(user_message, dict):
+                        c = user_message.get("content", "")
+                        text = c if isinstance(c, str) else ""
+                    if text:
+                        signals["last_user_text"] = text
+                        signals["prompt_chars"] = len(text)
+                # Phase 1-B hint: in-progress step's llm_purpose
+                try:
+                    _plan = getattr(self, "_current_plan", None)
+                    if _plan is not None and not explicit_function:
+                        for s in _plan.steps:
+                            _stat = s.status.value if hasattr(s.status, "value") else str(s.status)
+                            if _stat == "in_progress":
+                                _hint = (getattr(s, "llm_purpose", "") or "").strip()
+                                # Map V1 categories → V2 slot names
+                                _hint_map = {
+                                    "tool-heavy": "default",
+                                    "analysis": "analysis",
+                                    "reasoning": "reasoning",
+                                    "coding": "coding",
+                                    "multimodal": "multimodal",
+                                }
+                                if _hint in _hint_map:
+                                    explicit_function = _hint_map[_hint]
+                                break
+                except Exception:
+                    pass
+                decision = get_router().pick(
+                    slots,
+                    explicit_function=explicit_function,
+                    signals=signals,
+                )
+                if decision.binding.is_set():
+                    changed = (decision.binding.provider,
+                                decision.binding.model) != (prov, mdl)
+                    # Always log on change (INFO). Optionally log every
+                    # decision (no-op kept) when TUDOU_LLMROUTER_VERBOSE=1
+                    # — useful to confirm the router is actually running
+                    # on a quiet config where slots == primary.
+                    if changed:
+                        logger.info(
+                            "Agent %s: LLMRouter [%s] → %s (%s)",
+                            self.id[:8], decision.slot,
+                            decision.binding.to_str(), decision.reason,
+                        )
+                    elif os.environ.get("TUDOU_LLMROUTER_VERBOSE", "0") == "1":
+                        logger.info(
+                            "Agent %s: LLMRouter [%s] = %s (no change; %s)",
+                            self.id[:8], decision.slot,
+                            decision.binding.to_str(), decision.reason,
+                        )
+                    prov = decision.binding.provider
+                    mdl = decision.binding.model
+            except Exception as _re:
+                logger.debug("LLMRouter skipped: %s", _re)
 
         # 方案乙: extra_llms 路由 —— 如果 task 带了 llm_label，优先从
         # agent.extra_llms 里找 label 或 purpose 命中的 slot，命中就覆盖
@@ -5411,8 +6249,21 @@ Write only the summary body. Do not include any preamble or prefix."""
         if tool_name in self.profile.denied_tools:
             return f"DENIED: Tool '{tool_name}' is not permitted for this agent."
 
-        # Check agent-level allowed tools (empty list = all allowed)
-        if self.profile.allowed_tools and tool_name not in self.profile.allowed_tools:
+        # ── Infrastructure tools always available ──
+        # 记忆 / 技能查询类工具不消耗副作用,不涉及写操作,属于"自查"范畴。
+        # 老的 role preset (code_reviewer/researcher) 没在 allowed_tools 里
+        # 列它们,但我们希望所有 agent 都能自查记忆 —— 否则 agent 会反复
+        # 重新学,也无法 save_experience 沉淀经验。除非 denied_tools 显式禁。
+        _INFRA_TOOLS = frozenset({
+            "memory_recall", "knowledge_lookup", "save_experience",
+            "get_skill_guide", "plan_update", "complete_step",
+        })
+
+        # Check agent-level allowed tools (empty list = all allowed;
+        # infra tools bypass this check since they're universally safe)
+        if (self.profile.allowed_tools
+                and tool_name not in self.profile.allowed_tools
+                and tool_name not in _INFRA_TOOLS):
             return f"DENIED: Tool '{tool_name}' is not in this agent's allowed list."
 
         # Scheduled / background task: skip approval (already authorized at creation)
@@ -5631,9 +6482,15 @@ Write only the summary body. Do not include any preamble or prefix."""
                 "system" for system messages
         """
         # ── Token logging context: 让本次 chat 内所有 LLM 调用 ──
-        # ── 都能归属到这个 agent，token 统计才能落到 agent.stats ──
+        # ── 都能归属到这个 agent/project/meeting，token 统计才能落到 ──
+        # ── agent.stats / project.stats / meeting.stats 。project_id ──
+        # ── 和 source_meeting_id 都是 agent 对象的属性(Agent dataclass) ──
         try:
-            llm.set_token_context(agent_id=self.id, project_id="")
+            llm.set_token_context(
+                agent_id=self.id,
+                project_id=getattr(self, "project_id", "") or "",
+                meeting_id=getattr(self, "source_meeting_id", "") or "",
+            )
         except Exception:
             pass
 
@@ -5644,6 +6501,11 @@ Write only the summary body. Do not include any preamble or prefix."""
             # the previous turn don't leak into this turn's assistant msg.
             try:
                 self._turn_memory_refs = []
+            except Exception:
+                pass
+            # Reset per-turn query-dedup cache (memory_recall / knowledge_lookup)
+            try:
+                self._turn_query_cache = {}
             except Exception:
                 pass
 
@@ -6038,6 +6900,27 @@ Write only the summary body. Do not include any preamble or prefix."""
                 # Older images are replaced with a text placeholder to save
                 # tokens and avoid confusing the model with stale images.
                 _msgs_to_send = _strip_old_images(_msgs_to_send)
+                # ── C: Hoist skill-guide bodies out of tool_results ──
+                # Big SKILL.md pulled via get_skill_guide gets moved to ONE
+                # system block at the front; tool_result becomes a short
+                # placeholder. 省掉每轮重发几 KB 的 markdown,同时让它落到
+                # prefix-cacheable 的位置。
+                _msgs_to_send = _hoist_skill_guides(_msgs_to_send)
+                # ── Multimodal: elide old image base64 ──
+                # base64 images are 100K-1M+ chars each; the model has
+                # already "seen" earlier turn's images and described
+                # them in subsequent assistant text — we don't need to
+                # re-send the bytes. Only keeps the LAST image-bearing
+                # user turn intact; older images become a small
+                # "[N image(s) from earlier turn — omitted]" placeholder.
+                # Pure-text histories return unchanged (zero cost).
+                # Was previously only wired into the iteration>0 chain
+                # below — first call leaked all base64 through.
+                _msgs_to_send = _strip_old_images(_msgs_to_send)
+                # ── History summary — 最上位的裁剪,大幅压成一段摘要 ──
+                # threshold: TUDOU_HISTORY_SUMMARY_CHARS (默认 30000 chars)
+                # 或 tool 消息 > 8 个时触发; 结果 cached 在 agent 上。
+                _msgs_to_send = _summarize_old_history(_msgs_to_send, self)
                 # Same idea for stale tool bodies (web_fetch / search
                 # results from earlier iterations). Keep the newest 4
                 # in full; older ones get a 600-char head preview.
@@ -6046,6 +6929,8 @@ Write only the summary body. Do not include any preamble or prefix."""
                 # / `new_string` args — once the write committed, resending
                 # the 10KB file body on every turn is pure waste.
                 _msgs_to_send = _compress_old_write_tool_calls(_msgs_to_send)
+                # Final safety: drop any orphan tool messages (DeepSeek strict).
+                _msgs_to_send = _drop_orphan_tool_messages(_msgs_to_send)
 
                 # ── Multimodal diagnostic: verify images survive pipeline ──
                 if _is_multimodal:
@@ -6086,7 +6971,15 @@ Write only the summary body. Do not include any preamble or prefix."""
 
                 # Narrator-stall nudge: at most one corrective injection per
                 # turn, so a persistently-broken model can't pin us in a loop.
-                _nudged_this_turn = False
+                # Track number of nudges this turn. Old code used a bool
+                # `_nudged_this_turn = True` once and never nudged again,
+                # but real LLMs (especially DeepSeek thinking-mode) often
+                # stall multiple times per turn — narrator-stall on iter 5,
+                # then again on iter 8 after a tool result. We allow up to
+                # _MAX_NUDGES_PER_TURN nudges so each fresh stall gets a
+                # corrective injection instead of breaking the loop.
+                _nudge_count = 0
+                _MAX_NUDGES_PER_TURN = 3
 
                 # Plan D: handoff-trigger force. Only active on iteration 0,
                 # only when handoff_request is actually in the tool list, and
@@ -6121,12 +7014,21 @@ Write only the summary body. Do not include any preamble or prefix."""
                     # Rebuild messages-to-send each iteration (self.messages
                     # may have grown with tool results from previous iteration).
                     # Dynamic context is appended at the end — keeps prefix stable.
+                    # Order matters: hoist skill-guides → summarize →
+                    # compress tool results → compress old writes. Summary
+                    # runs on already-hoisted array so guide bodies don't
+                    # show up in the summary-transcript either.
                     if iteration > 0:
-                        _msgs_to_send = _compress_old_write_tool_calls(
-                            _compress_old_tool_results(
-                                _strip_old_images(
-                                    self._inject_dynamic_context(
-                                        self.messages, current_query=_user_text))))
+                        _msgs_to_send = _drop_orphan_tool_messages(
+                            _compress_old_write_tool_calls(
+                                _compress_old_tool_results(
+                                    _summarize_old_history(
+                                        _hoist_skill_guides(
+                                            _strip_old_images(
+                                                self._inject_dynamic_context(
+                                                    self.messages,
+                                                    current_query=_user_text))),
+                                        self))))
                     # Strategy: always try streaming first (with tools).
                     # If the provider doesn't support streaming+tools,
                     # it falls back to non-streaming internally.
@@ -6169,17 +7071,46 @@ Write only the summary body. Do not include any preamble or prefix."""
                         except Exception:
                             pass  # Fall through
 
-                    # Non-streaming path (with tools support)
+                    # Tool-capable LLM path. Prefer STREAMING when on_event
+                    # is bound (UI wants live text_delta), falling back to
+                    # non-streaming chat_no_stream only when forced
+                    # tool_choice is in play (the streaming adapter doesn't
+                    # support tool_choice — that's a first-iteration escape
+                    # hatch and shouldn't be the common case).
+                    #
+                    # Previously this branch *always* called chat_no_stream,
+                    # which meant the in-process agent.chat() path never
+                    # emitted text_delta events — the UI only saw the full
+                    # final message. Streaming was working in the isolated
+                    # worker (agent_execution.py:1179) but not here. User
+                    # reported: "chat页面没有全流程流形式输出" — only visible
+                    # after page refresh. This route fixes that.
                     if _is_aborted():
                         final_content = final_content or "[Aborted]"
                         break
+                    _can_stream = bool(on_event) and not (
+                        iteration == 0 and _forced_tool_choice)
+                    # _effective_temperature 来自 AgentLLMMixin; 某些旧 Agent
+                    # 实例可能未继承到 (比如反序列化场景), 用 hasattr 兜底。
+                    _temp = (self._effective_temperature()
+                             if hasattr(self, "_effective_temperature")
+                             else None)
                     try:
-                        response = llm.chat_no_stream(
-                            _msgs_to_send, tools=_effective_tools,
-                            provider=_eff_provider, model=_eff_model,
-                            tool_choice=(_forced_tool_choice
-                                         if iteration == 0 else None),
-                        )
+                        if _can_stream:
+                            response = _stream_chat_to_response(
+                                llm, _msgs_to_send, _effective_tools,
+                                provider=_eff_provider, model=_eff_model,
+                                temperature=_temp,
+                                on_event=_emit,
+                                is_aborted=_is_aborted,
+                            )
+                        else:
+                            response = llm.chat_no_stream(
+                                _msgs_to_send, tools=_effective_tools,
+                                provider=_eff_provider, model=_eff_model,
+                                tool_choice=(_forced_tool_choice
+                                             if iteration == 0 else None),
+                            )
                     except (ConnectionError, OSError) as conn_err:
                         # Provider unreachable — stop retrying immediately
                         raise RuntimeError(
@@ -6204,13 +7135,98 @@ Write only the summary body. Do not include any preamble or prefix."""
                     # end_turn | tool_use | length | stop_sequence | content_filter
                     stop_reason = response.get("stop_reason") or ""
 
-                    if content:
+                    # ── 碎碎念 / meta-promise guard ─────────────────────
+                    # LLM 反复发 "好的,我来..."/"让我先..." 但不调工具 →
+                    # 用户看到一串重复承诺。检测 + 抑制 + 纠偏 + 兜底放弃。
+                    # (这段之前只在 agent_execution.py 的 chat 里有,但
+                    # in-process 路径实际跑的是 agent.py 的 chat,所以漏了。)
+                    _suppress_display = False
+                    _dup_abort = False
+                    try:
+                        from .agent_execution import (
+                            _text_similarity as _sim_fn,
+                            _is_meta_promise as _meta_fn,
+                        )
+                        _prev = str(getattr(self, "_last_iter_content", "") or "")
+                        _curr = str(content or "")
+                        _sim = _sim_fn(_prev, _curr) if _prev and _curr else 0.0
+                        _is_meta = (not tool_calls) and _meta_fn(_curr)
+                        _trip = (_curr and len(_curr) > 20
+                                 and (_sim >= 0.85 or _is_meta))
+                        if _trip:
+                            _dup_count = int(getattr(
+                                self, "_dup_iter_count", 0)) + 1
+                            self._dup_iter_count = _dup_count
+                            _suppress_display = True
+                            logger.warning(
+                                "Agent %s: 碎碎念/meta-promise "
+                                "(sim=%.2f, meta=%s, dup#%d)",
+                                self.id[:8], _sim, _is_meta, _dup_count)
+                            # 关键: text_delta 已经流到前端并画出气泡。
+                            # push 一个 retract 事件让前端擦掉最新 assistant 气泡,
+                            # 否则即使 suppress 了 message,用户还是看到那条"好的我先..."。
+                            try:
+                                _emit(AgentEvent(time.time(), "retract_last_assistant",
+                                                 {"reason": "meta_promise"}))
+                            except Exception:
+                                pass
+                            if _dup_count == 1:
+                                # 第 1 次:注入纠偏 system,让下一轮看到并改
+                                self.messages.append({
+                                    "role": "system",
+                                    "content": (
+                                        "[SYSTEM] 你刚才这一轮的回复没有实际"
+                                        "动作(纯承诺 / 重复'我先 / 让我先 / "
+                                        "好的马上...')。\n"
+                                        "下一轮必须做下面之一,不要再重复承诺:\n"
+                                        "  (a) 直接调一个具体工具(write_file / "
+                                        "read_file / bash / mcp_call / "
+                                        "send_message / handoff),\n"
+                                        "  (b) plan_update(complete_step/"
+                                        "fail_step)更新状态,\n"
+                                        "  (c) 真的不知道怎么做就返回 15 字内"
+                                        "的明确提问。\n"
+                                        "严禁再输出'交给我吧 / 让我先 / "
+                                        "好的我来 / 马上发送'开场白而不做事。"
+                                    ),
+                                    "_dynamic": True,
+                                    "_source": "dup_guard",
+                                })
+                            if _dup_count >= 2:
+                                # 第 2 次:放弃这一轮,避免继续烧 token
+                                logger.error(
+                                    "Agent %s: 连续 2 次碎碎念 → 终止本轮",
+                                    self.id[:8])
+                                _dup_abort = True
+                                final_content = (
+                                    "⚠️ 我好像卡在重复承诺里了(连续 2 轮只说"
+                                    "\"我来...\" 没调工具)。已自动停止。请把任务"
+                                    "拆成一小步再提问,或检查是否有工具被拒。"
+                                )
+                        else:
+                            # 重置计数,否则新对话一开始就被卡住
+                            self._dup_iter_count = 0
+                        # 记下本轮 content 供下一轮比对
+                        self._last_iter_content = _curr
+                    except Exception as _dup_err:
+                        logger.debug("dup-guard failed: %s", _dup_err)
+
+                    if content and not _suppress_display:
                         final_content = content
                         evt = AgentEvent(time.time(), "message",
                                          {"role": "assistant",
                                           "content": content})
                         self._log(evt.kind, evt.data)
                         _emit(evt)
+                    if _dup_abort:
+                        # 把兜底消息发给 UI 作为本轮最终回复
+                        try:
+                            _emit(AgentEvent(time.time(), "message",
+                                             {"role": "assistant",
+                                              "content": final_content}))
+                        except Exception:
+                            pass
+                        break
 
                     # ── Surface truncation / filter issues ──────────────
                     # Distinct from "empty tool_calls" — these tell the user
@@ -6251,14 +7267,26 @@ Write only the summary body. Do not include any preamble or prefix."""
                         # that's truncation, not a stall (the model WANTED
                         # to keep going; injecting "call the tool" would
                         # just waste tokens on a truncated continuation).
+                        # Nudge condition: tools available, under max nudge cap,
+                        # haven't run out of iterations, not truncated, and EITHER
+                        #   (a) text looks like a narrator stall ("让我先..."), OR
+                        #   (b) content is essentially empty (no concrete output)
+                        #       which is the most common DeepSeek stall mode —
+                        #       "thinking" succeeded but output got dropped.
+                        # The "essentially empty" branch covers what
+                        # `_looks_like_narrator_stall` misses (it requires a
+                        # specific colon-ending pattern).
+                        _content_stripped = (content or "").strip()
+                        _is_empty_response = len(_content_stripped) < 20
+                        _is_stall = _looks_like_narrator_stall(content)
                         if (_effective_tools
-                                and not _nudged_this_turn
+                                and _nudge_count < _MAX_NUDGES_PER_TURN
                                 and iteration < max_iters - 1
                                 and stop_reason != "length"
                                 and stop_reason != "content_filter"
                                 and os.environ.get(
                                     "TUDOU_NUDGE_WEAK_MODELS", "1") != "0"
-                                and _looks_like_narrator_stall(content)):
+                                and (_is_stall or _is_empty_response)):
                             # Persist the stall reply so the next LLM call
                             # sees its own words — makes the correction feel
                             # like a direct continuation instead of a reset.
@@ -6288,13 +7316,18 @@ Write only the summary body. Do not include any preamble or prefix."""
                                 "content": nudge,
                                 "_source": "system_nudge",
                             })
-                            _nudged_this_turn = True
+                            _nudge_count += 1
                             # Rebuild the outbound message list so the next
                             # iteration picks up the two new messages.
-                            _msgs_to_send = _compress_old_tool_results(
-                                _strip_old_images(
-                                    self._inject_dynamic_context(
-                                        self.messages, current_query=_user_text)))
+                            _msgs_to_send = _drop_orphan_tool_messages(
+                                _compress_old_tool_results(
+                                    _summarize_old_history(
+                                        _hoist_skill_guides(
+                                            _strip_old_images(
+                                                self._inject_dynamic_context(
+                                                    self.messages,
+                                                    current_query=_user_text))),
+                                        self)))
                             # Log for observability
                             try:
                                 _emit(AgentEvent(time.time(), "nudge",
@@ -6654,8 +7687,135 @@ Write only the summary body. Do not include any preamble or prefix."""
             except Exception:
                 pass
 
-            self._auto_save_check()  # Auto-save after each chat turn
+            # ── Persist chat turn immediately ──────────────────────
+            # Was: _auto_save_check() with 60s throttle — if user closes
+            # browser or uvicorn restarts within 60s of a chat, the entire
+            # turn (messages + events) was lost from disk. Observed: 小专
+            # had 0 messages persisted because every save attempt was
+            # throttled. Now we always flush after a turn finishes;
+            # _auto_save_check throttle only protects mid-turn saves.
+            try:
+                from .hub import get_hub as _get_hub
+                _hub = _get_hub()
+                if _hub is not None:
+                    self.save_memory()
+                    _hub._save_agent_workspace(self)
+                    _hub._save_agents()  # also flush SQLite + JSON
+                    self._last_save_time = time.time()
+            except Exception as _save_err:
+                logger.debug("post-turn save failed: %s", _save_err)
             return final_content
+
+    def _chat_async_via_langgraph(
+        self, user_message, source: str = "admin"
+    ) -> ChatTask:
+        """LangGraph dispatch for chat_async (opt-in path).
+
+        Returns a ChatTask just like the V1 path so callers / portal
+        UI don't need to know which engine handled the turn. The graph
+        runs in a worker thread; ChatTask status updates as the graph
+        progresses through assistant/tool nodes; final assistant text
+        becomes the task's result.
+
+        Hand-rolls the minimum to bridge:
+          - resolve agent's (provider, model) via existing V1 resolver
+            (so LLMRouter / coding / multimodal logic still applies)
+          - run ``app.graph.agent_chat_graph.run_chat`` in a thread
+          - mirror final messages into ``self.messages`` (so chat
+            history / memory / wiki paths see the turn)
+          - emit a single ``message`` event for the assistant reply
+
+        Failure inside the graph is re-raised so the outer ``chat_async``
+        wrapper can fall back to V1 — caller never gets a half-broken
+        ChatTask.
+        """
+        import threading
+        from .chat_task import get_chat_task_manager, ChatTaskStatus
+
+        # Resolve LLM via existing V1 path (LLMRouter + multimodal +
+        # registry checks). One source of truth for provider selection.
+        provider, model = self._resolve_effective_provider_model(user_message)
+        if not provider or not model:
+            raise RuntimeError(
+                "agent has no LLM bound — configure provider/model first"
+            )
+
+        # Compose user content the same way V1 does (string or
+        # multimodal list passes through).
+        user_content = user_message
+
+        mgr = get_chat_task_manager()
+        task = mgr.create_task(self.id, str(user_content)[:200])
+        task.set_status(ChatTaskStatus.THINKING,
+                        "🚀 LangGraph dispatch", 5)
+
+        # Snapshot agent state the graph needs.
+        msgs_before = list(self.messages)
+
+        def _run_graph() -> None:
+            try:
+                from .graph.agent_chat_graph import build_chat_graph
+                task.set_status(ChatTaskStatus.STREAMING,
+                                "graph: running", 30)
+                # Build initial messages: existing history + new user msg.
+                initial_msgs = msgs_before + [{
+                    "role": "user",
+                    "content": user_content,
+                    "source": source,
+                }]
+                graph = build_chat_graph()
+                # Pass `_agent_ref` through state so graph nodes can use
+                # the real Agent's system_prompt / tool dispatch / sandbox /
+                # approval logic — not the mock-style standalone path.
+                final = graph.invoke({
+                    "messages": initial_msgs,
+                    "agent_id": self.id,
+                    "role": self.role,
+                    "name": self.name,
+                    "language": getattr(self.profile, "language", "auto") or "auto",
+                    "provider": provider,
+                    "model": model,
+                    "iteration": 0,
+                    "max_iterations": int(getattr(self, "max_turns", 20) or 20),
+                    "last_finish_reason": "",
+                    "_agent_ref": self,    # ← bridge into V1 business logic
+                })
+
+                # Mirror final messages back into agent.messages so the
+                # rest of the platform (memory / wiki / portal history)
+                # sees the turn.
+                final_msgs = final.get("messages") or []
+                # The graph appends to history via additive reducer —
+                # find what's NEW relative to msgs_before + the user msg.
+                # Simple approach: take everything past len(msgs_before).
+                new_tail = final_msgs[len(msgs_before):]
+                # But the user message we constructed is in there too;
+                # de-dup by identity-of-content.
+                self.messages = list(self.messages) + new_tail
+
+                # Last assistant text becomes the chat reply.
+                final_text = ""
+                for m in reversed(final_msgs):
+                    if (m.get("role") == "assistant"
+                            and not m.get("tool_calls")):
+                        c = m.get("content")
+                        if isinstance(c, str) and c.strip():
+                            final_text = c
+                            break
+
+                task.result = final_text
+                task.set_status(ChatTaskStatus.COMPLETED,
+                                "graph: done", 100)
+            except Exception as e:
+                logger.exception(
+                    "Agent %s: LangGraph chat failed: %s", self.id[:8], e,
+                )
+                task.set_status(ChatTaskStatus.FAILED,
+                                f"graph error: {e}", 100)
+
+        threading.Thread(target=_run_graph, daemon=True,
+                          name=f"langgraph-{self.id[:8]}").start()
+        return task
 
     def chat_async(self, user_message, source: str = "admin") -> ChatTask:
         """Submit a chat as a background task. Returns immediately.
@@ -6668,7 +7828,29 @@ Write only the summary body. Do not include any preamble or prefix."""
         sequentially after the current task (and any already-queued tasks)
         finish. We NEVER abort the running task just because a new message
         arrived — that would destroy in-flight work.
+
+        ── LangGraph default path ─────────────────────────────────────
+        LangGraph state machine is now the default. V1 chat loop stays
+        as fallback for ~2 weeks (until the graph path proves stable
+        across all agents). Override:
+          - env ``TUDOU_USE_LEGACY_V1=1`` → force V1 globally
+          - ``self.profile.force_v1=True`` → force V1 for this agent
+        On any graph error, falls back to V1 transparently — a graph
+        bug must NEVER block user chat.
         """
+        _force_v1 = (
+            os.environ.get("TUDOU_USE_LEGACY_V1", "0") == "1"
+            or getattr(self.profile, "force_v1", False)
+        )
+        if not _force_v1:
+            try:
+                return self._chat_async_via_langgraph(user_message, source=source)
+            except Exception as _ge:
+                logger.warning(
+                    "Agent %s: LangGraph path failed (%s) — falling back to V1",
+                    self.id[:8], _ge,
+                )
+
         from .agent_types import AgentStatus as _AgentStatus
         mgr = get_chat_task_manager()
         # Detect any in-flight task for this agent
@@ -6735,6 +7917,10 @@ Write only the summary body. Do not include any preamble or prefix."""
             return task
 
         def _run(task=task, user_message=user_message, source=source):
+            # Capture turn start time for the "recent file" envelope fallback.
+            # We use this to filter for files modified DURING this turn so
+            # we don't surface old artifacts as fresh produce.
+            _turn_started_at = time.time()
             try:
                 # Show which provider/model is being used — use dynamic
                 # routing so multimodal/auto_route overrides are reflected.
@@ -6836,6 +8022,14 @@ Write only the summary body. Do not include any preamble or prefix."""
                     elif evt.kind == "error":
                         task.push_event({"type": "error",
                                          "content": evt.data.get("error", "")})
+                    elif evt.kind == "retract_last_assistant":
+                        # Tell UI to remove the just-rendered assistant bubble
+                        # (text_delta already painted it before meta-promise
+                        # detection kicked in).
+                        task.push_event({
+                            "type": "retract_last_assistant",
+                            "reason": evt.data.get("reason", ""),
+                        })
 
                 result = self.chat(user_message, on_event=_on_event,
                                    abort_check=lambda: task.aborted, source=source)
@@ -6852,14 +8046,52 @@ Write only the summary body. Do not include any preamble or prefix."""
                     # widgets attach to the just-finished assistant bubble.
                     # Wrapped in try/except — never break the live path.
                     try:
+                        refs: list = []
                         _shadow = getattr(self, "_shadow", None)
                         if _shadow is not None:
-                            refs = _shadow.build_envelope_refs()
-                            if refs:
-                                task.push_event({
-                                    "type": "artifact_refs",
-                                    "refs": refs,
-                                })
+                            # Rescan workspace BEFORE building envelope.
+                            # Picks up files produced by bash scripts (e.g.
+                            # `python build_pptx.py` writes a .pptx that
+                            # artifact extractor doesn't observe directly —
+                            # without rescan the FileCard never appears).
+                            try:
+                                added = _shadow.rescan_deliverable_dir()
+                                if added:
+                                    logger.info(
+                                        "Shadow rescan: ingested %d new "
+                                        "artifact(s) from workspace", added)
+                            except Exception as _scan_err:
+                                logger.debug(
+                                    "deliverable rescan skipped: %s", _scan_err)
+                            refs = _shadow.build_envelope_refs() or []
+                        # Fallback runs ALWAYS (whether or not shadow exists)
+                        # when refs is empty: scan workspace mtimes to find
+                        # files produced this turn.
+                        if not refs:
+                            try:
+                                refs = _build_recent_file_refs(self, _turn_started_at)
+                            except Exception as _rfb_err:
+                                logger.debug(
+                                    "recent-file fallback failed: %s", _rfb_err)
+                                refs = []
+                        # Diagnostic: see whether the fallback is actually
+                        # finding files. Helps debug "task says PPTX created
+                        # but no FileCard appears".
+                        try:
+                            logger.info(
+                                "FILECARD agent=%s turn_started_at=%.0f "
+                                "shadow=%s refs_count=%d",
+                                self.id[:8], _turn_started_at,
+                                "yes" if _shadow is not None else "no",
+                                len(refs) if refs else 0,
+                            )
+                        except Exception:
+                            pass
+                        if refs:
+                            task.push_event({
+                                "type": "artifact_refs",
+                                "refs": refs,
+                            })
                     except Exception:
                         pass
                     task.set_status(ChatTaskStatus.COMPLETED, "Done", 100)
@@ -7129,13 +8361,36 @@ Write only the summary body. Do not include any preamble or prefix."""
                 ],
                 model=_mdl, provider=_prov,
             )
-            raw = resp.get("content", "") if isinstance(resp, dict) else str(resp)
+            # chat_no_stream returns {"message": {"content": ..., "reasoning_content": ...}, ...}
+            # 老代码 resp.get("content") 读的是顶层 → 永远空 → empty_llm_output。
+            # 正确读取: message.content;若为空再回退到 reasoning_content
+            # (DeepSeek thinking-mode 有时只在 reasoning 里出文字)。
+            if isinstance(resp, dict):
+                _m = resp.get("message") or {}
+                raw = str(_m.get("content") or "").strip()
+                if not raw:
+                    raw = str(_m.get("reasoning_content") or "").strip()
+                # 极端兜底：部分旧 wrapper 可能直接把 content 放顶层
+                if not raw:
+                    raw = str(resp.get("content") or "").strip()
+            else:
+                raw = str(resp or "").strip()
         except Exception as e:
             logger.error("think_now LLM call failed: %s", e, exc_info=True)
             return {"ok": False, "error": f"llm_failed: {e}"}
 
         raw = (raw or "").strip()
         if not raw:
+            # Dump provider/model + response shape to help diagnose future cases.
+            try:
+                _shape = list((resp or {}).keys()) if isinstance(resp, dict) else type(resp).__name__
+                _msg_shape = list(((resp or {}).get("message") or {}).keys()) if isinstance(resp, dict) else []
+                logger.warning(
+                    "think_now empty_llm_output agent=%s provider=%s model=%s "
+                    "resp_keys=%s message_keys=%s",
+                    self.id[:8], _prov, _mdl, _shape, _msg_shape)
+            except Exception:
+                pass
             return {"ok": False, "error": "empty_llm_output"}
 
         # Extract optional ```experience ...``` JSON blocks. Strip them
@@ -7801,6 +9056,31 @@ Write only the summary body. Do not include any preamble or prefix."""
                     "step": matched.to_dict(),
                 }, ensure_ascii=False)
 
+            # ── B-guard: reject start_step when another step is already
+            # in_progress. Observed failure: agent loops on start_step of
+            # the same conceptual work ("检索记忆和知识库") — each iteration
+            # it re-calls start_step thinking "let me start again".
+            # Force it to walk the state machine: complete/fail current first.
+            if action == "start_step":
+                busy = [s for s in plan.steps
+                        if s.status.value == "in_progress" and s.id != step_id]
+                if busy:
+                    bs = busy[0]
+                    return json.dumps({
+                        "ok": False,
+                        "error": (
+                            f"Cannot start step '{step_id}' — step "
+                            f"'{bs.id}' ({bs.title!r}) is already in_progress. "
+                            f"Finish or fail it first:\n"
+                            f"  - plan_update(action='complete_step', "
+                            f"step_id='{bs.id}', result_summary='...')\n"
+                            f"  - or plan_update(action='fail_step', "
+                            f"step_id='{bs.id}', reason='...')\n"
+                            f"Never run two steps in parallel."
+                        ),
+                        "busy_step": bs.to_dict(),
+                    }, ensure_ascii=False)
+
             step = self.update_plan_step(step_id, status, summary)
             if step is not None:
                 # ── Block 2 Review loop: run verifier on complete_step ──
@@ -8213,6 +9493,14 @@ Write only the summary body. Do not include any preamble or prefix."""
                 _rationale = str(s.get("llm_rationale") or "").strip()
                 if _rationale:
                     step.llm_rationale = _rationale
+        # Record the message anchor BEFORE swapping _current_plan so the
+        # fold-on-completion logic knows which messages belong to this
+        # plan's lifecycle (everything from this index onward, until the
+        # plan is marked completed).
+        try:
+            plan.msg_anchor_idx = len(self.messages)
+        except Exception:
+            plan.msg_anchor_idx = -1
         self._current_plan = plan
         self.execution_plans.append(plan)
         # Emit event so UI can update
@@ -8269,6 +9557,132 @@ Write only the summary body. Do not include any preamble or prefix."""
         logger.info(
             "Agent %s: auto-started plan step '%s' (id=%s) on tool=%s",
             self.id[:8], target.title[:50], target.id, tool_name or "-")
+
+    def _fold_completed_plan_into_recap(self, plan: "ExecutionPlan") -> None:
+        """Compress a just-completed plan's messages into one user-role recap.
+
+        Triggered the moment the plan transitions to ``status="completed"``
+        (all steps are COMPLETED or SKIPPED). Replaces messages from
+        ``plan.msg_anchor_idx`` onward with a single user message:
+
+            [完成的 plan: <task_summary>]
+            完成于: <ts>
+            步骤:
+              ✓ <title> — <result_summary>
+              ✓ ...
+            交付: <artifact paths if any>
+
+        Token win: a multi-step plan with N tool rounds (~30 messages,
+        ~10K chars) collapses to one ~500-char recap, freeing 95% of the
+        history budget for the next plan/turn. Solves "agent talks about
+        old task in new conversation" — old messages physically aren't
+        in self.messages anymore.
+
+        Skipped if:
+          - feature flag ``TUDOU_AGENT_FOLD_PLAN`` set to "0" (operator
+            opt-out for debugging).
+          - plan.msg_anchor_idx is invalid (-1 or out of bounds).
+          - fewer than 2 messages would be folded (no real win).
+
+        Never raises — fold is best-effort; if anything goes sideways
+        the original messages stay put.
+        """
+        if os.environ.get("TUDOU_AGENT_FOLD_PLAN", "1") in ("0", "false", "False"):
+            return
+        if plan is None or plan.status != "completed":
+            return
+        anchor = int(getattr(plan, "msg_anchor_idx", -1) or -1)
+        if anchor < 0 or anchor >= len(self.messages):
+            return
+        in_window = self.messages[anchor:]
+        if len(in_window) < 2:
+            return
+        try:
+            from .agent_types import StepStatus
+        except Exception:
+            return
+
+        # Pull artifact paths out of tool results (best-effort regex)
+        artifacts: list[str] = []
+        try:
+            for m in in_window:
+                if m.get("role") != "tool":
+                    continue
+                c = m.get("content") or ""
+                if not isinstance(c, str):
+                    continue
+                # match common path-looking strings; we're conservative
+                for path in re.findall(r"([\w/.\-]+\.[a-zA-Z]{2,5})", c[:500]):
+                    if path not in artifacts and len(path) <= 200:
+                        artifacts.append(path)
+                if len(artifacts) >= 8:
+                    break
+        except Exception:
+            artifacts = []
+
+        # Build step lines
+        sym_for: dict = {
+            StepStatus.COMPLETED: "✓",
+            StepStatus.SKIPPED:   "—",
+            StepStatus.FAILED:    "✗",
+            StepStatus.PENDING:   "·",
+            StepStatus.IN_PROGRESS: "·",
+        }
+        step_lines = []
+        for s in plan.steps:
+            sym = sym_for.get(s.status, "·")
+            title = (s.title or "")[:60]
+            rs = (s.result_summary or "")[:120]
+            line = f"  {sym} {title}"
+            if rs:
+                line += f" — {rs}"
+            step_lines.append(line)
+
+        # Find final assistant text (skip the empty-content tool-call ones)
+        final_text = ""
+        for m in reversed(in_window):
+            if m.get("role") == "assistant" and not m.get("tool_calls"):
+                c = m.get("content")
+                if isinstance(c, str) and c.strip():
+                    final_text = c.strip()[:400]
+                    break
+
+        ts = time.strftime("%Y-%m-%d %H:%M:%S",
+                            time.localtime(plan.completed_at or time.time()))
+        recap_parts = [
+            f"[已完成 plan] {(plan.task_summary or '')[:120]}",
+            f"完成于: {ts}",
+            f"步骤 ({len(plan.steps)}):",
+            *step_lines,
+        ]
+        if artifacts:
+            recap_parts.append("交付: " + ", ".join(artifacts[:8]))
+        if final_text:
+            recap_parts.append(f"摘要: {final_text}")
+        recap = {
+            "role": "user",
+            "content": "\n".join(recap_parts),
+            "_source": "plan_recap",
+            "_plan_id": plan.id,
+        }
+
+        before = len(self.messages)
+        self.messages = self.messages[:anchor] + [recap]
+        try:
+            self._log("plan_folded", {
+                "plan_id": plan.id,
+                "anchor_idx": anchor,
+                "msgs_folded": len(in_window),
+                "msgs_after": len(self.messages),
+            })
+            logger.info(
+                "Agent %s: plan %s folded — %d msgs → recap (anchor=%d, "
+                "before=%d, after=%d)",
+                self.id[:8], plan.id, len(in_window), anchor,
+                before, len(self.messages),
+            )
+        except Exception:
+            pass
 
     def _auto_complete_in_progress_on_turn_end(self) -> None:
         """Called when a chat turn ends. If any step is still in_progress
@@ -8327,6 +9741,18 @@ Write only the summary body. Do not include any preamble or prefix."""
                 self._write_step_completion_to_memory(plan, step)
             # 更新状态机
             self._update_agent_phase()
+            # ── Plan-level completion hook: fold history into recap ──
+            # When this step's completion just made plan.status == "completed"
+            # (all steps done), compress this plan's messages into a single
+            # user-role recap. This is the "Done.on_enter fold" we agreed on
+            # — applied at V1's plan-completion moment instead of a V2 phase.
+            if (status == "completed"
+                    and plan is not None
+                    and getattr(plan, "status", "") == "completed"):
+                try:
+                    self._fold_completed_plan_into_recap(plan)
+                except Exception as _fe:
+                    logger.debug("plan recap fold skipped: %s", _fe)
         return step
 
     def add_plan_step(self, title: str, detail: str = "") -> ExecutionStep | None:
@@ -8867,9 +10293,46 @@ Write only the summary body. Do not include any preamble or prefix."""
         }
 
     def clear(self):
+        """Wipe agent's chat state — messages, events, and any active plan.
+
+        Used by:
+          - "Clear Chat" UI button → POST /api/portal/agent/{id}/clear
+          - The persistent ``/new`` slash command (skip_history=true)
+
+        Why we also abandon ``_current_plan``: the watchdog
+        (``Hub._maybe_wake_stuck_agent``) reads the active plan to decide
+        when to nudge an idle agent. If the user clears chat but the
+        plan remains "active" with open steps, the agent gets re-woken
+        for a task whose context the user just deleted.
+        """
         with self._lock:
             self.messages.clear()
             self.events.clear()
+            # Abandon any in-flight plan so the watchdog doesn't resurrect
+            # the cleared task. Mark "completed" with a synthetic note so
+            # the plan still appears in execution_plans history if anyone
+            # reads it (audit trail), but no step stays open.
+            plan = getattr(self, "_current_plan", None)
+            if plan is not None and getattr(plan, "status", "") == "active":
+                from .agent_types import StepStatus
+                _now = time.time()
+                for s in (plan.steps or []):
+                    if s.status in (StepStatus.PENDING,
+                                    StepStatus.IN_PROGRESS):
+                        s.status = StepStatus.SKIPPED
+                        s.completed_at = _now
+                        s.result_summary = (
+                            (s.result_summary or "")
+                            + "\n[abandoned: chat cleared]"
+                        ).strip()
+                plan.status = "completed"
+                plan.completed_at = _now
+            self._current_plan = None
+            # Reset watchdog wake counts so future plans get fresh quota.
+            try:
+                self._stuck_wake_counts = {}
+            except Exception:
+                pass
             self._log("status", {"action": "cleared"})
 
     def update_profile(self, **kwargs):
