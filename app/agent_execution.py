@@ -787,9 +787,13 @@ class AgentExecutionMixin:
             # last turn). Within the same turn, dedup still kicks in
             # to break the read_file loop pattern observed in audit
             # logs (30+ identical reads on one outline file).
+            #
+            # Also reset the path-level VALVE counter — a fresh user
+            # message means the agent gets a clean budget of reads.
             if source != "auto_continue":
                 try:
                     self._read_file_turn_cache = {}
+                    self._read_file_path_counts = {}
                 except Exception:
                     pass
             msg = {"role": "user", "content": _msg_content, "source": source}

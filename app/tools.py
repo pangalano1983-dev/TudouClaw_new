@@ -319,13 +319,32 @@ TOOL_DEFINITIONS: list[dict] = [
                 "Use when: generating a new file, saving agent output, creating config/scripts.\n"
                 "Not for: surgical edits to an existing file (use edit_file to avoid clobbering). Do not use to append — this is full overwrite.\n"
                 "Output: absolute path and byte count on success. The written path is what artifact cards link to.\n"
-                "GOTCHA: overwrites silently — read_file first if uncertain. Path must be inside the sandbox root."
+                "⚠️ MANDATORY 必填:\n"
+                "  • `path` MUST be present in arguments — relative paths are resolved against your workspace_dir.\n"
+                "  • Files MUST be created INSIDE your workspace (or shared workspace if the agent has one). Absolute paths outside workspace will be rejected by sandbox.\n"
+                "  • For long content (>500 lines / >20KB) prefer `edit_file` on an existing file — write_file with huge content can hit max_tokens and the JSON gets truncated mid-call (`{path: ..., content: <CUT>` → arguments fail to parse → schema reports 'path missing'). If you MUST write a large file, split into multiple write_file calls or use bash heredoc.\n"
+                "GOTCHA: overwrites silently — read_file first if uncertain.\n"
+                "Example: write_file(path=\"index.html\", content=\"<!DOCTYPE html>...\")"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "File path to write to"},
-                    "content": {"type": "string", "description": "Content to write"},
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "REQUIRED. Relative path INSIDE workspace (e.g. 'index.html', "
+                            "'src/main.py'), or absolute path under workspace_dir. "
+                            "Sandbox rejects paths outside workspace."
+                        ),
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": (
+                            "REQUIRED. Full file content (UTF-8). For files larger than "
+                            "~20KB consider edit_file instead — large content risks "
+                            "max_tokens truncation that corrupts the tool call."
+                        ),
+                    },
                 },
                 "required": ["path", "content"],
             },
@@ -1831,6 +1850,51 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "propose_decomposition",
+            "description": (
+                "Propose a decomposition of the CURRENT project task into N parallel sub-tasks for multiple agents.\n"
+                "Use when: the task is too big for one agent (multi-module code project, multi-chapter report) and can be cleanly split.\n"
+                "DOES NOT immediately create or assign tasks — it persists a draft. The user must confirm in the UI before any sub-task gets dispatched. After calling this, STOP and tell the user to confirm; do not start any sub-task work yourself.\n"
+                "Output: draft_id + sub_task_count. Each sub_task should have title, role_hint (coder/researcher/general/advisor), output_path (relative to project root), acceptance criteria, and depends_on (list of earlier sub_task ids).\n"
+                "GOTCHA: parent_task_id is required and must point to the big task in the current project. Use unique sub_task ids if you specify them; otherwise leave blank (auto-minted). depends_on entries must reference sub_task ids in the same proposal."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "parent_task_id": {"type": "string", "description": "ProjectTask id being decomposed"},
+                    "title": {"type": "string", "description": "Short label, e.g. 'Decompose: build admin panel'"},
+                    "summary": {"type": "string", "description": "Plain-language pitch of the strategy"},
+                    "prd": {"type": "string", "description": "Optional PRD content (markdown). Required when prd_source=agent_generated. Leave empty to use whatever PRD.md the user already uploaded."},
+                    "scaffold_dirs": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Directories to mkdir under project root before sub-tasks start (e.g., ['backend/auth', 'frontend/pages'])"
+                    },
+                    "sub_tasks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string", "description": "Optional stable id (e.g. 'st_auth'); auto-minted if omitted. Used in depends_on refs."},
+                                "title": {"type": "string"},
+                                "description": {"type": "string"},
+                                "role_hint": {"type": "string", "enum": ["coder", "researcher", "general", "advisor"]},
+                                "output_path": {"type": "string", "description": "Relative dir under project root that becomes this agent's wd"},
+                                "acceptance": {"type": "string", "description": "One-line 'done when X' criterion"},
+                                "order": {"type": "integer"},
+                                "depends_on": {"type": "array", "items": {"type": "string"}, "description": "Sub-task ids that must DONE before this can run"}
+                            },
+                            "required": ["title"]
+                        }
+                    }
+                },
+                "required": ["parent_task_id", "sub_tasks"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "submit_deliverable",
             "description": (
                 "Register a concrete artifact as a project deliverable and mark it SUBMITTED (enters review queue).\n"
@@ -2134,6 +2198,7 @@ from .tools_split.project import (  # noqa: E402,F401
     _tool_update_goal_progress,
     _tool_create_milestone,
     _tool_update_milestone_status,
+    _tool_propose_decomposition,
 )
 
 # MCP call + builtin audio TTS/STT handler moved to
@@ -2229,6 +2294,9 @@ _TOOL_FUNCS: dict[str, callable] = {
     "update_goal_progress": _tool_update_goal_progress,
     "create_milestone": _tool_create_milestone,
     "update_milestone_status": _tool_update_milestone_status,
+    # Long-task subsystem (app/long_task) — propose decomposition draft
+    # for user confirmation; does NOT immediately create sub-tasks.
+    "propose_decomposition": _tool_propose_decomposition,
     "mcp_call": _tool_mcp_call,
     # Experience persistence + skill generation
     "save_experience": _tool_save_experience,

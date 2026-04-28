@@ -1480,30 +1480,54 @@ class AgentLLMMixin:
                 logger.debug("Feedback learning failed: %s", _fb_err)
 
             # === L3: 提取事实 ===
-            # 把 operator 在 Global Config → System Prompts 维护的行为
-            # 规则（preference 触发词、confidence 分档、宁缺毋滥原则等）
-            # 作为 extra_context 传入 —— L3 抽取 LLM 与主 chat 共享同一
-                            # 套语义规则，避免 Python 里二次硬编码。
+            # Per-turn extraction was retired in favor of:
+            #   1. task DONE hook (Agent.update_task / project.py)
+            #   2. strong-signal trigger (user explicitly asks to remember)
+            #   3. K-turn fallback (pure-chat sessions, no task DONE)
+            # Prompt fully hardcoded in app.core.l3_extractor; no
+            # extra_context, no tools.
             if mem_config.auto_extract_facts:
-                llm_call = self._make_summary_llm_call()
                 try:
-                    _scene_prompts = self._get_scene_prompts_text() or ""
-                except Exception:
-                    _scene_prompts = ""
-                facts = mm.extract_facts(
-                    agent_id=self.id,
-                    user_message=user_message,
-                    assistant_response=assistant_response,
-                    llm_call=llm_call,
-                    config=mem_config,
-                    extra_context=_scene_prompts,
-                )
-                if facts:
-                    self._log("memory", {
-                        "action": "extract_facts",
-                        "count": len(facts),
-                        "facts": [f.content[:50] for f in facts[:3]],
-                    })
+                    from .core import l3_extractor as _l3
+                    _l3.note_chat_turn(self.id)
+                    _lang = getattr(self.profile, "language", "auto") or "auto"
+                    if _l3.has_strong_signal(user_message):
+                        llm_call = self._make_summary_llm_call()
+                        if llm_call:
+                            facts = _l3.extract_on_strong_signal(
+                                agent_id=self.id,
+                                user_message=user_message,
+                                assistant_response=assistant_response,
+                                llm_call=llm_call,
+                                store=mm,
+                                lang=_lang,
+                            )
+                            if facts:
+                                self._log("memory", {
+                                    "action": "extract_facts",
+                                    "trigger": "strong_signal",
+                                    "count": len(facts),
+                                    "facts": [f.content[:50] for f in facts[:3]],
+                                })
+                    elif _l3.should_run_fallback(self.id):
+                        llm_call = self._make_summary_llm_call()
+                        if llm_call:
+                            facts = _l3.extract_fallback(
+                                agent_id=self.id,
+                                recent_messages=self.messages[-12:],
+                                llm_call=llm_call,
+                                store=mm,
+                                lang=_lang,
+                            )
+                            if facts:
+                                self._log("memory", {
+                                    "action": "extract_facts",
+                                    "trigger": "fallback_kturn",
+                                    "count": len(facts),
+                                    "facts": [f.content[:50] for f in facts[:3]],
+                                })
+                except Exception as _l3_err:  # noqa: BLE001
+                    logger.debug("L3 extraction (chat path) failed: %s", _l3_err)
 
             # === Session-level action buffer flush ===
             # Aggregate buffered tool actions into a single outcome memory
@@ -2447,11 +2471,16 @@ Write only the summary body. Do not include any preamble or prefix."""
     def _get_effective_tools(self) -> list[dict]:
         """Filter tool definitions based on agent's profile permissions.
 
-        Hard override: when the chat request set ``agent._rag_only_mode``
-        True (frontend toggle "🔍 RAG" ON), force the tool set to just
-        ``knowledge_lookup``. This is the architectural hard-route — LLM
-        literally cannot call bash/read_file/web_search because they
-        aren't in the tools array. No prompt-engineering required.
+        ⚠️ This Mixin method exists as a FALLBACK — Agent class in agent.py
+        defines its own stricter version (line ~5624) with MINIMAL_DEFAULT_TOOLS
+        fallback + capability-skill filter. If you ever see THIS being called
+        instead, something's wrong with class inheritance.
+
+        Defense-in-depth: when ``profile.allowed_tools`` is empty, this used
+        to silently return ALL 44 registered tools (~36KB compressed). That
+        produced the famous "tools=38311" bloat in TOKEN-BREAKDOWN logs.
+        Fixed: empty allowed → fall back to the same MINIMAL set agent.py
+        uses (~15 essential tools) instead of the full registry.
         """
         from . import tools
         all_tools = tools.get_tool_definitions()
@@ -2462,25 +2491,33 @@ Write only the summary body. Do not include any preamble or prefix."""
             if "knowledge_lookup" not in denied_now:
                 kb = [t for t in all_tools
                       if t.get("function", {}).get("name") == "knowledge_lookup"]
-                # If for some reason knowledge_lookup isn't registered, fall
-                # back to normal filtering so the chat doesn't lock up.
                 if kb:
                     return kb
-            # knowledge_lookup denied by profile → fall through to normal
-            # filter (which will also strip it). Defense in depth.
 
-        allowed = self.profile.allowed_tools
-        denied = set(self.profile.denied_tools)
+        allowed = list(self.profile.allowed_tools or [])
+        denied = set(self.profile.denied_tools or [])
 
-        if allowed:
-            allowed_set = set(allowed)
-            all_tools = [t for t in all_tools
-                         if t["function"]["name"] in allowed_set]
+        # ── Defense: empty allowed_tools must NOT mean "all tools" ──
+        # (this was the source of the 38K-token tools schema bloat)
+        if not allowed:
+            # Mirror agent.py's MINIMAL_DEFAULT_TOOLS — the smallest safe set.
+            allowed = list(getattr(
+                self, "_MINIMAL_DEFAULT_TOOLS",
+                ["read_file", "write_file", "bash", "web_search",
+                 "web_fetch", "memory_recall", "knowledge_lookup",
+                 "get_skill_guide", "plan_update", "complete_step"],
+            ))
 
+        # Always include infra tools so LLM knows they exist.
+        infra = {"memory_recall", "knowledge_lookup", "save_experience",
+                 "get_skill_guide", "plan_update", "complete_step"}
+        allowed_set = set(allowed) | infra
+
+        all_tools = [t for t in all_tools
+                     if t["function"]["name"] in allowed_set]
         if denied:
             all_tools = [t for t in all_tools
                          if t["function"]["name"] not in denied]
-
         return all_tools
 
     def _message_is_multimodal(self, user_message: Any) -> bool:

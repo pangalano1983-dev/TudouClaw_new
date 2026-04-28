@@ -146,10 +146,53 @@ def _task_to_dict(task: Task) -> dict:
 
 
 def _get_agent_or_404(agent_id: str) -> AgentV2:
-    agent = get_store().get_agent(agent_id)
-    if agent is None:
-        raise _err("AGENT_NOT_FOUND", f"agent {agent_id!r} not found", 404)
-    return agent
+    """Lookup V2 agent. Lazy-promotes V1-only agents that lack a V2 shadow.
+
+    Old V1 agents (created before agents.py:1421 auto-registers V2 shadows)
+    have no V2 entry → all V2 endpoints 404. Rather than breaking the UI,
+    we lazy-create a minimal V2 shadow when the V1 agent exists.
+    """
+    store = get_store()
+    agent = store.get_agent(agent_id)
+    if agent is not None:
+        return agent
+
+    # Try lazy-promote from V1
+    try:
+        from ..deps.hub import get_hub
+        hub = get_hub()
+        v1 = hub.get_agent(agent_id) if hasattr(hub, "get_agent") else None
+        if v1 is not None:
+            from ...v2.agent.agent_v2 import AgentV2 as _AV2, Capabilities
+            from ...v2.agent.llm_slots import slots_from_v1_agent
+            try:
+                _slots = slots_from_v1_agent(v1).to_dict()
+            except Exception:
+                _slots = {}
+            v2_agent = _AV2.create(
+                id=v1.id,
+                name=v1.name,
+                role=v1.role,
+                v1_agent_id=v1.id,
+                capabilities=Capabilities(
+                    skills=list(getattr(v1, "granted_skills", []) or []),
+                    mcps=[], tools=[],
+                    llm_tier=str(getattr(v1.profile, "llm_tier", "")
+                                 or "default"),
+                    denied_tools=[],
+                    llm_slots=_slots,
+                ),
+                task_template_ids=[],
+                working_directory=getattr(v1, "working_dir", "") or "",
+            )
+            store.save_agent(v2_agent)
+            logger.info("V2 lazy-promoted V1 agent %s (%s) → V2 store",
+                        v1.id[:8], v1.name)
+            return v2_agent
+    except Exception as e:
+        logger.debug("V2 lazy-promote failed for %s: %s", agent_id, e)
+
+    raise _err("AGENT_NOT_FOUND", f"agent {agent_id!r} not found", 404)
 
 
 def _get_task_or_404(task_id: str) -> Task:

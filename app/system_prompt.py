@@ -267,6 +267,39 @@ _PLAN_PROTOCOL_ZH = (
     "这个协议只是让 UI 能把工具调用归到对应步骤——你该说的话、用的工具都不变。"
 )
 
+_PLAN_PROTOCOL_EN = (
+    "## Plan & progress protocol\n"
+    "For multi-step tasks (research + write, search + generate + send), "
+    "output a plan block **before** executing:\n"
+    "\n"
+    "```\n"
+    "📋 Plan\n"
+    "1. [step 1] — tool: <tool_name>\n"
+    "2. [step 2] — tool: <tool_name>\n"
+    "```\n"
+    "\n"
+    "Rules:\n"
+    "- Plan block only on first response; not repeated.\n"
+    "- After each step, one line: `✓ Step N: <what you did>`.\n"
+    "- Skip the plan for one-shot Q&A or chitchat.\n"
+    "- Tool names must match actual calls (e.g. `web_search`, `write_file`).\n"
+    "- 1–6 steps; don't over-decompose (\"search 3 sources\" = 1 step).\n"
+    "\n"
+    "This is purely for UI bucketing of tool calls — what you say and which "
+    "tools you use don't change."
+)
+
+
+def select_plan_protocol(language: str) -> str:
+    """Return the language-appropriate plan protocol text. EN agents used to
+    receive ``_PLAN_PROTOCOL_ZH`` (the only version) which both wasted
+    ~427 chars on Chinese rules they couldn't act on and was a correctness
+    bug for English-only deployments. Default ZH for ``auto`` since
+    TudouClaw is Chinese-first."""
+    if (language or "").lower().startswith("en"):
+        return _PLAN_PROTOCOL_EN
+    return _PLAN_PROTOCOL_ZH
+
 
 # ── Workspace context (parameterized 6 → 1) ───────────────────────
 
@@ -495,8 +528,12 @@ def build_default_prompt(
 
     parts.append(_TOOL_RULES_ZH if use_zh else _TOOL_RULES_EN)
     parts.append(_KNOWLEDGE_RULES_ZH if use_zh else _KNOWLEDGE_RULES_EN)
-    parts.append(_FILE_DISPLAY)
-    parts.append(_IMAGE_DISPLAY_ZH if use_zh else _IMAGE_DISPLAY_EN)
+    # NOTE: _FILE_DISPLAY (SHORT, ~410 chars) and _IMAGE_DISPLAY (SHORT,
+    # ~220 chars) used to be appended here, but agent.py unconditionally
+    # appends the LONG variants right after compose_full_prompt() returns.
+    # Both LONG forms cover everything the SHORT forms said and more, so
+    # emitting both was pure duplication (~625 chars wasted per turn).
+    # Phase 2b dedup pulled these out as part of the prompt-size cleanup.
 
     ws = _workspace_context(
         ctx_type=ctx_type, use_zh=use_zh,

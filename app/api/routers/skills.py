@@ -108,6 +108,137 @@ async def install_skill_package(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/skills/install-from-url-async")
+async def install_skill_from_url_async(
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Kick off URL-based skill install in a background thread.
+
+    Returns ``{"install_id": "..."}`` immediately. The UI polls
+    ``GET /api/portal/skills/install-progress/{install_id}`` for live
+    progress + final result.
+
+    This is the UX-friendly variant of ``/install-from-url`` (which is
+    synchronous and blocks for 5-10s).
+    """
+    import threading
+    import os
+    from ...skills import install_progress as _ip
+    from ...skills.url_installer import install_skill_from_url, InstallFromUrlError
+
+    url = (body.get("url") or "").strip()
+    if not url:
+        raise HTTPException(400, "url is required")
+    overwrite = bool(body.get("overwrite", False))
+
+    skill_registry = getattr(hub, "skill_registry", None)
+    if skill_registry is None:
+        raise HTTPException(500, "skill_registry not initialized")
+    data_dir = getattr(hub, "_data_dir", None) or os.path.expanduser("~/.tudou_claw")
+    catalog_dir = os.path.join(data_dir, "skill_catalog")
+    actor = getattr(user, "user_id", "") or "unknown"
+
+    install_id = _ip.start(source_url=url)
+
+    def _bg_install() -> None:
+        try:
+            result = install_skill_from_url(
+                url, catalog_dir=catalog_dir,
+                skill_registry=skill_registry,
+                skill_store=getattr(hub, "skill_store", None),
+                installed_by=actor, overwrite=overwrite,
+                progress_id=install_id,
+            )
+            _ip.complete(install_id, success=True, result=result)
+        except InstallFromUrlError as e:
+            _ip.complete(install_id, success=False, error=str(e))
+        except Exception as e:
+            logger.exception("install_from_url background error: %s", e)
+            _ip.complete(install_id, success=False,
+                         error=f"unexpected: {e}")
+
+    threading.Thread(
+        target=_bg_install, daemon=True,
+        name=f"skill-install-{install_id}",
+    ).start()
+    return {"install_id": install_id, "ok": True}
+
+
+@router.get("/skills/install-progress/{install_id}")
+async def get_install_progress(
+    install_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Poll endpoint for ``install-from-url-async`` progress.
+
+    Returns the latest snapshot. Once status is success/error, the entry
+    sticks around for ~5min then GC'd.
+    """
+    from ...skills import install_progress as _ip
+    st = _ip.get(install_id)
+    if st is None:
+        raise HTTPException(404, f"install_id {install_id!r} not found")
+    return st.to_dict()
+
+
+@router.post("/skills/install-from-url")
+async def install_skill_from_url_endpoint(
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Direct-install a Anthropic Agent Skills (SKILL.md) skill from URL.
+
+    Body:
+        url: ClawHub URL (https://clawhub.ai/<author>/<slug>),
+             ``author/slug``, ``slug``, any ``.zip`` URL, or raw SKILL.md URL
+        overwrite: bool (default False) — replace existing entry with same slug
+
+    Returns the install result (skill_id, name, version, catalog_path).
+    Skips the LLM-driven semantic conversion in skill-converter — use
+    this when the source skill is already in standard Anthropic format.
+    """
+    from ...skills.url_installer import (
+        install_skill_from_url, InstallFromUrlError,
+    )
+    import os
+
+    url = (body.get("url") or "").strip()
+    if not url:
+        raise HTTPException(400, "url is required")
+    overwrite = bool(body.get("overwrite", False))
+
+    skill_registry = getattr(hub, "skill_registry", None)
+    if skill_registry is None:
+        raise HTTPException(500, "skill_registry not initialized on hub")
+
+    # Catalog dir: prefer the user-level <data_dir>/skill_catalog (matches
+    # what hub setup uses as the writable catalog dir).
+    data_dir = getattr(hub, "_data_dir", None) or os.path.expanduser(
+        "~/.tudou_claw"
+    )
+    catalog_dir = os.path.join(data_dir, "skill_catalog")
+
+    actor = getattr(user, "user_id", "") or "unknown"
+    try:
+        result = install_skill_from_url(
+            url,
+            catalog_dir=catalog_dir,
+            skill_registry=skill_registry,
+            skill_store=getattr(hub, "skill_store", None),
+            installed_by=actor,
+            overwrite=overwrite,
+        )
+        return result
+    except InstallFromUrlError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        logger.exception("install_from_url failed: %s", e)
+        raise HTTPException(500, f"unexpected error: {e}")
+
+
 @router.post("/skill-pkgs/{skill_id}/uninstall")
 async def uninstall_skill_package(
     skill_id: str,
@@ -566,14 +697,68 @@ async def manage_skill_store(
             return {"ok": True, "results": results}
 
         if action == "import_from_url":
-            from ...skill_store import scan_remote_url, import_from_scan_result
             url = (body.get("url") or "").strip()
             auto_install = body.get("auto_install", True)
             if not url:
                 raise HTTPException(400, "url is required")
             catalog_dir = store.catalog_dirs[-1] if store.catalog_dirs else ""
+
+            # ClawHub URL / bare slug / .zip URL → fast direct-install path
+            # via url_installer (recognizes ClawHub's zip download API and
+            # handles SKILL.md-only skills without manifest.yaml).
+            from ...skills.url_installer import (
+                install_skill_from_url, InstallFromUrlError,
+                resolve_download_url,
+            )
+            try:
+                # Cheap probe: does this URL look like something url_installer
+                # can handle? It raises on unrecognized formats — for those
+                # we fall through to the legacy scan_remote_url path which
+                # handles GitHub repo clones, tar.gz, multi-skill archives.
+                resolve_download_url(url)
+                use_direct = True
+            except InstallFromUrlError:
+                use_direct = False
+
+            if use_direct:
+                try:
+                    direct = install_skill_from_url(
+                        url,
+                        catalog_dir=catalog_dir,
+                        skill_registry=getattr(hub, "skill_registry", None),
+                        skill_store=store,
+                        installed_by="portal",
+                        overwrite=bool(body.get("overwrite", True)),
+                    )
+                    # Shape result like the legacy multi-skill format so the
+                    # caller UI doesn't have to branch.
+                    return {
+                        "ok": True,
+                        "results": [{
+                            "ok": True,
+                            "name": direct.get("name"),
+                            "entry_id": direct.get("skill_id"),
+                            "path": direct.get("catalog_path"),
+                            "version": direct.get("version"),
+                        }],
+                        "install_path": "direct",
+                    }
+                except InstallFromUrlError as e:
+                    # Direct path failed → try legacy as fallback (e.g.
+                    # ClawHub URL might just be down)
+                    logger.info("install_skill_from_url failed (%s); "
+                                "falling back to scan_remote_url", e)
+
+            # Legacy path: scan_remote_url for GitHub repos, tar.gz, etc.
+            from ...skill_store import scan_remote_url, import_from_scan_result
             scan_data = scan_remote_url(url)
-            results = import_from_scan_result(scan_data, catalog_dir)
+            if not isinstance(scan_data, dict) or not scan_data.get("ok"):
+                err = (scan_data or {}).get("error") if isinstance(scan_data, dict) else "scan failed"
+                raise HTTPException(400, f"scan failed: {err}")
+            # import_from_scan_result(temp_dir, skill_names, catalog_dir, tier="community")
+            temp_dir = scan_data.get("temp_dir", "")
+            skill_names = [s.get("name", "") for s in (scan_data.get("skills") or []) if s.get("name")]
+            results = import_from_scan_result(temp_dir, skill_names, catalog_dir)
             if auto_install:
                 store.scan()
                 for r in (results if isinstance(results, list) else []):
@@ -584,7 +769,7 @@ async def manage_skill_store(
                         except Exception:
                             pass
                 store.scan()
-            return {"ok": True, "results": results}
+            return {"ok": True, "results": results, "install_path": "legacy"}
 
         if action == "scan_url":
             from ...skill_store import scan_remote_url
@@ -1141,6 +1326,35 @@ async def download_pptx_demo(
     )
 
 
+@router.post("/files/exists")
+async def check_files_exist(
+    body: dict = Body(...),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Batch existence check for filesystem paths.
+
+    Used by the artifact preview panel to filter out non-existent
+    paths (e.g. when the LLM hallucinated a `/workspace/foo.md` write
+    that never actually landed on disk) before rendering tabs.
+
+    Request:  {"paths": ["/abs/path1", "~/path2", ...]}
+    Response: {"exists": {"/abs/path1": true, "~/path2": false}}
+    """
+    from pathlib import Path
+    paths = body.get("paths") or []
+    if not isinstance(paths, list):
+        raise HTTPException(400, "paths must be a list")
+    out: dict[str, bool] = {}
+    for p in paths:
+        if not isinstance(p, str) or not p.strip():
+            continue
+        try:
+            out[p] = Path(p).expanduser().is_file()
+        except Exception:
+            out[p] = False
+    return {"exists": out}
+
+
 @router.post("/file-preview")
 async def preview_file(
     body: dict = Body(...),
@@ -1165,7 +1379,11 @@ async def preview_file(
     path = str(body.get("path") or "").strip()
     if not path:
         raise HTTPException(400, "path required")
-    p = Path(path)
+    # Expand ~ + resolve to absolute. Without this, paths like
+    # ``~/.tudou_claw/workspaces/<id>/foo.md`` (which the artifact
+    # panel sends when the agent's working_dir starts with ~) 404
+    # because Path("~/...").exists() doesn't auto-expand the tilde.
+    p = Path(path).expanduser()
     if not p.exists() or not p.is_file():
         raise HTTPException(404, f"file not found: {path}")
 

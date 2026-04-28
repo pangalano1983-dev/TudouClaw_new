@@ -1622,3 +1622,116 @@ async def get_deliverables_by_agent(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Long-task subsystem — decomposition draft endpoints
+# ---------------------------------------------------------------------------
+# Backed by app.long_task.{draft_store,confirm}. Drafts are created by
+# the agent-callable ``propose_decomposition`` tool; these endpoints let
+# the portal list them, confirm (materialize into ProjectTasks), or
+# cancel.
+
+@router.get("/projects/{project_id}/decomposition-drafts")
+async def list_decomposition_drafts(
+    project_id: str,
+    status: Optional[str] = Query(None,
+        description="Filter by status: pending|confirmed|cancelled|expired"),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """List decomposition drafts for a project. Default: all statuses."""
+    _get_project_or_404(hub, project_id)
+    from ...long_task.draft_store import get_draft_store
+    from ...long_task.models import DraftStatus
+    store = get_draft_store()
+    status_enum = None
+    if status:
+        try:
+            status_enum = DraftStatus(status)
+        except ValueError:
+            raise HTTPException(400, f"invalid status: {status!r}")
+    drafts = store.list_for_project(project_id, status=status_enum)
+    return {"drafts": [d.to_dict() for d in drafts]}
+
+
+@router.get("/projects/{project_id}/decomposition-drafts/{draft_id}")
+async def get_decomposition_draft(
+    project_id: str,
+    draft_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Fetch a single decomposition draft (full sub_tasks + PRD)."""
+    _get_project_or_404(hub, project_id)
+    from ...long_task.draft_store import get_draft_store
+    draft = get_draft_store().get(draft_id)
+    if draft is None or draft.project_id != project_id:
+        raise HTTPException(404, f"draft {draft_id!r} not found in project")
+    return draft.to_dict()
+
+
+@router.post("/projects/{project_id}/decomposition-drafts/{draft_id}/confirm")
+async def confirm_decomposition_draft(
+    project_id: str,
+    draft_id: str,
+    body: dict = Body(default={}),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Materialize a pending draft into real ProjectTasks.
+
+    Body (all optional — empty body confirms as-is):
+
+    .. code-block:: json
+
+       {
+         "user_overrides": {
+           "dropped_sub_task_ids": ["st_abc"],
+           "role_overrides":      {"st_xyz": "researcher"},
+           "title_overrides":     {"st_xyz": "Renamed"},
+           "output_path_overrides": {"st_xyz": "backend/auth_v2"}
+         }
+       }
+    """
+    _get_project_or_404(hub, project_id)
+    from ...long_task.confirm import confirm_draft, ConfirmError
+    user_overrides = body.get("user_overrides") or {}
+    try:
+        result = confirm_draft(hub, draft_id, user_overrides=user_overrides)
+    except ConfirmError as e:
+        raise HTTPException(400, str(e))
+    return result
+
+
+@router.post("/projects/{project_id}/decomposition-drafts/{draft_id}/cancel")
+async def cancel_decomposition_draft(
+    project_id: str,
+    draft_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Mark a pending draft as cancelled (no tasks created)."""
+    _get_project_or_404(hub, project_id)
+    from ...long_task.confirm import cancel_draft
+    ok = cancel_draft(draft_id)
+    if not ok:
+        raise HTTPException(404, "draft not found or not in pending state")
+    return {"ok": True, "draft_id": draft_id}
+
+
+@router.delete("/projects/{project_id}/decomposition-drafts/{draft_id}")
+async def delete_decomposition_draft(
+    project_id: str,
+    draft_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Hard-delete a draft (any status). Use cancel for pending if you
+    want to keep the audit trail."""
+    _get_project_or_404(hub, project_id)
+    from ...long_task.draft_store import get_draft_store
+    ok = get_draft_store().delete(draft_id)
+    if not ok:
+        raise HTTPException(404, "draft not found")
+    return {"ok": True, "draft_id": draft_id}

@@ -1172,6 +1172,9 @@ body {
         <span class="icon">folder_special</span> <span data-i18n="nav.projects">项目与任务</span>
         <span class="badge" id="project-count">0</span>
       </div>
+      <div class="nav-item" data-view="orchestration" onclick="showView('orchestration',this)">
+        <span class="icon">hub</span> <span data-i18n="nav.orchestration">编排</span>
+      </div>
       <div class="nav-item" data-view="agents-list" onclick="showView('agents-list',this)">
         <span class="icon">smart_toy</span> <span data-i18n="nav.agents">智能体</span>
         <span class="badge" id="agent-count-badge">0</span>
@@ -1577,6 +1580,12 @@ body {
     <div class="form-group">
       <label>Working Directory</label>
       <input id="ea-workdir" placeholder="Leave blank for current directory" style="font-family:monospace;font-size:12px">
+    </div>
+    <!-- 专业领域 / Expertise — moved here from the agent chat top-strip
+         card. Comma-separated tags; mirrored into agent.profile.expertise. -->
+    <div class="form-group">
+      <label>专业领域 · Expertise <span style="color:var(--text3);font-weight:normal;font-size:11px">— 用逗号分隔,例: data_analysis, fastapi, python</span></label>
+      <input id="ea-expertise" placeholder="留空则不绑定专业领域" style="font-size:13px">
     </div>
 
     <!-- ── 多 LLM Slot 区域 (方案甲 + 乙) ── -->

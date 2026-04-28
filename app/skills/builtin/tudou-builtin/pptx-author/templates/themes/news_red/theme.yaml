@@ -1,0 +1,36 @@
+name: News Red
+version: 1.0.0
+description: "新闻媒体风 — 经典红 + 深炭灰, 强烈视觉张力。适合新闻简报 / 品牌快报 / 媒体报道 / 体育赛事。"
+slide_size: [13.33, 7.5]
+
+colors:
+  primary:   "#B91C1C"   # 深红 (主)
+  accent:    "#F59E0B"   # 金黄 (强调)
+  text:      "#111827"
+  muted:     "#4B5563"
+  bg:        "#FFFFFF"
+  bg_dark:   "#7F1D1D"   # 深红封面
+  panel:     "#FEF2F2"   # 浅红 panel
+  border:    "#FCA5A5"
+
+fonts:
+  sans: "Arial"
+
+styles:
+  title:            {font: sans, size: 26,  bold: true,  color: primary}
+  subtitle:         {font: sans, size: 14,  bold: false, color: muted}
+  card_heading:     {font: sans, size: 14,  bold: true,  color: text}
+  card_body:        {font: sans, size: 11,  bold: false, color: muted}
+  section_num:      {font: sans, size: 150, bold: true,  color: primary}
+  section_head:     {font: sans, size: 32,  bold: true,  color: text}
+  section_sub:      {font: sans, size: 16,  bold: false, color: muted}
+  cover_title:      {font: sans, size: 44,  bold: true,  color: bg}
+  cover_subtitle:   {font: sans, size: 20,  bold: false, color: panel}
+  cover_tag:        {font: sans, size: 12,  bold: false, color: accent}
+  timeline_num:     {font: sans, size: 20,  bold: true,  color: bg}
+  timeline_head:    {font: sans, size: 15,  bold: true,  color: text}
+  timeline_body:    {font: sans, size: 11,  bold: false, color: muted}
+  cta:              {font: sans, size: 20,  bold: true,  color: primary}
+  contact:          {font: sans, size: 12,  bold: false, color: muted}
+tags: ["news", "media", "sports", "broadcast", "bold"]
+trigger_keywords: ["新闻", "媒体", "快报", "赛事", "体育", "发布", "头条", "报道", "记者"]

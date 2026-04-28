@@ -99,6 +99,16 @@ def _save_projects_silently() -> None:
         logger.debug("_save_projects_silently failed: %s", e)
 
 
+# ── propose_decomposition (long-task subsystem) ──────────────────────
+# Thin re-export so the dispatcher sees this tool alongside the other
+# project tools. Real implementation lives in app/long_task/tool_propose.py.
+
+def _tool_propose_decomposition(*args, **kwargs):
+    """See ``app.long_task.tool_propose._tool_propose_decomposition``."""
+    from ..long_task.tool_propose import _tool_propose_decomposition as _impl
+    return _impl(*args, **kwargs)
+
+
 # ── submit_deliverable ───────────────────────────────────────────────
 
 def _tool_submit_deliverable(title: str = "", file_path: str = "",

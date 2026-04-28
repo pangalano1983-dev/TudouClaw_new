@@ -1,0 +1,36 @@
+name: Fresh Mint
+version: 1.0.0
+description: "明亮初创风 — 薄荷绿 + 珊瑚粉。适合新产品发布/DevRel/SaaS 推介。"
+slide_size: [13.33, 7.5]
+
+colors:
+  primary:   "#10B981"   # 薄荷绿
+  accent:    "#F97066"   # 珊瑚粉
+  text:      "#064E3B"   # 深绿(替代黑)
+  muted:     "#4B5563"
+  bg:        "#FFFFFF"
+  bg_dark:   "#042F2E"   # 深森林绿
+  panel:     "#ECFDF5"   # 薄荷浅
+  border:    "#A7F3D0"
+
+fonts:
+  sans: "Arial"
+
+styles:
+  title:            {font: sans, size: 26,  bold: true,  color: primary}
+  subtitle:         {font: sans, size: 14,  bold: false, color: muted}
+  card_heading:     {font: sans, size: 14,  bold: true,  color: text}
+  card_body:        {font: sans, size: 11,  bold: false, color: muted}
+  section_num:      {font: sans, size: 140, bold: true,  color: accent}
+  section_head:     {font: sans, size: 32,  bold: true,  color: primary}
+  section_sub:      {font: sans, size: 16,  bold: false, color: muted}
+  cover_title:      {font: sans, size: 40,  bold: true,  color: bg}
+  cover_subtitle:   {font: sans, size: 20,  bold: false, color: border}
+  cover_tag:        {font: sans, size: 12,  bold: false, color: accent}
+  timeline_num:     {font: sans, size: 20,  bold: true,  color: bg}
+  timeline_head:    {font: sans, size: 15,  bold: true,  color: text}
+  timeline_body:    {font: sans, size: 11,  bold: false, color: muted}
+  cta:              {font: sans, size: 20,  bold: true,  color: primary}
+  contact:          {font: sans, size: 12,  bold: false, color: muted}
+tags: ["startup", "saas", "devrel", "consumer", "friendly"]
+trigger_keywords: ["初创", "创业", "SaaS", "DevRel", "新产品", "消费者", "社区", "品牌", "增长"]

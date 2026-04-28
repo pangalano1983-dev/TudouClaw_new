@@ -1,0 +1,36 @@
+name: Academic
+version: 1.0.0
+description: "学术论文风 — 浅灰底 + 深蓝 accent + serif 字体。适合论文答辩 / 学术汇报 / 教学课件。"
+slide_size: [13.33, 7.5]
+
+colors:
+  primary:   "#1E3A8A"   # 深学术蓝
+  accent:    "#991B1B"   # 暗红 (强调/警示)
+  text:      "#0F172A"
+  muted:     "#475569"
+  bg:        "#F8FAFC"   # 近白的浅灰
+  bg_dark:   "#1E3A8A"   # 深蓝封面
+  panel:     "#E2E8F0"
+  border:    "#CBD5E1"
+
+fonts:
+  sans: "Times New Roman"   # 学术 serif
+
+styles:
+  title:            {font: sans, size: 26,  bold: true,  color: primary}
+  subtitle:         {font: sans, size: 14,  bold: false, color: muted}
+  card_heading:     {font: sans, size: 15,  bold: true,  color: primary}
+  card_body:        {font: sans, size: 12,  bold: false, color: text}
+  section_num:      {font: sans, size: 150, bold: true,  color: primary}
+  section_head:     {font: sans, size: 32,  bold: true,  color: primary}
+  section_sub:      {font: sans, size: 16,  bold: false, color: muted}
+  cover_title:      {font: sans, size: 42,  bold: true,  color: bg}
+  cover_subtitle:   {font: sans, size: 20,  bold: false, color: panel}
+  cover_tag:        {font: sans, size: 12,  bold: false, color: accent}
+  timeline_num:     {font: sans, size: 20,  bold: true,  color: bg}
+  timeline_head:    {font: sans, size: 16,  bold: true,  color: primary}
+  timeline_body:    {font: sans, size: 12,  bold: false, color: text}
+  cta:              {font: sans, size: 18,  bold: false, color: primary}
+  contact:          {font: sans, size: 12,  bold: false, color: muted}
+tags: ["academic", "thesis", "education", "research"]
+trigger_keywords: ["论文", "答辩", "学术", "教学", "课件", "科研", "硕博", "导师", "课题"]

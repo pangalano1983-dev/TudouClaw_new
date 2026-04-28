@@ -13,13 +13,17 @@ function renderNodes(container) {
   // Header
   var onlineCount = nodes.filter(function(n){ return n.status === 'online'; }).length;
   var remoteCount = nodes.filter(function(n){ return !n.is_self; }).length;
-  // Page header — removed the top-right "+ Connect Node" button per
-  // design pass. The empty-state fallback below still guides users
-  // who have zero nodes.
+  // "+ Connect Node" sits inline on the right of the page header.
   c.innerHTML = '' +
-    '<div style="margin-bottom:28px">' +
-      '<h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:28px;font-weight:800;letter-spacing:-0.5px">Network Nodes</h2>' +
-      '<p style="color:var(--text2);font-size:14px;margin-top:4px">Manage connected machines and multi-node agent orchestration.</p>' +
+    '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:28px">' +
+      '<div>' +
+        '<h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:28px;font-weight:800;letter-spacing:-0.5px;margin:0">Network Nodes</h2>' +
+        '<p style="color:var(--text2);font-size:14px;margin:4px 0 0">Manage connected machines and multi-node agent orchestration.</p>' +
+      '</div>' +
+      '<button class="btn btn-primary btn-sm" onclick="showModal(\'add-node\')">' +
+        '<span class="material-symbols-outlined" style="font-size:16px">add</span> ' +
+        (window.t ? window.t('action.connectNode', 'Connect Node') : 'Connect Node') +
+      '</button>' +
     '</div>' +
     '<div id="nodes-grid" style="display:grid;grid-template-columns:repeat(2,1fr);gap:20px"></div>';
 

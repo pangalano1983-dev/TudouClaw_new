@@ -363,6 +363,30 @@ class TaskLoop:
         if self.task.plan is None or not self.task.plan.steps:
             return False
 
+        # P1.2 RAG injection: prepend a stable system message with
+        # task-relevant wiki + experience so every Execute LLM call sees
+        # it (the compaction preserves index-0 system message). Only on
+        # first Execute pass — verify-retry re-enters this method but
+        # context.messages will already be populated.
+        if not self.task.context.messages:
+            try:
+                from ..bridges.rag_bridge import retrieve_task_knowledge
+                rag_block = retrieve_task_knowledge(
+                    self.task.intent,
+                    role=getattr(self.agent, "role", "") or "",
+                )
+                if rag_block:
+                    self.task.context.messages.append({
+                        "role": "system",
+                        "content": (
+                            "[历史经验与知识]\n"
+                            + rag_block
+                            + "\n\n以上为相似任务的经验，仅供参考；如不适用可忽略。"
+                        ),
+                    })
+            except Exception:
+                pass  # never break Execute on RAG failure
+
         executor = TaskExecutor(self.task, self.agent, self.bus)
         for step in self.task.plan.steps:
             if step.completed:
@@ -544,6 +568,7 @@ class TaskLoop:
                 "failed_phase": upstream_failed_phase,
                 "reason": "hard_retry_exhausted",
             })
+            self._bump_role_counter(success=False)
         else:
             self.task.status = TaskStatus.SUCCEEDED
             self.task.finished_reason = "completed"
@@ -552,6 +577,7 @@ class TaskLoop:
                 "artifact_count": len(self.task.artifacts),
                 "duration_s": self._elapsed_s(),
             })
+            self._bump_role_counter(success=True)
         # Advance to DONE directly: the outer run() loop's status-based
         # early-exit fires before _advance_next when a handler sets a
         # non-RUNNING status, so the phase wouldn't advance otherwise.
@@ -559,6 +585,44 @@ class TaskLoop:
         # independent of status.
         self.task.phase = TaskPhase.DONE
         return True
+
+    # ── role success/fail counter (orchestration leaderboard data) ─────
+
+    def _bump_role_counter(self, success: bool) -> None:
+        """Increment the V1 agent's role success/fail counter.
+
+        V2 tasks live in their own store and don't fire V1's
+        ``Agent.update_task`` hook, so the counter that feeds the
+        Orchestration leaderboard would otherwise stay at 0/0 forever
+        for V2-only workflows. We bridge the gap here at the V2
+        finalize point: every SUCCEEDED/FAILED transition bumps the
+        owning V1 agent (looked up via the shared hub).
+
+        Best-effort: never raises, never blocks task finalization.
+        """
+        try:
+            from ...api.deps.hub import get_hub
+            hub = get_hub()
+            if hub is None or not hasattr(hub, "get_agent"):
+                return
+            v1 = hub.get_agent(self.agent.id) if self.agent else None
+            if v1 is None:
+                return
+            import time as _t
+            if success:
+                v1.role_success_count = int(
+                    getattr(v1, "role_success_count", 0) or 0) + 1
+                v1.role_last_success_at = _t.time()
+            else:
+                v1.role_fail_count = int(
+                    getattr(v1, "role_fail_count", 0) or 0) + 1
+            try:
+                if hasattr(hub, "_save_agents"):
+                    hub._save_agents()
+            except Exception:
+                pass
+        except Exception:
+            pass  # never break finalize on a counter bump failure
 
     # ── control flow helpers ───────────────────────────────────────────
 
@@ -932,6 +996,19 @@ class TaskLoop:
             )
         lessons_block = "\n".join(lesson_snips) if lesson_snips else "（无）"
 
+        # P1.2 RAG injection: pull task-relevant wiki + experience so the
+        # planner can leverage what we already know. Best-effort; empty
+        # string when nothing matches (no extra noise in the prompt).
+        rag_block = ""
+        try:
+            from ..bridges.rag_bridge import retrieve_task_knowledge
+            rag_block = retrieve_task_knowledge(
+                self.task.intent,
+                role=getattr(self.agent, "role", "") or "",
+            )
+        except Exception as _re:
+            pass
+
         system = (
             "你是一个任务规划器。基于用户意图和模板指引，产出结构化 Plan JSON。\n"
             "只输出 JSON，用 ```json ... ``` 代码块包裹，不要其他文字。"
@@ -942,7 +1019,8 @@ class TaskLoop:
             f"# 模板 plan_prompt\n{plan_prompt}\n\n"
             f"# 可用工具\n{allowed if allowed else '不限（由 agent 能力决定）'}\n\n"
             f"# 历史复盘（请避免重犯）\n{lessons_block}\n\n"
-            "# 输出格式\n"
+            + (f"# 历史经验与知识\n{rag_block}\n\n" if rag_block else "")
+            + "# 输出格式\n"
             '```json\n'
             '{\n'
             '  "steps": [\n'

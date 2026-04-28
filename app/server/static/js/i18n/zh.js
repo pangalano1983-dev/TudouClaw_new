@@ -20,6 +20,7 @@ window.TUDOU_I18N.zh = {
   // ── Sidebar nav ─────────────────────────────────────────
   "nav.dashboard":        "工作台",
   "nav.projects":         "项目与任务",
+  "nav.orchestration":    "编排",
   "nav.agents":           "智能体",
   "nav.knowledge":        "知识与记忆",
   "nav.rolesSkills":      "角色与技能",
@@ -49,6 +50,8 @@ window.TUDOU_I18N.zh = {
   "action.copy":          "复制",
   "action.send":          "发送",
   "action.retry":         "重试",
+  "action.connectNode":   "连接节点",
+  "action.addProvider":   "添加 Provider",
 
   // ── Chat header (per-agent) ─────────────────────────────
   "chat.soul":            "SOUL",

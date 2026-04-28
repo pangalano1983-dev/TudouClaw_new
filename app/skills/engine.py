@@ -29,6 +29,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import threading
 import time
@@ -407,6 +408,117 @@ def parse_manifest_file(manifest_path: str) -> SkillManifest:
     with open(p, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     return parse_manifest(data, install_dir=str(p.parent))
+
+
+# ─────────────────────────────────────────────────────────────
+# SKILL.md frontmatter → synthesized manifest
+# ─────────────────────────────────────────────────────────────
+# Anthropic Agent Skills spec (https://agentskills.io) skills only carry
+# SKILL.md + YAML frontmatter — no separate manifest.yaml. To install
+# such skills (e.g. fetched from ClawHub), we synthesize a minimal
+# manifest dict from the frontmatter so the rest of the install pipeline
+# (leak check, dependency check, copy-to-install_root) keeps working.
+
+_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+
+
+def _read_skill_md_frontmatter(skill_md_path: str) -> dict:
+    """Parse YAML frontmatter from SKILL.md. Returns {} when absent or
+    malformed. Body is discarded — install only needs the metadata."""
+    if yaml is None:
+        return {}
+    p = Path(skill_md_path)
+    if not p.exists():
+        return {}
+    try:
+        text = p.read_text(encoding="utf-8")
+    except Exception:
+        return {}
+    m = _FRONTMATTER_RE.match(text)
+    if not m:
+        return {}
+    try:
+        data = yaml.safe_load(m.group(1)) or {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def synthesize_manifest_from_skill_md(
+    skill_dir: str,
+    *,
+    fallback_author: str = "community",
+) -> SkillManifest:
+    """Build a SkillManifest for an Anthropic-spec skill (SKILL.md only,
+    no manifest.yaml).
+
+    Mapping:
+      name        ← frontmatter.slug | frontmatter.name | dir name
+      version     ← frontmatter.version | metadata.version | "1.0.0"
+      description ← frontmatter.description (str or i18n dict)
+      runtime     ← "markdown" (always — these are instruction-only skills)
+      entry       ← "SKILL.md"
+      author      ← metadata.author | frontmatter.author | fallback_author
+
+    Raises ``ManifestError`` if SKILL.md missing or has no name/description.
+    """
+    src = Path(skill_dir)
+    skill_md = src / "SKILL.md"
+    if not skill_md.exists():
+        # tolerate case variation
+        alt = [p for p in src.iterdir() if p.is_file() and p.name.lower() == "skill.md"]
+        if not alt:
+            raise ManifestError(
+                f"no manifest.yaml and no SKILL.md in {src}"
+            )
+        skill_md = alt[0]
+
+    fm = _read_skill_md_frontmatter(str(skill_md))
+    if not fm:
+        raise ManifestError(
+            f"SKILL.md in {src} has no YAML frontmatter — cannot synthesize manifest"
+        )
+
+    metadata = fm.get("metadata") if isinstance(fm.get("metadata"), dict) else {}
+
+    # Prefer slug for the install id (matches dir-name-safe convention).
+    # Fall back to raw name (may contain spaces/uppercase — install_root
+    # path sanitizer handles it via .replace).
+    name = str(
+        fm.get("slug") or fm.get("name") or src.name or ""
+    ).strip()
+    if not name:
+        raise ManifestError(
+            f"SKILL.md frontmatter missing 'name' or 'slug' in {src}"
+        )
+
+    description = fm.get("description") or ""
+    if not description:
+        raise ManifestError(
+            f"SKILL.md frontmatter missing 'description' in {src}"
+        )
+
+    version = str(
+        fm.get("version") or metadata.get("version") or "1.0.0"
+    ).strip()
+
+    author = str(
+        metadata.get("author") or fm.get("author") or fallback_author
+    ).strip() or fallback_author
+
+    synthesized = {
+        "name": name,
+        "version": version,
+        "description": description,  # may be str or dict; parse_manifest handles both
+        "runtime": "markdown",
+        "entry": skill_md.name,
+        "author": author,
+        # Preserve original frontmatter so downstream can introspect e.g.
+        # frontmatter.metadata.applicable_roles without re-reading the file.
+        "_synthesized_from": "SKILL.md",
+        "_frontmatter": fm,
+    }
+    return parse_manifest(synthesized, install_dir=str(src))
 
 
 def _compute_dir_hash(dir_path: str) -> str:
@@ -1158,10 +1270,14 @@ class SkillRegistry:
                                  installed_by: str = "") -> SkillInstall:
         src = Path(src_dir)
         manifest_path = src / "manifest.yaml"
-        if not manifest_path.exists():
-            raise ManifestError(t("skills.errors.manifest_invalid",
-                                   reason="manifest.yaml not found"))
-        manifest = parse_manifest_file(str(manifest_path))
+        if manifest_path.exists():
+            manifest = parse_manifest_file(str(manifest_path))
+        else:
+            # Anthropic Agent Skills spec: SKILL.md only, no manifest.yaml.
+            # Synthesize a minimal manifest from frontmatter so the rest of
+            # the install pipeline (leak check, dependency check, copy,
+            # registry write) works unchanged.
+            manifest = synthesize_manifest_from_skill_md(str(src))
 
         # ── Leak check on prompt-visible content ───────────────
         # manifest.description and SKILL.md / README.md content get
@@ -1283,10 +1399,10 @@ class SkillRegistry:
     ) -> "SkillInstall":
         src = Path(src_dir)
         manifest_path = src / "manifest.yaml"
-        if not manifest_path.exists():
-            raise ManifestError(t("skills.errors.manifest_invalid",
-                                   reason="manifest.yaml not found"))
-        incoming = parse_manifest_file(str(manifest_path))
+        if manifest_path.exists():
+            incoming = parse_manifest_file(str(manifest_path))
+        else:
+            incoming = synthesize_manifest_from_skill_md(str(src))
 
         with self._lock:
             # Same id already installed → idempotent no-op.

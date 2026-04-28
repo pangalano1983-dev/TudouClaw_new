@@ -42,6 +42,26 @@ _SKIP_DIRS = frozenset({"node_modules", "__pycache__", ".git"})
 
 _READ_FILE_CACHE_ATTR = "_read_file_turn_cache"
 
+# Path-level read counter — independent of (offset, limit). Tracks how
+# many times the SAME PATH has been read this turn, regardless of which
+# slice. Tripped by agents that loop "read 50 lines → write fail → read
+# 1343 lines → write fail → ..." After ``_READ_PATH_HARD_CAP`` reads of
+# the same path, returns a stop-message instead of the body.
+_READ_PATH_COUNT_ATTR = "_read_file_path_counts"
+
+# Soft warning at this count, hard refusal at the next.
+_READ_PATH_SOFT_CAP = 3   # 3rd read → soft nudge appended
+_READ_PATH_HARD_CAP = 5   # 5th+ read → REFUSE, return stop-message only
+
+# Override via env so ops can dial it up/down without code changes.
+def _path_caps() -> tuple[int, int]:
+    try:
+        soft = int(os.environ.get("TUDOU_READFILE_SOFT_CAP", str(_READ_PATH_SOFT_CAP)))
+        hard = int(os.environ.get("TUDOU_READFILE_HARD_CAP", str(_READ_PATH_HARD_CAP)))
+        return max(1, soft), max(soft + 1, hard)
+    except Exception:
+        return _READ_PATH_SOFT_CAP, _READ_PATH_HARD_CAP
+
 
 def _get_caller_agent(caller_agent_id: str):
     if not caller_agent_id:
@@ -77,6 +97,38 @@ def _tool_read_file(path: str, offset: int = 0, limit: int | None = None,
     caller_id = ctx.get("_caller_agent_id", "") if isinstance(ctx, dict) else ""
     agent = _get_caller_agent(caller_id) if caller_id else None
     cache_key = (str(p), int(offset), int(limit) if limit else 0)
+
+    # ── Path-level valve(忽略 offset/limit,看同 path 总次数)──
+    # Catches the "read 50 → write fail → read 1343 → write fail" loop
+    # that the (path,offset,limit) cache misses. Soft nudge at SOFT_CAP,
+    # hard refusal at HARD_CAP+1 so the agent MUST switch tactic.
+    path_str = str(p)
+    soft_cap, hard_cap = _path_caps()
+    if agent is not None:
+        pcount = getattr(agent, _READ_PATH_COUNT_ATTR, None)
+        if pcount is None:
+            pcount = {}
+            try:
+                setattr(agent, _READ_PATH_COUNT_ATTR, pcount)
+            except Exception:
+                pcount = None
+        if pcount is not None:
+            n = pcount.get(path_str, 0) + 1
+            pcount[path_str] = n
+            if n > hard_cap:
+                # Hard refusal — return ONLY the stop message, no body.
+                return (
+                    f"[READ-VALVE-TRIPPED #{n}] You have read {path_str!r} "
+                    f"{n} times this turn (cap={hard_cap}). The file is "
+                    f"unchanged. Refusing further reads to break the loop.\n\n"
+                    f"WHAT TO DO INSTEAD:\n"
+                    f"  • Use the content you already have to answer.\n"
+                    f"  • If write_file is failing, the issue is your tool "
+                    f"call args (not the file). Inspect the LAST error.\n"
+                    f"  • If you genuinely need to re-read, finish this turn "
+                    f"first and re-read in a new turn (cache resets).\n"
+                )
+
     if agent is not None:
         cache = getattr(agent, _READ_FILE_CACHE_ATTR, None)
         if cache is None:
@@ -88,8 +140,21 @@ def _tool_read_file(path: str, offset: int = 0, limit: int | None = None,
         if cache is not None and cache_key in cache:
             cached_body, hit_count = cache[cache_key]
             cache[cache_key] = (cached_body, hit_count + 1)
+            # If path-level reads have crossed soft_cap, escalate the
+            # message — same content but a stronger nudge.
+            _path_n = (pcount or {}).get(path_str, 0)
+            warn_prefix = ""
+            if _path_n >= soft_cap:
+                warn_prefix = (
+                    f"⚠️ [READ-VALVE-WARN #{_path_n}] You've now read "
+                    f"{path_str!r} {_path_n} times this turn (cap={hard_cap}). "
+                    f"One more = REFUSED. If write/edit fails, **the issue is "
+                    f"your tool args, not the file**. Stop reading and check "
+                    f"the LAST tool error.\n\n"
+                )
             return (
-                f"[REPEAT-READ #{hit_count + 1}] You already read this file "
+                warn_prefix
+                + f"[REPEAT-READ #{hit_count + 1}] You already read this file "
                 f"this turn. The body is unchanged — stop calling read_file "
                 f"on it again. Use the content you already have, or fail "
                 f"the step if it isn't enough.\n\n"
@@ -111,6 +176,23 @@ def _tool_read_file(path: str, offset: int = 0, limit: int | None = None,
                 for i, line in enumerate(selected, start=start + 1)]
     header = f"[{p} — lines {start + 1}-{end} of {total}]"
     body = header + "\n" + "\n".join(numbered)
+
+    # Soft nudge: if this path's read count crossed soft_cap, prepend
+    # a warning to the body so the agent sees it BEFORE deciding to
+    # read again. (Hard cap returns immediately above without ever
+    # reading the file.)
+    if agent is not None:
+        pcount = getattr(agent, _READ_PATH_COUNT_ATTR, None)
+        if pcount is not None:
+            n = pcount.get(path_str, 0)
+            if n >= soft_cap:
+                body = (
+                    f"⚠️ [READ-VALVE-WARN #{n}] You've read {path_str!r} "
+                    f"{n} times this turn (cap={hard_cap}). One more read "
+                    f"of this path will be REFUSED. If write/edit is "
+                    f"failing, the issue is your tool call — not the file.\n\n"
+                    + body
+                )
 
     # Stash for next call's dedup hit.
     if agent is not None:

@@ -515,6 +515,102 @@ def _drop_orphan_tool_messages(messages: list[dict]) -> list[dict]:
     return out
 
 
+def cleanup_message_history(messages: list[dict],
+                              *, log_label: str = "history") -> list[dict]:
+    """Comprehensive message-history cleaner for LLM payloads.
+
+    Catches the four classes of corruption that DeepSeek/OpenAI strict
+    APIs reject — stricter than ``_drop_orphan_tool_messages`` because it
+    also handles cumulative orphans, empty content, role-typing errors.
+
+    Drops:
+      1. **Orphan tool messages** — ``role:tool`` whose ``tool_call_id``
+         has no matching ``assistant.tool_calls.id`` ANYWHERE earlier
+         (cumulative, not just immediate-preceding).
+      2. **Empty content** — assistant/user/system with no content AND no
+         tool_calls (these provide no signal and bloat history).
+      3. **Malformed role** — anything not in
+         {system,user,assistant,tool} is dropped (rare, defensive).
+      4. **Empty/missing tool_call_id on tool messages** — drop, since
+         strict APIs require it.
+
+    Does NOT reorder messages — preserves chronological order.
+
+    Args:
+        messages: list of OpenAI-shape message dicts
+        log_label: included in WARNING log for traceability
+
+    Returns: filtered list (never None; empty if all bad).
+    """
+    if not messages:
+        return messages
+    valid_roles = {"system", "user", "assistant", "tool"}
+    seen_tc_ids: set[str] = set()
+    out: list[dict] = []
+    drops = {"orphan_tool": 0, "empty": 0, "bad_role": 0,
+             "no_tcid": 0, "empty_tcs_stripped": 0}
+    for m in messages:
+        if not isinstance(m, dict):
+            drops["bad_role"] += 1
+            continue
+        r = m.get("role", "")
+        if r not in valid_roles:
+            drops["bad_role"] += 1
+            continue
+        if r == "assistant":
+            for tc in (m.get("tool_calls") or []):
+                if isinstance(tc, dict):
+                    tcid = tc.get("id") or ""
+                    if tcid:
+                        seen_tc_ids.add(tcid)
+            # Empty assistant with neither content nor tool_calls = noise.
+            content = m.get("content")
+            has_content = bool((content or "")) if isinstance(content, str) else (content is not None)
+            if not has_content and not (m.get("tool_calls") or []):
+                drops["empty"] += 1
+                continue
+            # Strip empty tool_calls field — strict APIs (DeepSeek)
+            # reject `tool_calls: []`. Drop the field entirely.
+            if "tool_calls" in m and not m.get("tool_calls"):
+                m = dict(m)
+                m.pop("tool_calls", None)
+                drops["empty_tcs_stripped"] += 1
+            out.append(m)
+        elif r == "tool":
+            tcid = m.get("tool_call_id") or ""
+            if not tcid:
+                drops["no_tcid"] += 1
+                continue
+            if tcid not in seen_tc_ids:
+                drops["orphan_tool"] += 1
+                continue
+            out.append(m)
+        else:
+            # system / user — drop only if completely empty
+            content = m.get("content")
+            if isinstance(content, str) and not content.strip():
+                drops["empty"] += 1
+                continue
+            if content is None:
+                drops["empty"] += 1
+                continue
+            out.append(m)
+    actually_dropped = (drops["orphan_tool"] + drops["empty"]
+                        + drops["bad_role"] + drops["no_tcid"])
+    if actually_dropped or drops["empty_tcs_stripped"]:
+        logger.warning(
+            "[%s] cleanup_message_history: dropped=%d (orphan_tool=%d "
+            "empty=%d bad_role=%d no_tcid=%d) modified=%d (empty_tcs_stripped) "
+            "— was %d, now %d",
+            log_label, actually_dropped,
+            drops["orphan_tool"], drops["empty"],
+            drops["bad_role"], drops["no_tcid"],
+            drops["empty_tcs_stripped"],
+            len(messages), len(out),
+        )
+    return out
+
+
 def _find_safe_cut_idx(messages: list[dict], want_idx: int) -> int:
     """
     Find the largest cut idx <= want_idx that does NOT sever a
@@ -1848,6 +1944,15 @@ class Agent:
     events: list[AgentEvent] = field(default_factory=list)
     tasks: list[AgentTask] = field(default_factory=list)
     channel_ids: list[str] = field(default_factory=list)  # bound channel IDs
+    # ── Success rate counters (P1, 2026-04-27) ──
+    # Incremented when an AgentTask transitions to DONE / BLOCKED /
+    # CANCELLED. Used by long_task.auto_assign as a tiebreaker when
+    # multiple agents match the same role_hint — pick the one with
+    # higher success rate. Smoothed: (success + 1) / (success + fail + 2)
+    # so a brand-new agent (0/0) starts at 50% rather than NaN.
+    role_success_count: int = 0
+    role_fail_count: int = 0
+    role_last_success_at: float = 0.0  # for "recent activity" surfacing
     granted_skills: list[str] = field(default_factory=list)  # Skill IDs granted to this agent
     created_at: float = field(default_factory=time.time)
     # --- src integration ---
@@ -3513,8 +3618,15 @@ class Agent:
                     if _rp in _seen_paths:
                         continue
                     _seen_paths.add(_rp)
+                    # Cap at 1500 chars / file (was 4000) — multi-doc
+                    # setups (working_dir + shared_workspace × 4 candidate
+                    # filenames) could blow past 8K just on context docs,
+                    # which dominated the static prompt. 1500 fits a full
+                    # PROJECT_CONTEXT.md preface (purpose + main directives)
+                    # while leaving room for the rest of the static prompt
+                    # to stay under 20K total.
                     content = ctx_file.read_text(
-                        encoding="utf-8", errors="replace")[:4000]
+                        encoding="utf-8", errors="replace")[:1500]
                     parts.append(
                         f"\n<project_context file=\"{name}\" "
                         f"dir=\"{_dir.name}\">\n{content}\n"
@@ -3570,9 +3682,10 @@ class Agent:
         # ── Plan + step tracking protocol (for UI task-queue visuals) ─
         # Drives the TASK QUEUE panel: agent emits 📋 plan + ✓ markers,
         # host observes & updates UI. Forget → no harm, just no step
-        # progress visualization that turn. Text in system_prompt for
-        # catalog reuse.
-        parts.append("\n" + _sp._PLAN_PROTOCOL_ZH)
+        # progress visualization that turn. Picks ZH/EN from
+        # profile.language so English-only agents don't carry Chinese
+        # rules they can't act on.
+        parts.append("\n" + _sp.select_plan_protocol(p.language or "auto"))
 
         result = "\n".join(parts)
 
@@ -4099,27 +4212,54 @@ class Agent:
                 self._memory_turn_counter = 0  # 重置计数
 
             # === L3: 提取事实 ===
-            # 行为规则走 Global Config → System Prompts (见 agent_llm 同段注释)
+            # Per-turn extraction was retired in favor of:
+            #   1. task DONE hook (see Agent.update_task / project.py)
+            #   2. strong-signal trigger (user explicitly asks to remember)
+            #   3. K-turn fallback (pure-chat sessions never produce a task DONE)
+            # All three paths route through app.core.l3_extractor; prompt is
+            # hardcoded there, no extra_context, no tools.
             if mem_config.auto_extract_facts:
-                llm_call = self._make_summary_llm_call()
                 try:
-                    _scene_prompts = self._get_scene_prompts_text() or ""
-                except Exception:
-                    _scene_prompts = ""
-                facts = mm.extract_facts(
-                    agent_id=self.id,
-                    user_message=user_message,
-                    assistant_response=assistant_response,
-                    llm_call=llm_call,
-                    config=mem_config,
-                    extra_context=_scene_prompts,
-                )
-                if facts:
-                    self._log("memory", {
-                        "action": "extract_facts",
-                        "count": len(facts),
-                        "facts": [f.content[:50] for f in facts[:3]],
-                    })
+                    from .core import l3_extractor as _l3
+                    _l3.note_chat_turn(self.id)
+                    _lang = getattr(self.profile, "language", "auto") or "auto"
+                    if _l3.has_strong_signal(user_message):
+                        llm_call = self._make_summary_llm_call()
+                        if llm_call:
+                            facts = _l3.extract_on_strong_signal(
+                                agent_id=self.id,
+                                user_message=user_message,
+                                assistant_response=assistant_response,
+                                llm_call=llm_call,
+                                store=mm,
+                                lang=_lang,
+                            )
+                            if facts:
+                                self._log("memory", {
+                                    "action": "extract_facts",
+                                    "trigger": "strong_signal",
+                                    "count": len(facts),
+                                    "facts": [f.content[:50] for f in facts[:3]],
+                                })
+                    elif _l3.should_run_fallback(self.id):
+                        llm_call = self._make_summary_llm_call()
+                        if llm_call:
+                            facts = _l3.extract_fallback(
+                                agent_id=self.id,
+                                recent_messages=self.messages[-12:],
+                                llm_call=llm_call,
+                                store=mm,
+                                lang=_lang,
+                            )
+                            if facts:
+                                self._log("memory", {
+                                    "action": "extract_facts",
+                                    "trigger": "fallback_kturn",
+                                    "count": len(facts),
+                                    "facts": [f.content[:50] for f in facts[:3]],
+                                })
+                except Exception as _l3_err:  # noqa: BLE001
+                    logger.debug("L3 extraction (chat path) failed: %s", _l3_err)
 
             # === Session-level action buffer flush ===
             # Aggregate buffered tool actions into a single outcome memory
@@ -6142,8 +6282,9 @@ Write only the summary body. Do not include any preamble or prefix."""
             arguments["_agent_profile"] = self.profile
             arguments["agent_id"] = self.id
 
-        # Check agent-level denied tools
-        if tool_name in self.profile.denied_tools:
+        # Check agent-level denied tools (legacy agents may have None;
+        # defend with `or ()` so `in` doesn't trip NoneType iteration)
+        if tool_name in (self.profile.denied_tools or ()):
             return f"DENIED: Tool '{tool_name}' is not permitted for this agent."
 
         # ── Infrastructure tools always available ──
@@ -6179,8 +6320,11 @@ Write only the summary body. Do not include any preamble or prefix."""
         auth = get_auth()
         policy = auth.tool_policy
 
-        # Check if this agent auto-approves this tool
-        if tool_name in self.profile.auto_approve_tools:
+        # Check if this agent auto-approves this tool.
+        # `auto_approve_tools` should be a list[str] but legacy persisted
+        # agents (saved before the dataclass had a default_factory) may
+        # have it as None. Defend with `or ()`.
+        if tool_name in (self.profile.auto_approve_tools or ()):
             with self._sandbox_scope():
                 result = self._execute_tool_guarded(tool_name, arguments, on_event=on_event)
             auth.audit("tool_executed", actor=self.name, target=tool_name,
@@ -6749,6 +6893,32 @@ Write only the summary body. Do not include any preamble or prefix."""
 
                 max_iters = 20
 
+                # ── Per-turn tool-call budgets (anti infinite-loop) ──
+                # Catches the failure mode where the agent hops between
+                # web_search / mcp_call / web_fetch indefinitely without
+                # converging. Iteration counter alone misses this because
+                # one iteration can contain many tool calls.
+                #
+                # Soft cap → inject a budget-pressure system message
+                #   ("你已经调用 X N 次,请基于已有结果给结论")
+                # Hard cap → break out of the iteration loop with a
+                #   user-visible "已强制终止" final response.
+                #
+                # Per-tool soft caps are tuned so research-heavy tools
+                # (web_*, mcp_call) get more headroom than directed tools
+                # (read_file, knowledge_lookup) which usually converge
+                # in 2-3 calls.
+                _PER_TOOL_SOFT_CAP = {
+                    "web_search": 5, "web_fetch": 5, "mcp_call": 5,
+                    "knowledge_lookup": 4, "memory_recall": 4,
+                    "read_file": 6, "bash": 8,
+                }
+                _DEFAULT_SOFT_CAP = 4
+                _PER_TOOL_HARD_CAP = 10  # any single tool name
+                _TOTAL_HARD_CAP = 30     # all tool calls combined
+                _per_tool_count: dict[str, int] = {}
+                _budget_warned: set[str] = set()
+
                 # ── Task Checkpoint Injection: 任务恢复上下文 ──
                 # [F3] 先老化 stale active plan，防止 phase 卡死
                 try:
@@ -7262,6 +7432,69 @@ Write only the summary body. Do not include any preamble or prefix."""
                         for tc in tool_calls
                     )
 
+                    # ── Per-tool budget check ──
+                    # Bump per-name counters first so caps include the
+                    # current planned batch. Hard cap → break the loop;
+                    # soft cap → inject system message exactly once per
+                    # tool name so the LLM can self-stop.
+                    _hard_cap_breach = ""
+                    for tc in tool_calls:
+                        _nm = tc.get("function", {}).get("name", "?")
+                        _per_tool_count[_nm] = _per_tool_count.get(_nm, 0) + 1
+                    _total = sum(_per_tool_count.values())
+                    if _total > _TOTAL_HARD_CAP:
+                        _hard_cap_breach = (
+                            f"⚠️ 工具调用总额超出 {_TOTAL_HARD_CAP} 次,"
+                            f"判定为死循环,已强制终止本轮。"
+                            f"已有调用:{dict(_per_tool_count)}"
+                        )
+                    else:
+                        for _nm, _cnt in _per_tool_count.items():
+                            if _cnt > _PER_TOOL_HARD_CAP:
+                                _hard_cap_breach = (
+                                    f"⚠️ 工具 {_nm} 已被调用 {_cnt} 次"
+                                    f"(上限 {_PER_TOOL_HARD_CAP}),"
+                                    f"判定为死循环,已强制终止本轮。"
+                                )
+                                break
+                    if _hard_cap_breach:
+                        logger.error(
+                            "Agent %s: tool-call hard cap breached — %s",
+                            self.id[:8], _hard_cap_breach)
+                        try:
+                            self.messages.append({
+                                "role": "assistant",
+                                "content": _hard_cap_breach,
+                                "_source": "tool_budget_guard",
+                            })
+                        except Exception:
+                            pass
+                        final_content = _hard_cap_breach
+                        break  # exit iteration loop
+                    # Soft cap warnings — inject ONE system message per
+                    # tool that just crossed its soft cap, so the LLM
+                    # gets a clear nudge to stop.
+                    for _nm, _cnt in _per_tool_count.items():
+                        _soft = _PER_TOOL_SOFT_CAP.get(_nm, _DEFAULT_SOFT_CAP)
+                        if _cnt >= _soft and _nm not in _budget_warned:
+                            _budget_warned.add(_nm)
+                            try:
+                                self.messages.append({
+                                    "role": "system",
+                                    "content": (
+                                        f"[预算警告] 工具 {_nm} 已调用 {_cnt} 次"
+                                        f"(软上限 {_soft})。请基于已收集的信息"
+                                        f"给出最终结论,不要再继续查询同一类资源。"
+                                        f"若信息不足,直接告诉用户「需要补充 X 才能下结论」"
+                                        f"而不是继续调用工具。"
+                                    ),
+                                })
+                            except Exception:
+                                pass
+                            logger.info(
+                                "Agent %s: soft-cap budget warning for %s "
+                                "(%d/%d)", self.id[:8], _nm, _cnt, _soft)
+
                     # Parse all tool calls first
                     parsed_calls = []  # list of (name, arguments, call_id)
                     for tc in tool_calls:
@@ -7664,19 +7897,29 @@ Write only the summary body. Do not include any preamble or prefix."""
                 # Pass `_agent_ref` through state so graph nodes can use
                 # the real Agent's system_prompt / tool dispatch / sandbox /
                 # approval logic — not the mock-style standalone path.
-                final = graph.invoke({
-                    "messages": initial_msgs,
-                    "agent_id": self.id,
-                    "role": self.role,
-                    "name": self.name,
-                    "language": getattr(self.profile, "language", "auto") or "auto",
-                    "provider": provider,
-                    "model": model,
-                    "iteration": 0,
-                    "max_iterations": int(getattr(self, "max_turns", 20) or 20),
-                    "last_finish_reason": "",
-                    "_agent_ref": self,    # ← bridge into V1 business logic
-                })
+                # LangGraph's recursion_limit counts super-steps, NOT
+                # tool-call iterations. Each (assistant → tools) round
+                # is ~2 super-steps, so default 25 caps us at ~12 tool
+                # rounds — too low for real work. Set to 4× our
+                # max_iterations cap so the *agent's* iter limit always
+                # bites first (with a clearer error than LangGraph's).
+                _max_iter = int(getattr(self, "max_turns", 20) or 20)
+                final = graph.invoke(
+                    {
+                        "messages": initial_msgs,
+                        "agent_id": self.id,
+                        "role": self.role,
+                        "name": self.name,
+                        "language": getattr(self.profile, "language", "auto") or "auto",
+                        "provider": provider,
+                        "model": model,
+                        "iteration": 0,
+                        "max_iterations": _max_iter,
+                        "last_finish_reason": "",
+                        "_agent_ref": self,    # ← bridge into V1 business logic
+                    },
+                    config={"recursion_limit": max(50, _max_iter * 4)},
+                )
 
                 # Mirror final messages back into agent.messages so the
                 # rest of the platform (memory / wiki / portal history)
@@ -7686,9 +7929,13 @@ Write only the summary body. Do not include any preamble or prefix."""
                 # find what's NEW relative to msgs_before + the user msg.
                 # Simple approach: take everything past len(msgs_before).
                 new_tail = final_msgs[len(msgs_before):]
-                # But the user message we constructed is in there too;
-                # de-dup by identity-of-content.
-                self.messages = list(self.messages) + new_tail
+                # Cleanup: don't persist orphan tool messages or empty
+                # content into agent.messages — otherwise next turn the
+                # same orphan ships to the LLM and trips a 400.
+                self.messages = cleanup_message_history(
+                    list(self.messages) + new_tail,
+                    log_label=f"agent.{self.id[:8]}.mirror",
+                )
 
                 # Last assistant text becomes the chat reply.
                 final_text = ""
@@ -7726,27 +7973,29 @@ Write only the summary body. Do not include any preamble or prefix."""
         finish. We NEVER abort the running task just because a new message
         arrived — that would destroy in-flight work.
 
-        ── LangGraph default path ─────────────────────────────────────
-        LangGraph state machine is now the default. V1 chat loop stays
-        as fallback for ~2 weeks (until the graph path proves stable
-        across all agents). Override:
-          - env ``TUDOU_USE_LEGACY_V1=1`` → force V1 globally
-          - ``self.profile.force_v1=True`` → force V1 for this agent
-        On any graph error, falls back to V1 transparently — a graph
-        bug must NEVER block user chat.
+        ── LangGraph dispatch DISABLED (commented out 2026-04-26) ─────
+        Decision: see docs/PHASE2B notes — LangGraph path was producing a
+        cascade of bugs (orphan tool messages, empty tool_calls=[],
+        recursion runaway, missing event stream, stale token context),
+        each one requiring re-implementation of features V1 already has.
+        V1 is the only chat path now. Code below + ``_chat_async_via_langgraph``
+        + ``app/graph/`` are kept as-is so we can revive if we ever
+        commit to migrating V1 → LangGraph properly. To re-enable:
+        uncomment the block below + opt-in via ``TUDOU_USE_LANGGRAPH=1``.
         """
-        _force_v1 = (
-            os.environ.get("TUDOU_USE_LEGACY_V1", "0") == "1"
-            or getattr(self.profile, "force_v1", False)
-        )
-        if not _force_v1:
-            try:
-                return self._chat_async_via_langgraph(user_message, source=source)
-            except Exception as _ge:
-                logger.warning(
-                    "Agent %s: LangGraph path failed (%s) — falling back to V1",
-                    self.id[:8], _ge,
-                )
+        # ── LangGraph dispatch — DISABLED ──
+        # _use_graph = (
+        #     os.environ.get("TUDOU_USE_LANGGRAPH", "0") == "1"
+        #     or getattr(self.profile, "use_langgraph", False)
+        # )
+        # if _use_graph:
+        #     try:
+        #         return self._chat_async_via_langgraph(user_message, source=source)
+        #     except Exception as _ge:
+        #         logger.warning(
+        #             "Agent %s: LangGraph path failed (%s) — falling back to V1",
+        #             self.id[:8], _ge,
+        #         )
 
         from .agent_types import AgentStatus as _AgentStatus
         mgr = get_chat_task_manager()
@@ -10515,6 +10764,7 @@ Write only the summary body. Do not include any preamble or prefix."""
     def update_task(self, task_id: str, **kwargs) -> AgentTask | None:
         for t in self.tasks:
             if t.id == task_id:
+                _prev_status = t.status
                 for k, v in kwargs.items():
                     if k == "status":
                         t.status = TaskStatus(v) if isinstance(v, str) else v
@@ -10525,6 +10775,37 @@ Write only the summary body. Do not include any preamble or prefix."""
                                    "changes": list(kwargs.keys())})
                 # Auto-post progress to meeting if this task originated from one
                 self._sync_meeting_progress(t)
+                # ── Success rate counters (P1) ──
+                # Bump on terminal status transitions only. DONE → success;
+                # BLOCKED / CANCELLED → fail. Used by long_task.auto_assign
+                # to prefer historically-reliable agents when multiple
+                # agents match the same role_hint.
+                if t.status != _prev_status:
+                    if t.status == TaskStatus.DONE:
+                        self.role_success_count = int(getattr(self, "role_success_count", 0) or 0) + 1
+                        self.role_last_success_at = time.time()
+                    elif t.status in (TaskStatus.BLOCKED, TaskStatus.CANCELLED):
+                        self.role_fail_count = int(getattr(self, "role_fail_count", 0) or 0) + 1
+
+                # L3 extraction trigger — fire on transition to DONE only.
+                # Wrapped to never break the task update on extraction errors.
+                if t.status == TaskStatus.DONE and _prev_status != TaskStatus.DONE:
+                    try:
+                        from .core import l3_extractor as _l3
+                        llm_call = self._make_summary_llm_call()
+                        if llm_call:
+                            _lang = getattr(self.profile, "language", "auto") or "auto"
+                            _l3.extract_on_task_done(
+                                agent_id=self.id,
+                                task_title=t.title or "",
+                                task_description=t.description or "",
+                                task_result=t.result or "",
+                                recent_messages=self.messages[-12:],
+                                llm_call=llm_call,
+                                lang=_lang,
+                            )
+                    except Exception as _l3_err:  # noqa: BLE001
+                        logger.debug("L3 task-done hook failed: %s", _l3_err)
                 return t
         return None
 

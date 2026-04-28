@@ -108,13 +108,19 @@ class AgentGrowthMixin:
         prompt = self.self_improvement.build_retrospective_prompt(
             task_summary=task_summary, context=context)
 
+        # Per-role retrospective system prompt (same pattern as
+        # trigger_active_learning). Replaces the generic
+        # "你是一个经验复盘助手" so each role's reflector stays in its lane.
+        from .experience_library import get_retro_system_prompt
+        retro_sys = get_retro_system_prompt(self.role)
+
         # Use agent's own LLM to perform retrospective
         try:
             from . import llm
             _prov, _mdl = self._resolve_effective_provider_model()
             resp = llm.chat_no_stream(
                 messages=[
-                    {"role": "system", "content": "你是一个经验复盘助手。请严格按JSON格式输出。"},
+                    {"role": "system", "content": retro_sys},
                     {"role": "user", "content": prompt},
                 ],
                 model=_mdl, provider=_prov,
@@ -165,12 +171,19 @@ class AgentGrowthMixin:
         prompt = self.self_improvement.build_learning_prompt(
             learning_goal=learning_goal, knowledge_gap=knowledge_gap)
 
+        # Per-role system prompt: coder learns 编码规范, researcher learns
+        # 研究方法, designer learns 视觉趋势, etc. Replaces the old generic
+        # "你是一个主动学习助手" (50 chars, role-blind) so each role's
+        # learner stays in its lane and rejects cross-role noise.
+        from .experience_library import get_learner_system_prompt
+        learner_sys = get_learner_system_prompt(self.role)
+
         try:
             from . import llm
             _prov, _mdl = self._resolve_effective_provider_model()
             resp = llm.chat_no_stream(
                 messages=[
-                    {"role": "system", "content": "你是一个主动学习助手。请严格按JSON格式输出。"},
+                    {"role": "system", "content": learner_sys},
                     {"role": "user", "content": prompt},
                 ],
                 model=_mdl, provider=_prov,

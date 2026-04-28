@@ -251,6 +251,58 @@ def tool_lint_check(ctx: MiddlewareContext) -> MiddlewareResult:
     tool_name = ctx.tool_name
     arguments = ctx.tool_arguments
 
+    # Diagnostic: log every PRE_TOOL invocation with the keys we see —
+    # makes it possible to verify _raw recovery from logs without adding
+    # ad-hoc print statements. Costs ~1 line per tool call.
+    try:
+        _arg_keys = list(arguments.keys()) if isinstance(arguments, dict) else type(arguments).__name__
+        logger.info("[lint_check] tool=%s arg_keys=%s", tool_name, _arg_keys)
+    except Exception:
+        pass
+
+    # ── Recovery: extract args from {"_raw": "<json>"} fallback ──
+    # Streaming token-by-token assembly in app/llm.py wraps the raw
+    # buffer in ``{"_raw": ...}`` when it can't json.loads at end-of-
+    # stream. That fallback fires even for valid-but-large payloads
+    # because some providers split the JSON across more SSE chunks
+    # than our buffer flushes — by the time we re-attempt the parse
+    # here (post-stream, full string), it usually succeeds. Without
+    # this recovery the agent sees "'path': 必填参数缺失" and has no
+    # idea its tool call was actually well-formed.
+    # Trigger recovery if args has `_raw` and NO real (non-underscore) keys.
+    # Underscore-prefixed keys (_agent_profile / _caller_agent_id / agent_id)
+    # are injected by agent_execution.py for some tools — they don't count
+    # as "real" args from the LLM, so don't disqualify recovery.
+    _has_raw = isinstance(arguments, dict) and "_raw" in arguments
+    _real_keys = (
+        [k for k in arguments.keys() if k != "_raw" and not k.startswith("_")]
+        if isinstance(arguments, dict) else []
+    )
+    if _has_raw and not _real_keys:
+        raw_str = arguments.get("_raw") or ""
+        try:
+            recovered = json.loads(raw_str) if raw_str else {}
+            if isinstance(recovered, dict):
+                arguments = recovered
+                ctx.tool_arguments = recovered  # propagate to downstream middleware
+                logger.info(
+                    "[lint_check] recovered tool '%s' args from _raw "
+                    "fallback (%d chars JSON)", tool_name, len(raw_str),
+                )
+        except json.JSONDecodeError as _je:
+            # Genuinely broken JSON — give the LLM a SPECIFIC error so
+            # it knows to retry the tool call with valid JSON, not waste
+            # cycles wondering why required fields are "missing".
+            return MiddlewareResult(
+                action=Action.SHORT_CIRCUIT,
+                value=(
+                    f"Tool '{tool_name}' arguments JSON 解析失败: {_je}\n"
+                    f"收到的原始文本(前 200 字符): {raw_str[:200]!r}\n"
+                    f"请重新发起 tool call,确保 arguments 是合法 JSON 对象。"
+                ),
+                message=f"lint_check: _raw JSON parse failed ({_je})",
+            )
+
     # Find the schema for this tool
     schema = _find_tool_schema(tool_name)
     if schema is None:
@@ -604,6 +656,38 @@ def tool_result_truncation(ctx: MiddlewareContext) -> MiddlewareResult:
 _GLOBAL_PIPELINE: MiddlewarePipeline | None = None
 
 
+def long_task_isolation_check(ctx: MiddlewareContext) -> MiddlewareResult:
+    """PRE_TOOL: Block sub-task agents from writing outside their wd.
+
+    No-op for non-sub-task agents (vast majority). For agents whose
+    current task is a long-task sub-task, calls
+    ``app.long_task.isolation.check_write_path`` and SHORT_CIRCUITs
+    with a clear error if the write target escapes the wd.
+    """
+    if not ctx.agent_id:
+        return MiddlewareResult(action=Action.CONTINUE)
+    try:
+        from .hub import get_hub
+        from .long_task.isolation import check_write_path
+    except Exception:
+        return MiddlewareResult(action=Action.CONTINUE)
+    try:
+        hub = get_hub()
+        agent = hub.get_agent(ctx.agent_id) if hub else None
+    except Exception:
+        return MiddlewareResult(action=Action.CONTINUE)
+    if agent is None:
+        return MiddlewareResult(action=Action.CONTINUE)
+    err = check_write_path(
+        agent=agent,
+        tool_name=ctx.tool_name,
+        args=ctx.tool_arguments if isinstance(ctx.tool_arguments, dict) else {},
+    )
+    if err:
+        return MiddlewareResult(action=Action.SHORT_CIRCUIT, value=err)
+    return MiddlewareResult(action=Action.CONTINUE)
+
+
 def init_pipeline() -> MiddlewarePipeline:
     """Create and configure the global middleware pipeline with built-in middlewares."""
     global _GLOBAL_PIPELINE
@@ -616,6 +700,16 @@ def init_pipeline() -> MiddlewarePipeline:
         fn=tool_lint_check,
         priority=10,
         description="校验工具参数是否符合 JSON Schema",
+    ))
+    # Long-task subsystem write-path isolation. Runs after lint so the
+    # arguments are already _raw-recovered by the time we inspect the
+    # path arg. Priority 20 puts it after lint.
+    pipe.register(MiddlewareEntry(
+        name="long_task_isolation",
+        stage=Stage.PRE_TOOL,
+        fn=long_task_isolation_check,
+        priority=20,
+        description="子任务 agent 写入路径隔离 (长任务子系统)",
     ))
 
     # ── P0: POST_TOOL ──

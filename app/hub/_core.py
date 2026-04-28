@@ -83,6 +83,15 @@ class Hub:
             logger.warning("SQLite init failed, falling back to JSON: %s", _e)
             self._db = None
         self._load_agents()
+        # ── V2 shadow backfill ────────────────────────────────────────
+        # 2026-04-27: TudouClaw retired the "普通 vs 状态机 agent" UX
+        # split. New agents always get a V2 shadow. Existing agents
+        # created before this commit may have no V2 record — backfill
+        # one for each so capability surfaces are uniform.
+        try:
+            self._backfill_v2_shadows()
+        except Exception as _bf_err:
+            logger.warning("V2 shadow backfill failed (non-fatal): %s", _bf_err)
         self._load_remote_nodes()
         # Node-scoped configurations
         self.node_configs: dict[str, NodeConfig] = {}
@@ -445,6 +454,27 @@ class Hub:
                                 getattr(ag, "id", "?"), _we)
                 except Exception as _we:
                     logger.debug("stuck-agent watchdog loop error: %s", _we)
+
+                # ── Long-task auto-assignment tick ──
+                # For each project, find sub-tasks whose deps are
+                # satisfied + assigned_to is empty, and dispatch them
+                # to idle agents matching role_hint. Cheap to run on
+                # every heartbeat (skips projects with no sub-tasks).
+                try:
+                    from ..long_task import auto_assign_tick
+                    auto_assign_tick(self)
+                except Exception as _ae:
+                    logger.debug("long_task auto_assign tick error: %s", _ae)
+                # ── Long-task aggregator tick (P0 closure) ──
+                # When all children of a parent task reach DONE,
+                # combine their results onto the parent so the user
+                # gets a complete deliverable without manual stitching.
+                # Idempotent — skips already-aggregated parents.
+                try:
+                    from ..long_task import tick_aggregate
+                    tick_aggregate(self)
+                except Exception as _age:
+                    logger.debug("long_task aggregate tick error: %s", _age)
             except Exception as _le:
                 logger.debug("heartbeat loop iter error: %s", _le)
             self._heartbeat_stop.wait(self._heartbeat_interval)
@@ -787,6 +817,61 @@ class Hub:
                 self._save_agents()
             except Exception as _se:
                 logger.debug("auto-migrate save failed: %s", _se)
+
+    def _backfill_v2_shadows(self) -> None:
+        """Ensure every loaded V1 agent has a corresponding V2 store
+        record. One-time on startup; idempotent (skips agents whose
+        shadow already exists). Mirrors the inline registration block
+        in ``app.api.routers.agents.create_agent``.
+
+        Failure for one agent is logged + skipped — the rest still get
+        backfilled.
+        """
+        if not self.agents:
+            return
+        try:
+            from ..v2.agent.agent_v2 import AgentV2, Capabilities
+            from ..v2.agent.llm_slots import slots_from_v1_agent
+            from ..v2.core.task_store import get_store as _v2_store
+        except Exception as _ie:
+            logger.debug("V2 modules unavailable, skipping backfill: %s", _ie)
+            return
+        store = _v2_store()
+        backfilled = 0
+        for agent in self.agents.values():
+            try:
+                if store.get_agent(agent.id) is not None:
+                    continue  # already has shadow
+                _slots = slots_from_v1_agent(agent).to_dict()
+                v2_caps = Capabilities(
+                    skills=list(getattr(agent, "granted_skills", []) or []),
+                    mcps=[],
+                    tools=[],
+                    llm_tier=str(getattr(agent.profile, "llm_tier", "") or "default"),
+                    denied_tools=[],
+                    llm_slots=_slots,
+                )
+                v2_agent = AgentV2.create(
+                    id=agent.id,
+                    name=agent.name,
+                    role=agent.role,
+                    v1_agent_id=agent.id,
+                    capabilities=v2_caps,
+                    task_template_ids=[],
+                    working_directory=getattr(agent, "working_dir", "") or "",
+                )
+                store.save_agent(v2_agent)
+                backfilled += 1
+            except Exception as _e:
+                logger.warning(
+                    "V2 shadow backfill failed for agent %s: %s",
+                    agent.id[:8], _e,
+                )
+        if backfilled > 0:
+            logger.info(
+                "V2 shadow backfill: registered %d legacy agent(s)",
+                backfilled,
+            )
 
     def _save_agents(self):
         """Persist agents to SQLite (primary) + JSON (backup) + workspace."""

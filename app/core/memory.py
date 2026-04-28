@@ -1199,6 +1199,59 @@ class MemoryManager:
         except Exception as e:
             return {"available": False, "error": str(e)}
 
+    def search_facts_vector_scored(
+        self, agent_id: str, query: str,
+        top_k: int = 5, category: str = "",
+    ) -> list[tuple[SemanticFact, float]]:
+        """Like ``search_facts_vector`` but returns ``(fact, similarity)``
+        tuples so callers can apply a relevance threshold.
+
+        Similarity is in [0, 1] derived from ChromaDB's cosine distance
+        (sim = 1 - dist/2). Falls back to FTS5 with sim=0 (caller decides
+        whether to keep results).
+        """
+        if not self._check_chromadb_available():
+            return [(f, 0.0) for f in self.search_facts(agent_id, query, top_k, category)]
+        try:
+            coll = self._get_chroma_collection("memory_facts")
+            if coll.count() == 0:
+                return [(f, 0.0) for f in self.search_facts(agent_id, query, top_k, category)]
+            where_filter = {"agent_id": agent_id}
+            if category:
+                where_filter = {"$and": [
+                    {"agent_id": agent_id},
+                    {"category": category},
+                ]}
+            results = coll.query(
+                query_texts=[query],
+                n_results=min(top_k, 50),
+                where=where_filter,
+            )
+            if not results or not results.get("ids") or not results["ids"][0]:
+                return [(f, 0.0) for f in self.search_facts(agent_id, query, top_k, category)]
+            scored: list[tuple[SemanticFact, float]] = []
+            ids = results["ids"][0]
+            docs = (results.get("documents") or [[]])[0]
+            metas = (results.get("metadatas") or [[]])[0]
+            dists = (results.get("distances") or [[]])[0]
+            for i, doc_id in enumerate(ids):
+                meta = metas[i] if i < len(metas) else {}
+                content = docs[i] if i < len(docs) else ""
+                dist = float(dists[i]) if i < len(dists) else 1.0
+                sim = max(0.0, 1.0 - (dist / 2.0))
+                scored.append((SemanticFact(
+                    id=doc_id, agent_id=agent_id,
+                    category=meta.get("category", "general"),
+                    content=content,
+                    source=meta.get("source", ""),
+                    confidence=meta.get("confidence", 0.5),
+                    created_at=meta.get("created_at", 0),
+                ), sim))
+            return scored
+        except Exception as e:
+            logger.warning(f"ChromaDB search_facts_scored failed: {e}")
+            return [(f, 0.0) for f in self.search_facts(agent_id, query, top_k, category)]
+
     def search_facts_vector(self, agent_id: str, query: str,
                             top_k: int = 5, category: str = "") -> list[SemanticFact]:
         """Vector search for L3 facts using ChromaDB. Fallback to FTS5."""
@@ -1346,8 +1399,12 @@ class MemoryManager:
     )
 
     # Always-inject categories (bypass top-K retrieval limit in
-    # retrieve_for_prompt).
-    _ALWAYS_INJECT_CATEGORIES = ("contact", "preference")
+    # retrieve_for_prompt). `rule` joined the always-on set when L3
+    # extraction moved to task-DONE triggers — operational constraints
+    # ("write files only under workspace/", "call X with param Y") need
+    # to be visible at the moment the agent decides to act, which is
+    # often unrelated to the user's current query (top-K would miss).
+    _ALWAYS_INJECT_CATEGORIES = ("contact", "preference", "rule")
 
     def retrieve_for_prompt(self, agent_id: str,
                             current_query: str,

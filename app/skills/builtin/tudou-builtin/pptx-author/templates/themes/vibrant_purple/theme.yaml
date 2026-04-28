@@ -1,0 +1,36 @@
+name: Vibrant Purple
+version: 1.0.0
+description: "创意科技风 — 亮紫 + 珊瑚粉, 鲜艳活泼。适合创意公司 / 设计工作室 / 艺术展示 / 年轻品牌。"
+slide_size: [13.33, 7.5]
+
+colors:
+  primary:   "#7C3AED"   # 电光紫
+  accent:    "#EC4899"   # 珊瑚粉
+  text:      "#1E1B4B"   # 深紫(替代纯黑)
+  muted:     "#6366F1"   # 靛蓝
+  bg:        "#FFFFFF"
+  bg_dark:   "#1E1B4B"   # 深紫封面
+  panel:     "#F5F3FF"   # 浅紫 panel
+  border:    "#C4B5FD"   # 淡紫边
+
+fonts:
+  sans: "Arial"
+
+styles:
+  title:            {font: sans, size: 26,  bold: true,  color: primary}
+  subtitle:         {font: sans, size: 14,  bold: false, color: muted}
+  card_heading:     {font: sans, size: 14,  bold: true,  color: text}
+  card_body:        {font: sans, size: 11,  bold: false, color: muted}
+  section_num:      {font: sans, size: 150, bold: true,  color: accent}
+  section_head:     {font: sans, size: 32,  bold: true,  color: primary}
+  section_sub:      {font: sans, size: 16,  bold: false, color: muted}
+  cover_title:      {font: sans, size: 42,  bold: true,  color: bg}
+  cover_subtitle:   {font: sans, size: 20,  bold: false, color: accent}
+  cover_tag:        {font: sans, size: 12,  bold: false, color: border}
+  timeline_num:     {font: sans, size: 20,  bold: true,  color: bg}
+  timeline_head:    {font: sans, size: 15,  bold: true,  color: text}
+  timeline_body:    {font: sans, size: 11,  bold: false, color: muted}
+  cta:              {font: sans, size: 20,  bold: true,  color: accent}
+  contact:          {font: sans, size: 12,  bold: false, color: muted}
+tags: ["creative", "art", "design-studio", "brand"]
+trigger_keywords: ["创意", "设计", "艺术", "品牌", "Design", "媒体", "工作室", "年轻", "潮流"]

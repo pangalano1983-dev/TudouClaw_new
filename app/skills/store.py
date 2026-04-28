@@ -690,15 +690,21 @@ class SkillStore:
         If installed, uninstall first. Cannot be undone — caller MUST
         confirm with the user. Returns True on success.
         """
-        entry = self.get_entry(entry_id)
+        with self._lock:
+            entry = self._entries.get(entry_id)
         if entry is None:
             return False
-        # Uninstall first if currently installed
-        if entry.installed and self._registry is not None:
-            try:
-                self._registry.uninstall(entry.installed_id)
-            except Exception:
-                pass
+        # Uninstall first if currently installed.
+        # SkillCatalogEntry attribute is ``installed`` (bool) and
+        # ``installed_id`` (str). Fall back via getattr for defensive
+        # tolerance of older pickled entries that may lack the field.
+        if getattr(entry, "installed", False) and self._registry is not None:
+            iid = getattr(entry, "installed_id", "") or ""
+            if iid:
+                try:
+                    self._registry.uninstall(iid)
+                except Exception as _ue:
+                    logger.warning("uninstall before delete failed: %s", _ue)
         # Remove the catalog directory
         try:
             from pathlib import Path
@@ -712,12 +718,20 @@ class SkillStore:
                     for r in self.catalog_dirs
                 )
                 if not ok_root:
+                    logger.warning("delete refused: %s outside catalog roots", p)
                     return False
                 shutil.rmtree(p)
-            # Drop from in-memory list
-            self._entries = [e for e in self._entries if e.id != entry_id]
+            # Drop from in-memory dict.
+            # BUG FIX: ``_entries`` is a dict[str, SkillCatalogEntry]
+            # (see line 435). Old code did `[e for e in self._entries
+            # if e.id != entry_id]` which iterates KEYS (strings) and
+            # called `.id` on them → AttributeError → caught silently
+            # → returned False → UI showed "删除失败" with no clue why.
+            with self._lock:
+                self._entries.pop(entry_id, None)
             return True
-        except Exception:
+        except Exception as e:
+            logger.warning("delete_catalog_entry %s failed: %s", entry_id, e)
             return False
 
     # ── Grant/revoke (with independent-agent pointer file) ──

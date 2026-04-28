@@ -103,6 +103,32 @@ def _get_agent_or_404(hub, agent_id: str):
     return agent
 
 
+def _local_or_proxy_post(hub, agent_id: str, sub_path: str, body: dict):
+    """Multi-node helper for POST endpoints.
+
+    Returns:
+      • (agent, None)  → agent lives on THIS node, caller proceeds locally
+      • (None, dict)   → agent lives on a remote node, caller should
+                          return the dict as the response
+    Raises 404 if agent doesn't exist anywhere.
+
+    ``sub_path`` is the path AFTER ``/api/portal/agent/{agent_id}``,
+    e.g. ``/recall``. Mirror what the proxy method expects.
+    """
+    agent = hub.get_agent(agent_id) if hasattr(hub, "get_agent") else None
+    if agent:
+        return agent, None
+    # Try remote proxy
+    if hasattr(hub, "proxy_remote_agent_post"):
+        try:
+            data = hub.proxy_remote_agent_post(agent_id, sub_path, body)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(502, f"remote proxy failed: {e}")
+        if data is not None:
+            return None, data
+    raise HTTPException(404, f"Agent '{agent_id}' not found (local or remote)")
+
+
 # ---------------------------------------------------------------------------
 # Agent listing
 # ---------------------------------------------------------------------------
@@ -1160,6 +1186,846 @@ async def manage_enhancement(
         raise HTTPException(400, f"Unknown action: {action}")
 
 
+@router.post("/agent/{agent_id}/route-intent")
+async def chat_route_intent(
+    agent_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Front-door intent classification.
+
+    Returns ``{intent, confidence, params}`` describing what the user
+    likely wants. Frontend uses this BEFORE posting to /chat — when
+    confidence is high enough (≥0.85) and intent is non-chat, it can
+    auto-dispatch to /recall, /remember, /learn, /promote-task instead
+    and bypass the 38K-token chat loop.
+
+    The classifier itself uses ~500 tokens (vs 38K), so the routing
+    pays off when ≥30% of messages get diverted.
+
+    Multi-node aware: if the agent lives on a remote node, transparently
+    proxies the call there.
+    """
+    agent, proxied = _local_or_proxy_post(hub, agent_id, "/route-intent", body)
+    if proxied is not None:
+        return proxied
+    msg = (body.get("message") or "").strip()
+    if not msg:
+        raise HTTPException(400, "message required")
+
+    # Reuse the same lightweight LLM closure pattern as L3 extractor.
+    try:
+        llm_call = agent._make_summary_llm_call() \
+            if hasattr(agent, "_make_summary_llm_call") else None
+    except Exception:
+        llm_call = None
+    if not llm_call:
+        # Agent has no LLM configured — degrade gracefully to chat.
+        return {"intent": "chat", "confidence": 0.0, "params": {},
+                "reason": "no_llm_configured"}
+
+    from ...intent_router import classify_intent, DEFAULT_CONFIDENCE_FLOOR
+    lang = "auto"
+    try:
+        lang = getattr(agent.profile, "language", "auto") or "auto"
+    except Exception:
+        pass
+    result = classify_intent(msg, llm_call, lang=lang)
+    result["threshold"] = DEFAULT_CONFIDENCE_FLOOR
+    return result
+
+
+@router.post("/agent/{agent_id}/promote-task")
+async def chat_promote_task(
+    agent_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Chat-driven `/task <title>` — explicit tracked-task creation.
+
+    Equivalent of clicking the dormant "🚀 升级为状态机任务" badge but
+    keyboard-driven. Creates a V2 task record on the agent (using the
+    same V2 store every agent now has by default), bypassing the
+    complexity classifier so the user gets a tracked task even for
+    simple-looking requests where they explicitly want one.
+
+    Multi-node aware: proxies if remote.
+    """
+    agent, proxied = _local_or_proxy_post(hub, agent_id, "/promote-task", body)
+    if proxied is not None:
+        return proxied
+    title = (body.get("title") or "").strip()
+    if not title:
+        raise HTTPException(400, "title required")
+
+    task_id = ""
+    try:
+        # Resolve V2 shadow (lazy-promotes from V1 if needed) — submit_task
+        # lives on AgentV2, not the V1 Agent. Mirrors v2.py:_get_agent_or_404.
+        from ...v2.core.task_store import get_store as _v2_store
+        from ...v2.agent.agent_v2 import AgentV2 as _AV2, Capabilities as _Caps
+        from ...v2.agent.llm_slots import slots_from_v1_agent
+        store = _v2_store()
+        v2_agent = store.get_agent(agent.id)
+        if v2_agent is None:
+            try:
+                _slots = slots_from_v1_agent(agent).to_dict()
+            except Exception:
+                _slots = {}
+            v2_agent = _AV2.create(
+                id=agent.id, name=agent.name, role=agent.role,
+                v1_agent_id=agent.id,
+                capabilities=_Caps(
+                    skills=list(getattr(agent, "granted_skills", []) or []),
+                    mcps=[], tools=[],
+                    llm_tier=str(getattr(agent.profile, "llm_tier", "")
+                                 or "default"),
+                    denied_tools=[], llm_slots=_slots,
+                ),
+                task_template_ids=[],
+                working_directory=getattr(agent, "working_dir", "") or "",
+            )
+            store.save_agent(v2_agent)
+        task = v2_agent.submit_task(
+            intent=title,
+            template_id="",
+            parent_task_id="",
+            attachments=None,
+            priority=5,
+            timeout_s=1800,
+            store=store,
+        )
+        task_id = task.id
+    except Exception as e:
+        raise HTTPException(500, f"task create failed: {e}")
+
+    reply_md = (
+        f"🚀 **已创建跟踪任务** `{task_id[:12]}`\n\n"
+        f"> {title}\n\n"
+        f"_状态机任务已派发,可在 Task Queue 看到进度。_"
+    )
+
+    try:
+        agent.messages.append({
+            "role": "user",
+            "content": f"/task {title}",
+            "_source": "user:slash_command",
+        })
+        agent.messages.append({
+            "role": "assistant",
+            "content": reply_md,
+            "_source": "chat_promote_task",
+        })
+        if hasattr(agent, "_log"):
+            agent._log("message", {"role": "assistant", "content": reply_md,
+                                   "source": "chat_promote_task"})
+        try:
+            hub._save_agents()
+        except Exception:
+            pass
+    except Exception as _pe:
+        logger.debug("/task persist failed: %s", _pe)
+
+    return {
+        "ok": True,
+        "reply": reply_md,
+        "task_id": task_id,
+    }
+
+
+@router.post("/agent/{src_agent_id}/handoff")
+async def chat_handoff(
+    src_agent_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Chat-driven `/handoff <target> <msg>` — pass current question to
+    another agent with summarized context.
+
+    Resolution rules for ``target``:
+      1. exact id match (uuid prefix ok)
+      2. exact role-name match ("coder-小新")
+      3. name substring match (case-insensitive)
+      4. role substring match (returns first idle agent of that role)
+
+    Builds a context block from the source agent's last few user/asst
+    messages so the target doesn't start cold. Posts the synthesized
+    message to the target's messages list + emits the standard
+    ``message`` event so the target's chat UI lights up.
+
+    Multi-node aware: src is fetched local-or-proxied. Target lookup
+    walks BOTH local + remote agent registries; if target is remote
+    the post is forwarded via proxy_remote_agent_post.
+    """
+    src_agent, proxied = _local_or_proxy_post(
+        hub, src_agent_id, "/handoff", body)
+    if proxied is not None:
+        return proxied
+    target_query = (body.get("target") or "").strip()
+    user_msg = (body.get("message") or "").strip()
+    include_context = body.get("include_context", True)
+    if not target_query:
+        raise HTTPException(400, "target required")
+    if not user_msg:
+        raise HTTPException(400, "message required")
+
+    # Resolve target
+    all_agents = list((hub.agents or {}).values()) if hasattr(hub, "agents") else []
+    target = None
+    tq_low = target_query.lower()
+    # 1. id prefix
+    for a in all_agents:
+        if a.id == target_query or a.id.startswith(target_query):
+            target = a
+            break
+    # 2. exact role-name
+    if target is None:
+        for a in all_agents:
+            label = f"{(a.role or '').lower()}-{(a.name or '').lower()}"
+            if label == tq_low:
+                target = a
+                break
+    # 3. name substring
+    if target is None:
+        for a in all_agents:
+            if tq_low in (a.name or "").lower():
+                target = a
+                break
+    # 4. role substring (idle preferred)
+    if target is None:
+        candidates = [a for a in all_agents if tq_low in (a.role or "").lower()]
+        if candidates:
+            from ...agent_types import AgentStatus
+            idles = [a for a in candidates
+                     if getattr(a, "status", None) == AgentStatus.IDLE]
+            target = (idles[0] if idles else candidates[0])
+
+    # ── Multi-node fallback: target not local — walk remote node agent
+    # rosters and proxy the handoff there. Each remote node exposes
+    # /api/portal/agent/{id}/handoff symmetrically; we POST to it with
+    # the same body so the remote node mints the handoff for its agent.
+    if target is None and hasattr(hub, "remote_nodes"):
+        for node in (hub.remote_nodes or {}).values():
+            for ra in (getattr(node, "agents", None) or []):
+                rid = ra.get("id", "")
+                rname = (ra.get("name") or "").lower()
+                rrole = (ra.get("role") or "").lower()
+                rlabel = f"{rrole}-{rname}"
+                if (rid == target_query or rid.startswith(target_query)
+                        or rlabel == tq_low or tq_low in rname
+                        or tq_low in rrole):
+                    # Forward the handoff to the remote node — pass src
+                    # context already in body.message so remote can deliver
+                    # to its agent without needing src's full state.
+                    try:
+                        proxied = hub.proxy_remote_agent_post(
+                            rid, "/handoff", body)
+                    except Exception as e:  # noqa: BLE001
+                        raise HTTPException(502, f"remote handoff failed: {e}")
+                    if proxied is not None:
+                        return proxied
+                    raise HTTPException(502, "remote node returned no response")
+
+    if target is None:
+        raise HTTPException(404, f"no agent matches {target_query!r} (local or remote)")
+    if target.id == src_agent.id:
+        raise HTTPException(400, "cannot hand off to self")
+
+    # Build context summary from src's recent user/assistant messages
+    ctx_lines: list[str] = []
+    if include_context:
+        recent = list(src_agent.messages or [])[-12:]
+        kept = []
+        for m in recent:
+            if not isinstance(m, dict):
+                continue
+            role = m.get("role", "")
+            if role not in ("user", "assistant"):
+                continue
+            content = m.get("content", "")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            kept.append((role, content[:300].replace("\n", " ")))
+        kept = kept[-6:]  # last 6 turns max
+        if kept:
+            ctx_lines.append("[最近上下文]")
+            for role, c in kept:
+                tag = "用户" if role == "user" else "我"
+                ctx_lines.append(f"  - {tag}: {c}{'…' if len(c) >= 300 else ''}")
+
+    src_label = f"{src_agent.role or '?'}-{src_agent.name or '?'}"
+    handoff_text = (
+        f"[来自 {src_label} 的协助请求]\n\n"
+        f"原始问题: {user_msg}"
+    )
+    if ctx_lines:
+        handoff_text += "\n\n" + "\n".join(ctx_lines)
+
+    # Append to target's messages so its chat UI shows the handoff
+    try:
+        target.messages.append({
+            "role": "user",
+            "content": handoff_text,
+            "_source": f"handoff_from:{src_agent.id}",
+        })
+        if hasattr(target, "_log"):
+            target._log("message", {
+                "role": "user", "content": handoff_text,
+                "source": f"handoff_from:{src_agent.id}",
+            })
+    except Exception as _pe:
+        logger.warning("handoff: append to target.messages failed: %s", _pe)
+
+    # Confirmation bubble for source agent
+    target_label = f"{target.role or '?'}-{target.name or '?'}"
+    reply_md = (
+        f"➡️ **已转交给 {target_label}**\n\n"
+        f"原始问题: {user_msg}\n\n"
+        f"_{'附带 ' + str(len(ctx_lines)) + ' 行上下文摘要' if ctx_lines else '未附上下文'} · "
+        f"对方收到后会在自己的 chat 里继续。_"
+    )
+    try:
+        src_agent.messages.append({
+            "role": "user",
+            "content": f"/handoff {target_query} {user_msg}",
+            "_source": "user:slash_command",
+        })
+        src_agent.messages.append({
+            "role": "assistant",
+            "content": reply_md,
+            "_source": "chat_handoff",
+        })
+        if hasattr(src_agent, "_log"):
+            src_agent._log("message", {
+                "role": "assistant", "content": reply_md,
+                "source": "chat_handoff",
+            })
+        try:
+            hub._save_agents()
+        except Exception:
+            pass
+    except Exception as _pe:
+        logger.debug("/handoff persist failed: %s", _pe)
+
+    return {
+        "ok": True,
+        "reply": reply_md,
+        "target_id": target.id,
+        "target_label": target_label,
+        "context_lines": len(ctx_lines),
+    }
+
+
+@router.post("/agent/{agent_id}/recall")
+async def chat_recall(
+    agent_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Chat-driven `/recall <query>` — search L3 + wiki without LLM.
+
+    Bypasses the chat loop entirely. Pulls top-K from:
+      • L3 semantic facts (vector if ChromaDB available, else FTS)
+      • Wiki layer (role-scoped + global, agent-authored knowledge)
+
+    Returns a markdown reply that the frontend renders as a normal
+    agent chat bubble — also persisted to agent.messages so the
+    history survives reload. Multi-node aware: proxies if remote.
+    """
+    agent, proxied = _local_or_proxy_post(hub, agent_id, "/recall", body)
+    if proxied is not None:
+        return proxied
+    query = (body.get("query") or "").strip()
+    if not query:
+        raise HTTPException(400, "query required")
+
+    # ── filtering policy (P0 fix for "/recall returns noise") ────────
+    # L3 facts span knowledge (preference/rule/intent/contact/reflection)
+    # AND activity logs (outcome/task_log/reasoning/action_done/general).
+    # Activity-log entries are noise for domain Q&A — they leak step
+    # results from old tasks. Restrict /recall to knowledge categories.
+    KNOWLEDGE_CATEGORIES = {
+        "contact", "preference", "rule", "intent", "reflection",
+    }
+    # Min cosine similarity to surface a fact. Below this they're false
+    # neighbours from a sparse embedding space.
+    MIN_FACT_SIM = 0.30
+    PER_SECTION_CAP = 5
+
+    parts: list[str] = [f"🔍 **回忆: {query}**\n"]
+    fact_count = 0
+    wiki_count = 0
+
+    # ── Wiki / 经验 first (domain-knowledge most useful for Q&A) ────
+    try:
+        from ...knowledge.wiki_store import get_wiki_store
+        wiki = get_wiki_store()
+        hits_role = wiki.search(query, scope=f"role:{agent.role}", limit=PER_SECTION_CAP)
+        hits_global = wiki.search(query, scope="global", limit=PER_SECTION_CAP)
+        seen: set[tuple[str, str]] = set()
+        all_hits = []
+        for p in hits_role + hits_global:
+            key = (p.scope, p.slug)
+            if key in seen:
+                continue
+            seen.add(key)
+            all_hits.append(p)
+        all_hits = all_hits[:PER_SECTION_CAP]
+        if all_hits:
+            parts.append("## 📚 经验 / Wiki 知识")
+            for p in all_hits:
+                wiki_count += 1
+                preview = (p.body or "").replace("\n", " ")[:180]
+                parts.append(
+                    f"- **{p.title}** `[{p.kind}/{p.scope}]` "
+                    f"(✓{p.success_count}/✗{p.fail_count})\n  "
+                    f"{preview}{'…' if len(p.body or '') > 180 else ''}"
+                )
+            parts.append("")
+    except Exception as _we:
+        logger.debug("recall wiki fetch failed: %s", _we)
+
+    # ── L3 个人记忆 (only knowledge categories, sim≥0.3) ─────────────
+    try:
+        from ...core.memory import get_memory_manager
+        mm = get_memory_manager()
+        if mm:
+            try:
+                scored = mm.search_facts_vector_scored(
+                    agent.id, query, top_k=15,
+                )
+            except Exception:
+                scored = []
+            # Filter: knowledge category + similarity threshold
+            kept: list[tuple] = []
+            for f, sim in scored:
+                cat = (f.category or "general").lower()
+                # Apply legacy mapping so old rows don't slip through
+                cat = mm._LEGACY_CATEGORY_MAP.get(cat, cat)
+                if cat not in KNOWLEDGE_CATEGORIES:
+                    continue
+                if sim < MIN_FACT_SIM:
+                    continue
+                kept.append((f, sim, cat))
+                if len(kept) >= PER_SECTION_CAP:
+                    break
+            if kept:
+                parts.append("## 🧠 个人记忆 (L3)")
+                for f, sim, cat in kept:
+                    label = mm._CATEGORY_LABELS.get(cat, f"[{cat}]")
+                    sim_pct = int(sim * 100)
+                    conf_pct = int((getattr(f, "confidence", 0) or 0) * 100)
+                    parts.append(
+                        f"- {label} {f.content[:200]}"
+                        f"{'…' if len(f.content) > 200 else ''} "
+                        f"_(相关度 {sim_pct}% · 置信度 {conf_pct}%)_"
+                    )
+                    fact_count += 1
+                parts.append("")
+    except Exception as _me:
+        logger.debug("recall L3 fetch failed: %s", _me)
+
+    if fact_count == 0 and wiki_count == 0:
+        parts.append(
+            "_未找到相关知识或个人记忆 (L3 仅查 偏好/规则/意图/联系方式/反思 类别且相关度 ≥ 30%)。"
+            "想存知识用 `/learn <主题>`,想存个人偏好用 `/remember <事实>`。_"
+        )
+    else:
+        parts.append(
+            f"\n_共 {wiki_count} 条经验 + {fact_count} 条个人记忆 — "
+            f"无 LLM 调用,直接从存储层检索。_"
+        )
+
+    reply_md = "\n".join(parts)
+
+    # Persist to chat history so the bubbles survive reload
+    try:
+        agent.messages.append({
+            "role": "user",
+            "content": f"/recall {query}",
+            "_source": "user:slash_command",
+        })
+        agent.messages.append({
+            "role": "assistant",
+            "content": reply_md,
+            "_source": "chat_recall",
+        })
+        if hasattr(agent, "_log"):
+            agent._log("message", {
+                "role": "assistant", "content": reply_md,
+                "source": "chat_recall",
+            })
+        try:
+            hub._save_agents()
+        except Exception:
+            pass
+    except Exception as _pe:
+        logger.debug("/recall persist failed: %s", _pe)
+
+    return {
+        "ok": True,
+        "reply": reply_md,
+        "fact_count": fact_count,
+        "wiki_count": wiki_count,
+    }
+
+
+@router.post("/agent/{agent_id}/remember")
+async def chat_remember(
+    agent_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Chat-driven `/remember <fact>` — explicit L3 fact save.
+
+    Bypasses the LLM-driven extraction (which uses confidence
+    heuristics). User-explicit facts get confidence=1.0 and category
+    auto-classified by simple keywords (preference/rule/intent).
+    Default category: preference (the catch-all for user-specified
+    durable knowledge). Multi-node aware: proxies if remote.
+    """
+    agent, proxied = _local_or_proxy_post(hub, agent_id, "/remember", body)
+    if proxied is not None:
+        return proxied
+    fact_text = (body.get("fact") or "").strip()
+    if not fact_text:
+        raise HTTPException(400, "fact required")
+    if len(fact_text) < 5:
+        raise HTTPException(400, "fact too short (need >= 5 chars)")
+
+    # Lightweight category auto-classification. Caller may override
+    # via body.category; otherwise we look for trigger words.
+    explicit_cat = (body.get("category") or "").strip().lower()
+    valid_cats = {"preference", "rule", "intent", "reasoning",
+                  "outcome", "reflection"}
+    if explicit_cat in valid_cats:
+        category = explicit_cat
+    else:
+        low = fact_text.lower()
+        if any(k in low for k in ["规则", "必须", "禁止", "不要", "always",
+                                   "never", "must", "do not"]):
+            category = "rule"
+        elif any(k in low for k in ["目标", "想要", "希望", "want", "need",
+                                     "goal", "objective"]):
+            category = "intent"
+        else:
+            category = "preference"
+
+    try:
+        from ...core.memory import get_memory_manager, SemanticFact
+        mm = get_memory_manager()
+        if mm is None:
+            raise HTTPException(500, "memory manager unavailable")
+        # Use upsert_fact so re-/remember of the same content updates
+        # the existing row instead of creating duplicates.
+        fact = SemanticFact(
+            agent_id=agent.id,
+            category=category,
+            content=fact_text,
+            source="user:slash_command",
+            confidence=1.0,
+        )
+        outcome = mm.upsert_fact(fact, threshold=0.85,
+                                 prefer_category_match=True)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"save failed: {e}")
+
+    action = outcome.get("action", "inserted")
+    matched_id = outcome.get("matched_id", "")
+    similarity = outcome.get("similarity", 0)
+
+    if action == "updated":
+        reply_md = (
+            f"✓ **已更新现有记忆** `[{category.upper()}]`\n\n"
+            f"> {fact_text}\n\n"
+            f"_与已有 fact `{matched_id[:8]}` 高度相似 "
+            f"(sim={similarity:.2f}) — 已合并。_"
+        )
+    elif action == "unchanged":
+        reply_md = (
+            f"✓ **记忆已存在,无变化** `[{category.upper()}]`\n\n"
+            f"> {fact_text}"
+        )
+    else:
+        reply_md = (
+            f"✓ **已存入 L3 记忆** `[{category.upper()}]` (置信度 100%)\n\n"
+            f"> {fact_text}\n\n"
+            f"_后续 chat 中,这条记忆会自动注入 system prompt "
+            f"({'always-on' if category in ('preference','rule') else 'top-K 检索'})。_"
+        )
+
+    # Persist to chat history
+    try:
+        agent.messages.append({
+            "role": "user",
+            "content": f"/remember {fact_text}",
+            "_source": "user:slash_command",
+        })
+        agent.messages.append({
+            "role": "assistant",
+            "content": reply_md,
+            "_source": "chat_remember",
+        })
+        if hasattr(agent, "_log"):
+            agent._log("message", {
+                "role": "assistant", "content": reply_md,
+                "source": "chat_remember",
+            })
+        try:
+            hub._save_agents()
+        except Exception:
+            pass
+    except Exception as _pe:
+        logger.debug("/remember persist failed: %s", _pe)
+
+    return {
+        "ok": True,
+        "reply": reply_md,
+        "fact_id": fact.id,
+        "category": category,
+        "action": action,
+    }
+
+
+@router.post("/agent/{agent_id}/learn")
+async def chat_driven_learn(
+    agent_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Chat-driven `/learn <topic>` command.
+
+    Bypasses the regular chat loop (which sends a 26K-char system
+    prompt + 8K tools schema). Routes through the lightweight learning
+    path:
+      - Per-role learner persona (~600 chars, no tools, no L3 facts,
+        no workspace context) — set by trigger_active_learning
+      - Output parsed into ActiveLearningResult
+      - Auto-ingested into the wiki layer as kind=experience so future
+        chats can reference it via knowledge_lookup
+      - Result formatted as a markdown reply, appended to agent.messages
+        so the chat UI shows it as a normal turn
+
+    Token saving vs chat loop: ~38K → ~3K (≈92% off).
+
+    Body: ``{"topic": str, "knowledge_gap"?: str}``
+    Returns: ``{ok, reply, wiki_slug, exp_count, learning_id}``
+
+    Multi-node aware: proxies if remote.
+    """
+    agent, proxied = _local_or_proxy_post(hub, agent_id, "/learn", body)
+    if proxied is not None:
+        return proxied
+    topic = (body.get("topic") or "").strip()
+    if not topic:
+        raise HTTPException(400, "topic required")
+    knowledge_gap = (body.get("knowledge_gap") or "").strip()
+
+    # 1) Run the lightweight learning path (per-role persona, no full
+    #    chat context). Reuses trigger_active_learning so the existing
+    #    persistence chain (experience library + L3 sync + growth path)
+    #    fires automatically.
+    try:
+        result = agent.trigger_active_learning(
+            learning_goal=topic, knowledge_gap=knowledge_gap)
+    except Exception as e:
+        raise HTTPException(500, f"learning failed: {e}")
+
+    if not isinstance(result, dict):
+        result = {"error": str(result)}
+    if result.get("error"):
+        raise HTTPException(500, f"learning error: {result.get('error')}")
+    if result.get("status") == "rejected":
+        raise HTTPException(400, result.get("error") or "learning rejected")
+    # Queued case: agent had pending higher-priority work
+    if result.get("status") == "queued":
+        return {
+            "ok": True,
+            "reply": (
+                f"📚 学习已排队\n\n"
+                f"目标: {topic}\n\n"
+                f"agent 当前有未完成的任务,学习计划已加入队列,任务完成后自动执行。"
+            ),
+            "wiki_slug": "",
+            "exp_count": 0,
+            "queued": True,
+        }
+
+    # 2) Build a markdown wiki body from the structured learning result.
+    #    This is what other agents will read when they call
+    #    knowledge_lookup(query="<this topic>") later.
+    findings = (result.get("key_findings") or "").strip()
+    scenes = (result.get("applicable_scenes") or "").strip()
+    src_type = (result.get("source_type") or "").strip()
+    src_detail = (result.get("source_detail") or "").strip()
+    new_exps = result.get("new_experiences") or []
+    exp_count = len(new_exps)
+
+    body_parts: list[str] = []
+    body_parts.append(f"# {topic}\n")
+    if findings:
+        body_parts.append(f"## 关键发现\n{findings}\n")
+    if scenes:
+        body_parts.append(f"## 适用场景\n{scenes}\n")
+    if src_type or src_detail:
+        body_parts.append(f"## 来源\n{src_type} · {src_detail}\n".strip())
+    if new_exps:
+        body_parts.append("## 经验细则")
+        for i, exp in enumerate(new_exps, 1):
+            scene = exp.get("scene", "")
+            core = exp.get("core_knowledge", "")
+            rules = exp.get("action_rules") or []
+            taboos = exp.get("taboo_rules") or []
+            body_parts.append(f"\n### 经验 {i} — {scene}")
+            if core:
+                body_parts.append(core)
+            if rules:
+                body_parts.append("\n**行动规则**:")
+                body_parts.extend(f"- {r}" for r in rules)
+            if taboos:
+                body_parts.append("\n**禁忌**:")
+                body_parts.extend(f"- ⛔ {t}" for t in taboos)
+    wiki_body = "\n".join(body_parts).strip()
+
+    # 3) Auto-ingest to wiki layer (scope=role:<role>). Reuses the
+    #    existing tool implementation so leak guardrails + dedup all
+    #    apply uniformly.
+    wiki_slug = ""
+    wiki_result = ""
+    try:
+        from ...tools_split.knowledge import _tool_wiki_ingest
+        wiki_result = _tool_wiki_ingest(
+            kind="experience",
+            title=topic,
+            body=wiki_body,
+            scope=f"role:{agent.role}",
+            tags=["chat-driven-learn", agent.role],
+            sources=[src_detail] if src_detail else [],
+            _caller_agent_id=agent.id,
+        )
+        # Tool returns a string like "Saved wiki/experience/<slug>".
+        # Best-effort extract slug for the response.
+        if isinstance(wiki_result, str) and "experience/" in wiki_result:
+            try:
+                _tail = wiki_result.split("experience/", 1)[1]
+                wiki_slug = _tail.split()[0].strip()
+            except Exception:
+                wiki_slug = ""
+    except Exception as _we:
+        logger.warning("/learn wiki_ingest failed for %s: %s",
+                       agent.id[:8], _we)
+
+    # 4) Build user-facing reply (markdown bubble shown in chat).
+    reply_lines = [f"📚 **学习完成: {topic}**\n"]
+    if findings:
+        # Show first ~400 chars of findings for the chat bubble
+        snippet = findings if len(findings) <= 400 else findings[:398] + "…"
+        reply_lines.append(f"**关键发现**\n{snippet}\n")
+    reply_lines.append(
+        f"**产出**: {exp_count} 条新经验 · 已写入 wiki 层 "
+        f"(scope=role:{agent.role}{', slug=' + wiki_slug if wiki_slug else ''}) "
+        f"· 已同步 L3 长期记忆"
+    )
+    if wiki_slug:
+        reply_lines.append(
+            f"\n后续在 chat 里说「{topic}」相关问题,我会从 wiki 直接读 — "
+            f"不用再 web_search。"
+        )
+    reply_md = "\n".join(reply_lines)
+
+    # 5) Persist as a regular chat turn (so chat history shows it).
+    try:
+        import time as _time
+        agent.messages.append({
+            "role": "user",
+            "content": f"/learn {topic}" + (
+                f" (gap: {knowledge_gap})" if knowledge_gap else ""),
+            "_source": "user:slash_command",
+        })
+        agent.messages.append({
+            "role": "assistant",
+            "content": reply_md,
+            "_source": "chat_driven_learn",
+        })
+        # Also log to events so dashboard Activity Feed picks it up.
+        if hasattr(agent, "_log"):
+            agent._log("message", {
+                "role": "assistant", "content": reply_md,
+                "source": "chat_driven_learn",
+            })
+        try:
+            hub._save_agents()
+        except Exception:
+            pass
+    except Exception as _pe:
+        logger.debug("chat_driven_learn persist failed: %s", _pe)
+
+    return {
+        "ok": True,
+        "reply": reply_md,
+        "wiki_slug": wiki_slug,
+        "exp_count": exp_count,
+        "learning_id": result.get("id") or "",
+    }
+
+
+@router.get("/agent/{agent_id}/learning-history")
+async def get_learning_history(
+    agent_id: str,
+    limit: int = 20,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Recent active-learning entries for this agent.
+
+    Returns the rich ``ActiveLearningResult`` dicts produced by
+    ``trigger_active_learning`` — what the LLM said it learned, where
+    from, and what experiences/L3 facts were minted. The dashboard
+    Activity Feed uses this to enrich growth-task entries (so users
+    can see WHAT was learned, not just "completed self-learning").
+
+    Each entry shape:
+      {id, agent_id, role, trigger, learning_goal, source_type,
+       source_detail, key_findings, applicable_scenes,
+       new_experiences:[{scene, core_knowledge, ...}], created_at}
+
+    Multi-node aware: if the agent is on a remote node, fetches via
+    proxy_remote_agent_get (preserves the limit query param).
+    """
+    agent = hub.get_agent(agent_id) if hasattr(hub, "get_agent") else None
+    if agent is None:
+        # Try remote
+        if hasattr(hub, "proxy_remote_agent_get"):
+            try:
+                data = hub.proxy_remote_agent_get(
+                    agent_id, f"/learning-history?limit={int(limit)}")
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(502, f"remote proxy failed: {e}")
+            if data is not None:
+                return data
+        raise HTTPException(404, f"Agent '{agent_id}' not found (local or remote)")
+    si = getattr(agent, "self_improvement", None)
+    if si is None:
+        return {"learning_history": [], "agent_id": agent.id}
+    history = list(getattr(si, "learning_history", None) or [])
+    if limit > 0:
+        history = history[-int(limit):]
+    return {
+        "learning_history": history,
+        "agent_id": agent.id,
+        "agent_role": agent.role,
+        "total_learnings": len(getattr(si, "learning_history", None) or []),
+    }
+
+
 @router.get("/agent/{agent_id}/growth-stats")
 async def get_growth_stats(
     agent_id: str,
@@ -1414,11 +2280,12 @@ async def create_agent(
             logger.warning("persona apply failed: %s", e)
 
     # ── V2 state-machine shadow registration ──────────────────────
-    # By default register every new V1 agent in the V2 store so it
-    # gets the 6-phase state-machine ("状态机") badge / capabilities
-    # without an extra step. Operator can opt out with
-    # ``enable_state_machine: false`` in the create body.
-    if agent and body.get("enable_state_machine", True):
+    # ALWAYS register — TudouClaw committed to V2-by-default in 2026-04
+    # to retire the "普通 vs 状态机 agent" UX dichotomy. The
+    # ``enable_state_machine`` body field is now ignored (kept for
+    # request-shape backward compat only); every new V1 agent gets a
+    # V2 shadow unconditionally.
+    if agent:
         try:
             from ...v2.agent.agent_v2 import AgentV2, Capabilities
             from ...v2.agent.llm_slots import slots_from_v1_agent
@@ -1583,6 +2450,90 @@ async def compact_memory(
     """Compact agent memory."""
     ok = hub.compact_agent_memory(agent_id)
     return {"ok": ok}
+
+
+# ---------------------------------------------------------------------------
+# L3 long-term memory — delete operations (single / bulk / clear-all)
+# ---------------------------------------------------------------------------
+# Backed by app.core.memory.MemoryManager.delete_fact / clear_facts. Each
+# delete also removes the matching ChromaDB vector entry so search results
+# don't return ghosts. Wrapped in 404 on missing agent.
+
+@router.delete("/agent/{agent_id}/memory/fact/{fact_id}")
+async def delete_memory_fact(
+    agent_id: str,
+    fact_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Delete a single L3 semantic fact by id."""
+    _get_agent_or_404(hub, agent_id)
+    from ...core.memory import get_memory_manager
+    mm = get_memory_manager()
+    if mm is None:
+        raise HTTPException(500, "memory manager unavailable")
+    try:
+        mm.delete_fact(fact_id)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"delete failed: {e}")
+    return {"ok": True, "deleted": 1}
+
+
+@router.post("/agent/{agent_id}/memory/bulk-delete")
+async def bulk_delete_memory_facts(
+    agent_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Delete multiple L3 facts in one call. Body: ``{"ids": [...]}``."""
+    _get_agent_or_404(hub, agent_id)
+    ids = body.get("ids") or []
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(400, "body.ids must be a non-empty list")
+    from ...core.memory import get_memory_manager
+    mm = get_memory_manager()
+    if mm is None:
+        raise HTTPException(500, "memory manager unavailable")
+    deleted = 0
+    failed: list[str] = []
+    for fid in ids:
+        try:
+            mm.delete_fact(str(fid))
+            deleted += 1
+        except Exception as e:  # noqa: BLE001
+            failed.append(f"{fid}: {e}")
+    return {"ok": True, "deleted": deleted,
+            "requested": len(ids), "failed": failed}
+
+
+@router.post("/agent/{agent_id}/memory/clear-all")
+async def clear_all_memory_facts(
+    agent_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Wipe ALL L3 semantic facts for an agent. Irreversible — UI must
+    show a typed confirmation before calling. Also clears ChromaDB
+    vectors (loops delete_fact for proper vector cleanup)."""
+    _get_agent_or_404(hub, agent_id)
+    from ...core.memory import get_memory_manager
+    mm = get_memory_manager()
+    if mm is None:
+        raise HTTPException(500, "memory manager unavailable")
+    # Loop delete_fact so ChromaDB stays in sync (clear_facts only
+    # touches SQLite; vector store would orphan otherwise).
+    deleted = 0
+    try:
+        for fact in mm.get_recent_facts(agent_id, limit=10_000):
+            try:
+                mm.delete_fact(fact.id)
+                deleted += 1
+            except Exception:
+                continue
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"clear-all failed: {e}")
+    return {"ok": True, "deleted": deleted}
 
 
 # ---------------------------------------------------------------------------

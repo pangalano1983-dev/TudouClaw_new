@@ -142,12 +142,34 @@ def _log_payload_breakdown(safe_messages: list, tools: list | None,
                    or delta > _BREAKDOWN_ANOMALY_GROWTH)
         log_method = breakdown_logger.info if anomaly else breakdown_logger.debug
 
+        # When tools_chars is suspiciously large (≥ 25KB ≈ full registry),
+        # capture the caller stack so we can pinpoint which code path is
+        # passing the unfiltered tools list. Cheap — only runs on outliers.
+        tool_caller_hint = ""
+        if tools_chars >= 25000:
+            try:
+                import traceback
+                # Skip 2 frames: this function + its caller (provider handler)
+                stack = traceback.extract_stack(limit=10)[:-2]
+                # Find the topmost frame inside app/ but outside llm.py /
+                # provider modules — that's the bloat source.
+                for frame in reversed(stack):
+                    fn = frame.filename
+                    if "/app/" in fn and "/llm" not in fn and "/v2/bridges/llm" not in fn:
+                        rel = fn.split("/app/", 1)[-1]
+                        tool_caller_hint = (
+                            f" caller={rel}:{frame.lineno}({frame.name})"
+                        )
+                        break
+            except Exception:
+                pass
+
         # Compact one-liner — searchable in logs
         log_method(
             "TOKEN-BREAKDOWN agent=%s model=%s total=%d "
             "(sys=%d hist=%d tools=%d) "
             "hist_split=[user=%d/%d asst_text=%d/%d asst_tc=%d/%d(%dtcs) tool=%d/%d] "
-            "delta=%+d",
+            "delta=%+d%s",
             (agent_id or "-")[:8], model,
             total,
             sys_chars, history_chars, tools_chars,
@@ -155,7 +177,7 @@ def _log_payload_breakdown(safe_messages: list, tools: list | None,
             asst_text_chars, n_asst_text,
             asst_tool_call_chars, n_asst_tc, total_tcs,
             tool_result_chars, n_tool,
-            delta,
+            delta, tool_caller_hint,
         )
     except Exception as _e:
         # Never let diagnostics crash a real LLM call.
@@ -698,6 +720,41 @@ def _sanitize_messages_for_openai(messages: list[dict],
         merged.append({"role": "system", "content": "\n\n".join(system_parts)})
     merged.extend(non_system)
 
+    # --- Pass 1.5: drop orphan tool messages ---
+    # A `tool` message must follow an `assistant` with matching tool_calls.id.
+    # Context compaction / history trimming can drop the assistant while
+    # leaving the tool result, which makes DeepSeek/OpenAI/strict APIs 400
+    # with: "Messages with role 'tool' must be a response to a preceding
+    # message with 'tool_calls'". This is the LAST line of defense — every
+    # OpenAI-compat call goes through here.
+    seen_tc_ids: set[str] = set()
+    deorphan: list[dict] = []
+    orphan_count = 0
+    for m in merged:
+        r = m.get("role", "")
+        if r == "assistant":
+            for tc in (m.get("tool_calls") or []):
+                if isinstance(tc, dict):
+                    tcid = tc.get("id") or ""
+                    if tcid:
+                        seen_tc_ids.add(tcid)
+            deorphan.append(m)
+        elif r == "tool":
+            tcid = m.get("tool_call_id") or ""
+            if tcid and tcid in seen_tc_ids:
+                deorphan.append(m)
+            else:
+                orphan_count += 1
+        else:
+            deorphan.append(m)
+    if orphan_count:
+        logger.warning(
+            "[sanitize] dropped %d orphan tool message(s) — context "
+            "compaction likely lost the paired assistant.tool_calls",
+            orphan_count,
+        )
+    merged = deorphan
+
     # --- Pass 2: clean fields + normalize content + fix tool_calls ---
     sanitized = []
     for msg in merged:
@@ -760,7 +817,17 @@ def _sanitize_messages_for_openai(messages: list[dict],
                         "arguments": args,
                     }
                 fixed_tcs.append(ftc)
-            clean["tool_calls"] = fixed_tcs
+            if fixed_tcs:
+                clean["tool_calls"] = fixed_tcs
+            else:
+                # All entries were invalid → drop field entirely. DeepSeek
+                # rejects with: "tool_calls: empty array. Expected min 1"
+                clean.pop("tool_calls", None)
+        elif "tool_calls" in clean:
+            # Field present but empty list / None → strict APIs (DeepSeek
+            # / OpenAI) reject. Remove it entirely; semantically equivalent
+            # to "this assistant turn made no tool calls".
+            clean.pop("tool_calls", None)
 
         # ── Cross-provider invariants ───────────────────────────────────
         # Some providers (GLM/智谱、Qwen) reject assistant messages where
@@ -2427,6 +2494,56 @@ def _openai_chat(base_url: str, api_key: str,
     # changes.
     safe_messages = _sanitize_messages_for_openai(messages, target_url=url)
 
+    # ── HARD GUARD: drop orphan tool messages + strip empty tool_calls ──
+    # Inline because reload bugs / stale pyc could leave the
+    # _sanitize_messages_for_openai version stale. This is THE last
+    # chance before HTTP send. Catches:
+    #   1. Orphan tool message (no preceding assistant.tool_calls)
+    #   2. assistant with `tool_calls: []` (DeepSeek rejects: "empty array")
+    _seen_ids: set = set()
+    _kept: list = []
+    _drop_n = 0
+    _drop_ids: list = []
+    _empty_tcs_fixed = 0
+    for _m in safe_messages:
+        _r = _m.get("role")
+        if _r == "assistant":
+            for _tc in (_m.get("tool_calls") or []):
+                if isinstance(_tc, dict):
+                    _id = _tc.get("id") or ""
+                    if _id:
+                        _seen_ids.add(_id)
+            # Strip empty tool_calls field — strict APIs reject `[]`
+            if "tool_calls" in _m and not _m.get("tool_calls"):
+                _m = dict(_m)
+                _m.pop("tool_calls", None)
+                _empty_tcs_fixed += 1
+            _kept.append(_m)
+        elif _r == "tool":
+            _tid = _m.get("tool_call_id") or ""
+            if _tid and _tid in _seen_ids:
+                _kept.append(_m)
+            else:
+                _drop_n += 1
+                _drop_ids.append(_tid or "<empty>")
+        else:
+            _kept.append(_m)
+    if _drop_n:
+        logger.warning(
+            "[hard-guard] dropped %d orphan tool message(s) right before "
+            "HTTP send — ids=%s. This is the last-line defense; check why "
+            "earlier sanitizer didn't catch it.",
+            _drop_n, _drop_ids,
+        )
+    if _empty_tcs_fixed:
+        logger.warning(
+            "[hard-guard] stripped empty tool_calls=[] from %d assistant "
+            "message(s) before HTTP send (DeepSeek rejects empty array)",
+            _empty_tcs_fixed,
+        )
+    if _drop_n or _empty_tcs_fixed:
+        safe_messages = _kept
+
     valid_tools = _validate_tools(tools)
 
     # Log multimodal content status for debugging
@@ -2829,6 +2946,46 @@ def _openai_stream_events(base_url: str, api_key: str,
 
     messages = _apply_model_directives(messages, model)
     safe_messages = _sanitize_messages_for_openai(messages, target_url=url)
+
+    # ── HARD GUARD: orphan tool + empty tool_calls (final layer) ──
+    _seen_ids: set = set()
+    _kept: list = []
+    _drop_n = 0
+    _empty_tcs_fixed = 0
+    for _m in safe_messages:
+        _r = _m.get("role")
+        if _r == "assistant":
+            for _tc in (_m.get("tool_calls") or []):
+                if isinstance(_tc, dict):
+                    _id = _tc.get("id") or ""
+                    if _id:
+                        _seen_ids.add(_id)
+            if "tool_calls" in _m and not _m.get("tool_calls"):
+                _m = dict(_m)
+                _m.pop("tool_calls", None)
+                _empty_tcs_fixed += 1
+            _kept.append(_m)
+        elif _r == "tool":
+            _tid = _m.get("tool_call_id") or ""
+            if _tid and _tid in _seen_ids:
+                _kept.append(_m)
+            else:
+                _drop_n += 1
+        else:
+            _kept.append(_m)
+    if _drop_n:
+        logger.warning(
+            "[hard-guard] (stream) dropped %d orphan tool message(s)",
+            _drop_n,
+        )
+    if _empty_tcs_fixed:
+        logger.warning(
+            "[hard-guard] (stream) stripped empty tool_calls from %d "
+            "assistant msg(s)", _empty_tcs_fixed,
+        )
+    if _drop_n or _empty_tcs_fixed:
+        safe_messages = _kept
+
     valid_tools = _validate_tools(tools)
 
     payload: dict = {

@@ -1,0 +1,36 @@
+name: Tech Dark
+version: 1.0.0
+description: "AI 发布会风 — 近黑底 + 霓虹青 accent, 科技感强。适合 AI/ML 产品发布、技术大会、开发者 Keynote。"
+slide_size: [13.33, 7.5]
+
+colors:
+  primary:   "#06B6D4"   # 霓虹青 (主 accent)
+  accent:    "#F59E0B"   # 金黄 (次 accent, 强调)
+  text:      "#F3F4F6"   # 浅字
+  muted:     "#9CA3AF"   # 次字
+  bg:        "#0A0A0A"   # 近黑主底
+  bg_dark:   "#000000"   # 纯黑 (封面)
+  panel:     "#1F2937"   # 深炭灰 (panel)
+  border:    "#374151"
+
+fonts:
+  sans: "Arial"
+
+styles:
+  title:            {font: sans, size: 26,  bold: true,  color: primary}
+  subtitle:         {font: sans, size: 14,  bold: false, color: muted}
+  card_heading:     {font: sans, size: 14,  bold: true,  color: text}
+  card_body:        {font: sans, size: 11,  bold: false, color: muted}
+  section_num:      {font: sans, size: 160, bold: true,  color: primary}
+  section_head:     {font: sans, size: 34,  bold: true,  color: text}
+  section_sub:      {font: sans, size: 16,  bold: false, color: muted}
+  cover_title:      {font: sans, size: 44,  bold: true,  color: text}
+  cover_subtitle:   {font: sans, size: 20,  bold: false, color: primary}
+  cover_tag:        {font: sans, size: 12,  bold: false, color: accent}
+  timeline_num:     {font: sans, size: 20,  bold: true,  color: bg}
+  timeline_head:    {font: sans, size: 15,  bold: true,  color: text}
+  timeline_body:    {font: sans, size: 11,  bold: false, color: muted}
+  cta:              {font: sans, size: 20,  bold: true,  color: primary}
+  contact:          {font: sans, size: 12,  bold: false, color: muted}
+tags: ["tech", "ai", "darkmode", "developer", "futurist"]
+trigger_keywords: ["AI", "ML", "模型", "LLM", "开发者", "技术", "黑客松", "云", "底座", "平台", "智能", "大模型", "Claude", "GPT"]

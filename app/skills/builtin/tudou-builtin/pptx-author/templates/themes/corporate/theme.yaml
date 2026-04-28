@@ -1,0 +1,37 @@
+name: Corporate
+version: 1.0.0
+description: "专业商务风 — 深蓝 + 橙色 accent, 基于 16:9 画布。"
+slide_size: [13.33, 7.5]   # inches (EMU = *914400)
+
+colors:
+  primary:   "#1E3A5F"   # 深蓝 — 标题 / 分节数字
+  accent:    "#E86C3A"   # 橙 — accent bar / CTA
+  text:      "#1A1A1A"
+  muted:     "#6B7280"
+  bg:        "#FFFFFF"
+  bg_dark:   "#0F2745"   # 封面深底
+  panel:     "#F3F4F6"
+  border:    "#E5E7EB"
+
+fonts:
+  sans: "Arial"          # 兼容性最高,跨平台一致
+
+# 样式别名 → 字号/色/字重; 模板里引用 style: <name>
+styles:
+  title:            {font: sans, size: 24, bold: true,  color: primary}
+  subtitle:         {font: sans, size: 14, bold: false, color: muted}
+  card_heading:     {font: sans, size: 14, bold: true,  color: text}
+  card_body:        {font: sans, size: 11, bold: false, color: muted}
+  section_num:      {font: sans, size: 140, bold: true, color: accent}
+  section_head:     {font: sans, size: 32, bold: true,  color: primary}
+  section_sub:      {font: sans, size: 16, bold: false, color: muted}
+  cover_title:      {font: sans, size: 40, bold: true,  color: bg}
+  cover_subtitle:   {font: sans, size: 20, bold: false, color: bg}
+  cover_tag:        {font: sans, size: 12, bold: false, color: accent}
+  timeline_num:     {font: sans, size: 20, bold: true,  color: bg}
+  timeline_head:    {font: sans, size: 15, bold: true,  color: text}
+  timeline_body:    {font: sans, size: 11, bold: false, color: muted}
+  cta:              {font: sans, size: 18, bold: false, color: muted}
+  contact:          {font: sans, size: 12, bold: false, color: muted}
+tags: ["business", "consulting", "strategy", "formal"]
+trigger_keywords: ["咨询", "战略", "规划", "汇报", "管理", "年报", "商业", "路演", "经营分析", "企业", "集团"]

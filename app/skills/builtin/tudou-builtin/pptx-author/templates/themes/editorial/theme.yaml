@@ -1,0 +1,36 @@
+name: Editorial
+version: 1.0.0
+description: "杂志编辑风 — 米色底 + 深棕 accent + 衬线字体。适合长研究报告/学术/出版物。"
+slide_size: [13.33, 7.5]
+
+colors:
+  primary:   "#1F2937"   # 近黑深灰
+  accent:    "#92400E"   # 深棕褐
+  text:      "#111827"
+  muted:     "#57534E"   # 暖灰
+  bg:        "#FAF6EF"   # 米黄纸色
+  bg_dark:   "#2A2118"   # 深咖啡
+  panel:     "#F5EBE0"
+  border:    "#D6C3A5"
+
+fonts:
+  sans: "Georgia"        # 衬线, 编辑风; 标题用 serif 更有权威感
+
+styles:
+  title:            {font: sans, size: 26,  bold: true,  color: primary}
+  subtitle:         {font: sans, size: 14,  bold: false, color: muted}
+  card_heading:     {font: sans, size: 15,  bold: true,  color: primary}
+  card_body:        {font: sans, size: 11,  bold: false, color: muted}
+  section_num:      {font: sans, size: 150, bold: true,  color: accent}
+  section_head:     {font: sans, size: 34,  bold: true,  color: primary}
+  section_sub:      {font: sans, size: 16,  bold: false, color: muted}
+  cover_title:      {font: sans, size: 42,  bold: true,  color: bg}
+  cover_subtitle:   {font: sans, size: 20,  bold: false, color: panel}
+  cover_tag:        {font: sans, size: 12,  bold: false, color: accent}
+  timeline_num:     {font: sans, size: 20,  bold: true,  color: bg}
+  timeline_head:    {font: sans, size: 16,  bold: true,  color: primary}
+  timeline_body:    {font: sans, size: 11,  bold: false, color: muted}
+  cta:              {font: sans, size: 20,  bold: false, color: accent}
+  contact:          {font: sans, size: 12,  bold: false, color: muted}
+tags: ["editorial", "research", "academic", "publication", "longform"]
+trigger_keywords: ["研究", "出版", "杂志", "白皮书", "长文", "深度报告", "学术", "期刊", "行业观察"]

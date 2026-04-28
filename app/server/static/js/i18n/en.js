@@ -15,6 +15,7 @@ window.TUDOU_I18N.en = {
   // ── Sidebar nav ─────────────────────────────────────────
   "nav.dashboard":        "Dashboard",
   "nav.projects":         "Projects & Tasks",
+  "nav.orchestration":    "Orchestration",
   "nav.agents":           "Agents",
   "nav.knowledge":        "Knowledge & Memory",
   "nav.rolesSkills":      "Roles & Skills",
@@ -44,6 +45,8 @@ window.TUDOU_I18N.en = {
   "action.copy":          "Copy",
   "action.send":          "Send",
   "action.retry":         "Retry",
+  "action.connectNode":   "Connect Node",
+  "action.addProvider":   "Add Provider",
 
   // ── Chat header (per-agent) ─────────────────────────────
   "chat.soul":            "SOUL",

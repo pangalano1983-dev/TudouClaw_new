@@ -1,0 +1,36 @@
+name: Navy Gold
+version: 1.0.0
+description: "投行风 — 海军蓝 + 金色, 低调奢华。适合路演/并购/投资报告/财富管理。"
+slide_size: [13.33, 7.5]
+
+colors:
+  primary:   "#0A2540"   # 深海军蓝
+  accent:    "#C9A960"   # 古铜金
+  text:      "#0F172A"
+  muted:     "#64748B"
+  bg:        "#FFFFFF"
+  bg_dark:   "#08192F"   # 更深
+  panel:     "#F8FAFC"
+  border:    "#CBD5E1"
+
+fonts:
+  sans: "Arial"
+
+styles:
+  title:            {font: sans, size: 24,  bold: true,  color: primary}
+  subtitle:         {font: sans, size: 14,  bold: false, color: muted}
+  card_heading:     {font: sans, size: 14,  bold: true,  color: text}
+  card_body:        {font: sans, size: 11,  bold: false, color: muted}
+  section_num:      {font: sans, size: 140, bold: true,  color: accent}
+  section_head:     {font: sans, size: 32,  bold: true,  color: primary}
+  section_sub:      {font: sans, size: 16,  bold: false, color: muted}
+  cover_title:      {font: sans, size: 40,  bold: true,  color: bg}
+  cover_subtitle:   {font: sans, size: 20,  bold: false, color: accent}
+  cover_tag:        {font: sans, size: 12,  bold: false, color: accent}
+  timeline_num:     {font: sans, size: 20,  bold: true,  color: bg}
+  timeline_head:    {font: sans, size: 15,  bold: true,  color: text}
+  timeline_body:    {font: sans, size: 11,  bold: false, color: muted}
+  cta:              {font: sans, size: 18,  bold: false, color: primary}
+  contact:          {font: sans, size: 12,  bold: false, color: muted}
+tags: ["finance", "investment", "premium", "wealth"]
+trigger_keywords: ["投资", "投行", "基金", "并购", "路演", "财富", "IPO", "私募", "对冲", "信托", "私行", "高净值"]

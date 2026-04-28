@@ -119,6 +119,16 @@ class ProjectTask:
     last_checkpoint_at: float = 0.0
     # Free-form metadata bag for things like pending_approval, etc.
     metadata: dict = field(default_factory=dict)
+    # ── Long-task subsystem (app/long_task) ──
+    # Set by long_task.confirm when this task is materialized from a
+    # decomposition draft. ``parent_task_id`` points back to the
+    # original big task; ``role_hint`` drives auto_assign matching;
+    # ``decomp_metadata`` carries the original SubTaskSpec for audit.
+    # Empty/blank on user-created (non-decomposed) tasks — auto_assign
+    # skips those.
+    parent_task_id: str = ""
+    role_hint: str = ""
+    decomp_metadata: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -137,6 +147,9 @@ class ProjectTask:
             "current_step_index": self.current_step_index,
             "last_checkpoint_at": self.last_checkpoint_at,
             "metadata": self.metadata or {},
+            "parent_task_id": self.parent_task_id,
+            "role_hint": self.role_hint,
+            "decomp_metadata": dict(self.decomp_metadata or {}),
         }
 
     @staticmethod
@@ -159,6 +172,9 @@ class ProjectTask:
             current_step_index=int(d.get("current_step_index", 0) or 0),
             last_checkpoint_at=float(d.get("last_checkpoint_at", 0.0) or 0.0),
             metadata=dict(d.get("metadata") or {}),
+            parent_task_id=d.get("parent_task_id", "") or "",
+            role_hint=d.get("role_hint", "") or "",
+            decomp_metadata=dict(d.get("decomp_metadata") or {}),
         )
 
     # ── Step-level helpers ──
@@ -2020,6 +2036,9 @@ class ProjectChatEngine:
                     msg_type="task_update",
                     task_id=task.id,
                 )
+                # L3 extraction trigger — fire on transition to DONE.
+                # Wrapped to never break the task completion flow on errors.
+                self._fire_l3_task_done_hook(task)
             except Exception as e:
                 task.status = ProjectTaskStatus.BLOCKED
                 task.result = f"Error: {e}"
@@ -2369,8 +2388,52 @@ class ProjectChatEngine:
         logger.info("WF Step auto-completed: %s by %s in project %s",
                      task.title, agent_id, project.id)
 
+        # L3 extraction trigger — fire on transition to DONE
+        self._fire_l3_task_done_hook(task)
+
         # Auto-progress: trigger next step's agent
         self._auto_progress_next_step(project, task)
+
+    def _fire_l3_task_done_hook(self, task: ProjectTask) -> None:
+        """Trigger L3 fact extraction when a project task transitions to DONE.
+
+        Best-effort — wrapped to never propagate errors back into the
+        task-completion flow. The agent's recent message history is
+        passed as the L3 extractor's context window.
+        """
+        if not task or not task.assigned_to:
+            return
+        agent = None
+        try:
+            agent = self._lookup(task.assigned_to)
+        except Exception:
+            agent = None
+        if agent is None:
+            return
+        try:
+            llm_call = agent._make_summary_llm_call() \
+                if hasattr(agent, "_make_summary_llm_call") else None
+            if not llm_call:
+                return
+            from .core import l3_extractor as _l3
+            recent = list(getattr(agent, "messages", []) or [])[-12:]
+            _lang = "auto"
+            try:
+                _lang = getattr(agent.profile, "language", "auto") or "auto"
+            except Exception:
+                pass
+            _l3.extract_on_task_done(
+                agent_id=agent.id,
+                task_title=task.title or "",
+                task_description=task.description or "",
+                task_result=task.result or "",
+                recent_messages=recent,
+                llm_call=llm_call,
+                lang=_lang,
+            )
+        except Exception as _l3_err:  # noqa: BLE001
+            logger.debug("Project L3 task-done hook failed for task %s: %s",
+                         task.id, _l3_err)
 
     def _auto_progress_next_step(self, project: Project, completed_task: ProjectTask):
         """

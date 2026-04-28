@@ -1,0 +1,36 @@
+name: Eco Green
+version: 1.0.0
+description: "ESG 可持续风 — 深林绿 + 大地棕, 自然厚重。适合环保 / 可再生能源 / ESG 报告 / 农业与森林。"
+slide_size: [13.33, 7.5]
+
+colors:
+  primary:   "#166534"   # 深林绿
+  accent:    "#78350F"   # 大地棕
+  text:      "#1C1917"   # 近黑褐
+  muted:     "#57534E"   # 暖灰
+  bg:        "#F5F5F4"   # 浅灰白 (类纸)
+  bg_dark:   "#14532D"   # 深绿封面
+  panel:     "#ECFCCB"   # 嫩绿 panel
+  border:    "#A3A3A3"
+
+fonts:
+  sans: "Arial"
+
+styles:
+  title:            {font: sans, size: 26,  bold: true,  color: primary}
+  subtitle:         {font: sans, size: 14,  bold: false, color: muted}
+  card_heading:     {font: sans, size: 14,  bold: true,  color: text}
+  card_body:        {font: sans, size: 11,  bold: false, color: muted}
+  section_num:      {font: sans, size: 150, bold: true,  color: accent}
+  section_head:     {font: sans, size: 32,  bold: true,  color: primary}
+  section_sub:      {font: sans, size: 16,  bold: false, color: muted}
+  cover_title:      {font: sans, size: 42,  bold: true,  color: bg}
+  cover_subtitle:   {font: sans, size: 20,  bold: false, color: panel}
+  cover_tag:        {font: sans, size: 12,  bold: false, color: accent}
+  timeline_num:     {font: sans, size: 20,  bold: true,  color: bg}
+  timeline_head:    {font: sans, size: 15,  bold: true,  color: text}
+  timeline_body:    {font: sans, size: 11,  bold: false, color: muted}
+  cta:              {font: sans, size: 20,  bold: true,  color: primary}
+  contact:          {font: sans, size: 12,  bold: false, color: muted}
+tags: ["esg", "sustainability", "green", "environment", "agriculture"]
+trigger_keywords: ["ESG", "碳", "双碳", "环保", "可持续", "绿色", "清洁能源", "光伏", "风电", "林业", "农业", "生态"]

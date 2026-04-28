@@ -1,0 +1,36 @@
+name: Minimal
+version: 1.0.0
+description: "极简黑白 — 纯黑 + 灰阶 + 细节色。适合产品/设计/发布/Keynote 风汇报。"
+slide_size: [13.33, 7.5]
+
+colors:
+  primary:   "#000000"   # 纯黑
+  accent:    "#374151"   # 石墨灰 (替代传统橙色)
+  text:      "#111827"
+  muted:     "#6B7280"
+  bg:        "#FFFFFF"
+  bg_dark:   "#111827"   # 深炭
+  panel:     "#F9FAFB"
+  border:    "#D1D5DB"
+
+fonts:
+  sans: "Arial"          # Helvetica 风格
+
+styles:
+  title:            {font: sans, size: 28,  bold: false, color: primary}
+  subtitle:         {font: sans, size: 14,  bold: false, color: muted}
+  card_heading:     {font: sans, size: 14,  bold: true,  color: text}
+  card_body:        {font: sans, size: 11,  bold: false, color: muted}
+  section_num:      {font: sans, size: 160, bold: false, color: primary}
+  section_head:     {font: sans, size: 32,  bold: false, color: primary}
+  section_sub:      {font: sans, size: 16,  bold: false, color: muted}
+  cover_title:      {font: sans, size: 44,  bold: false, color: bg}
+  cover_subtitle:   {font: sans, size: 20,  bold: false, color: border}
+  cover_tag:        {font: sans, size: 11,  bold: false, color: border}
+  timeline_num:     {font: sans, size: 20,  bold: false, color: bg}
+  timeline_head:    {font: sans, size: 16,  bold: true,  color: text}
+  timeline_body:    {font: sans, size: 11,  bold: false, color: muted}
+  cta:              {font: sans, size: 18,  bold: false, color: muted}
+  contact:          {font: sans, size: 11,  bold: false, color: muted}
+tags: ["minimal", "product", "design", "keynote"]
+trigger_keywords: ["产品", "设计", "发布会", "极简", "Apple", "Keynote", "新品", "UX", "UI"]
