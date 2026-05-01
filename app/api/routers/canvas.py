@@ -91,3 +91,53 @@ async def delete_canvas_workflow(wf_id: str,
     except Exception as e:
         logger.exception("delete_canvas_workflow failed")
         raise HTTPException(500, str(e))
+
+
+@router.put("/canvas-workflows/{wf_id}/status")
+async def set_canvas_workflow_status(wf_id: str,
+                                       body: dict = Body(...),
+                                       user: CurrentUser = Depends(get_current_user)):
+    """Change executable_status: draft | ready | disabled.
+
+    Marking a workflow `ready` runs full structural validation
+    (single start, ≥1 end, all nodes reachable, no cycles, tool nodes
+    have tool_name, decision nodes have condition, no dead-ends).
+    Validation failures return 400 with the issues joined into the
+    detail message so the canvas UI can show a useful toast.
+
+    Body: ``{"status": "ready"|"draft"|"disabled"}``"""
+    try:
+        store = _store_or_503()
+        new_status = str(body.get("status", "")).strip()
+        stored = store.set_status(wf_id, new_status)
+        return stored
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("set_canvas_workflow_status failed")
+        raise HTTPException(500, str(e))
+
+
+@router.post("/canvas-workflows/{wf_id}/validate")
+async def validate_canvas_workflow(wf_id: str,
+                                     user: CurrentUser = Depends(get_current_user)):
+    """Run validation without changing status. Returns ``{ok: bool,
+    issues: [str, ...]}``. Useful for the UI to show a "check before
+    marking ready" preview."""
+    try:
+        store = _store_or_503()
+        wf = store.get(wf_id)
+        if not wf:
+            raise HTTPException(404, f"canvas workflow {wf_id} not found")
+        from ...canvas_workflows import WorkflowStore
+        issues = WorkflowStore.validate_for_execution(wf)
+        return {"ok": not issues, "issues": issues}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("validate_canvas_workflow failed")
+        raise HTTPException(500, str(e))

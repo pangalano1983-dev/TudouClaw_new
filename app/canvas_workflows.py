@@ -68,6 +68,22 @@ logger = logging.getLogger("tudou.workflows")
 
 VALID_NODE_TYPES = {"start", "agent", "tool", "decision", "parallel", "end"}
 
+# A workflow's executable status — drives whether the (future) execution
+# engine will pick it up, and what badge the UI shows on list cards.
+#
+#   draft     — author is still editing; engine ignores it (default for new
+#               workflows, also the safe fallback when validation fails).
+#   ready     — author has marked it executable; structural validation
+#               passed at the time of marking. Engine treats this as the
+#               source of truth for "what can run".
+#   disabled  — author/admin paused it; engine refuses to start new runs
+#               but doesn't garbage-collect the file. Useful for retiring
+#               old workflows without losing history.
+#
+# `last_validated_at` records the timestamp of the most recent transition
+# to `ready` so the UI can warn if the workflow has been edited since.
+EXECUTABLE_STATUSES = ("draft", "ready", "disabled")
+
 
 _ID_SAFE_RE = re.compile(r"[^a-zA-Z0-9._-]")
 
@@ -93,6 +109,8 @@ class WorkflowMeta:
     created_by: str
     node_count: int
     edge_count: int
+    executable_status: str = "draft"   # draft | ready | disabled
+    last_validated_at: float = 0.0     # 0 = never validated as ready
 
     def to_dict(self) -> dict:
         return {
@@ -100,6 +118,8 @@ class WorkflowMeta:
             "created_at": self.created_at, "updated_at": self.updated_at,
             "created_by": self.created_by,
             "node_count": self.node_count, "edge_count": self.edge_count,
+            "executable_status": self.executable_status,
+            "last_validated_at": self.last_validated_at,
         }
 
 
@@ -139,6 +159,8 @@ class WorkflowStore:
                 created_by=str(d.get("created_by", "")),
                 node_count=len(d.get("nodes") or []),
                 edge_count=len(d.get("edges") or []),
+                executable_status=str(d.get("executable_status", "draft") or "draft"),
+                last_validated_at=float(d.get("last_validated_at", 0) or 0),
             ))
         # Most-recently-updated first — matches user expectation
         out.sort(key=lambda m: -m.updated_at)
@@ -156,12 +178,131 @@ class WorkflowStore:
             logger.error("failed to read workflow %s: %s", wf_id, e)
             return None
 
+    # ── Validation (semantic, beyond structural) ────────
+
+    @staticmethod
+    def validate_for_execution(wf: dict) -> list[str]:
+        """Return a list of human-readable issues that prevent the
+        workflow from being marked `ready`. Empty list = OK to run.
+
+        Checks (MVP — extend as the execution engine grows):
+          * exactly one `start` node
+          * at least one `end` node
+          * all nodes reachable from `start` (no orphans)
+          * agent nodes don't have to specify agent_id (engine picks)
+          * tool nodes must have config.tool_name
+          * decision nodes must have config.condition
+          * no cycles (MVP — loop semantics deferred)
+          * every non-end node has at least one outgoing edge
+        """
+        issues: list[str] = []
+        nodes = wf.get("nodes") or []
+        edges = wf.get("edges") or []
+        if not nodes:
+            return ["workflow is empty (no nodes)"]
+
+        by_id = {n["id"]: n for n in nodes}
+        starts = [n for n in nodes if n.get("type") == "start"]
+        ends   = [n for n in nodes if n.get("type") == "end"]
+        if len(starts) == 0:
+            issues.append("missing a start node")
+        elif len(starts) > 1:
+            issues.append(f"multiple start nodes ({len(starts)}); exactly one allowed")
+        if len(ends) == 0:
+            issues.append("missing at least one end node")
+
+        # Adjacency map for reachability + cycle check
+        adj: dict[str, list[str]] = {n["id"]: [] for n in nodes}
+        for e in edges:
+            adj.get(e.get("from"), []).append(e.get("to"))
+
+        # Per-node config sanity
+        for n in nodes:
+            t = n.get("type")
+            cfg = n.get("config") or {}
+            if t == "tool":
+                if not cfg.get("tool_name"):
+                    issues.append(f"tool node '{n.get('label') or n['id']}' missing config.tool_name")
+            elif t == "decision":
+                if not cfg.get("condition"):
+                    issues.append(f"decision node '{n.get('label') or n['id']}' missing config.condition")
+            # Non-end nodes need at least one outgoing edge
+            if t != "end" and not adj.get(n["id"]):
+                issues.append(f"node '{n.get('label') or n['id']}' ({t}) has no outgoing edge — execution would dead-end here")
+
+        # Reachability from start
+        if starts:
+            seen = set()
+            stack = [starts[0]["id"]]
+            while stack:
+                cur = stack.pop()
+                if cur in seen: continue
+                seen.add(cur)
+                for nxt in adj.get(cur, []):
+                    if nxt in by_id and nxt not in seen:
+                        stack.append(nxt)
+            orphans = [nid for nid in by_id if nid not in seen]
+            for nid in orphans:
+                issues.append(f"node '{by_id[nid].get('label') or nid}' is unreachable from start")
+
+        # Cycle detection (DFS three-color)
+        WHITE, GRAY, BLACK = 0, 1, 2
+        color: dict[str, int] = {nid: WHITE for nid in by_id}
+        def _dfs(u: str) -> bool:
+            color[u] = GRAY
+            for v in adj.get(u, []):
+                if v not in color: continue
+                if color[v] == GRAY:
+                    return True
+                if color[v] == WHITE and _dfs(v):
+                    return True
+            color[u] = BLACK
+            return False
+        for nid in by_id:
+            if color[nid] == WHITE and _dfs(nid):
+                issues.append("workflow contains a cycle (loops not yet supported in MVP)")
+                break
+
+        return issues
+
+    # ── Status transition (draft ↔ ready ↔ disabled) ────
+
+    def set_status(self, wf_id: str, new_status: str) -> dict:
+        """Change executable_status. Transition to `ready` runs the full
+        execution validation; failures raise ValueError with the issues
+        list joined into the message so the API surfaces them.
+
+        Going draft / disabled never validates — those are safe states."""
+        if new_status not in EXECUTABLE_STATUSES:
+            raise ValueError(f"status must be one of {EXECUTABLE_STATUSES}")
+        with self._lock:
+            existing = self.get(wf_id)
+            if not existing:
+                raise FileNotFoundError(f"workflow {wf_id} not found")
+            if new_status == "ready":
+                issues = self.validate_for_execution(existing)
+                if issues:
+                    raise ValueError("cannot mark ready — issues:\n  • " + "\n  • ".join(issues))
+            existing["executable_status"] = new_status
+            existing["last_validated_at"] = time.time() if new_status == "ready" else existing.get("last_validated_at", 0.0)
+            existing["updated_at"] = time.time()
+            path = self._file_for(wf_id)
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(tmp, path)
+            return existing
+
     # ── Save (create or overwrite) ──────────────────────
 
     def save(self, payload: dict, *, created_by: str = "") -> dict:
         """Validate, normalize, and persist a workflow. Returns the
         stored dict (with id/timestamps filled in by the server, not
-        trusted from the client)."""
+        trusted from the client).
+
+        Editing a `ready` workflow auto-demotes to `draft` — author must
+        explicitly re-validate by calling set_status('ready') again. This
+        prevents an in-progress edit from being silently picked up by
+        the engine."""
         if not isinstance(payload, dict):
             raise ValueError("payload must be a dict")
         nodes = payload.get("nodes") or []
@@ -195,6 +336,17 @@ class WorkflowStore:
             now = time.time()
             wf_id = str(payload.get("id") or "").strip() or f"wf-{uuid.uuid4().hex[:12]}"
             existing = self.get(wf_id) or {}
+            # Auto-demote to draft when an existing `ready` workflow gets
+            # any structural edit. Author must re-validate to put it back.
+            prior_status = str(existing.get("executable_status") or "draft")
+            new_status = prior_status
+            if existing and prior_status == "ready":
+                # Compare nodes/edges dicts deeply — any change demotes
+                if (nodes != existing.get("nodes")) or (edges != existing.get("edges")):
+                    new_status = "draft"
+                    logger.info("demoting %s ready→draft due to structural edit", wf_id)
+            elif not existing:
+                new_status = "draft"   # new workflows always start as draft
             stored = {
                 "id": wf_id,
                 "name": str(payload.get("name", "") or existing.get("name", "Untitled"))[:120],
@@ -203,6 +355,8 @@ class WorkflowStore:
                 "created_at": float(existing.get("created_at") or now),
                 "updated_at": now,
                 "created_by": str(existing.get("created_by") or created_by or ""),
+                "executable_status": new_status,
+                "last_validated_at": float(existing.get("last_validated_at") or 0.0),
                 "nodes": nodes,
                 "edges": edges,
             }

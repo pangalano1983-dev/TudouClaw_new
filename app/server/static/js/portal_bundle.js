@@ -22005,13 +22005,14 @@ async function _loadCanvasList() {
         '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px">'
       + _canvasState.list.map(function(m) {
           var ts = m.updated_at ? new Date(m.updated_at * 1000).toLocaleString() : '';
+          var stBadge = _canvasStatusBadge(m.executable_status || 'draft');
           return ''
             + '<div style="border:1px solid var(--border);border-radius:10px;padding:14px;background:var(--surface);cursor:pointer;transition:all 0.15s" '
             +    'onmouseenter="this.style.borderColor=\'var(--primary)\';this.style.boxShadow=\'0 4px 8px rgba(0,0,0,0.08)\'" '
             +    'onmouseleave="this.style.borderColor=\'var(--border)\';this.style.boxShadow=\'\'" '
             +    'onclick="_canvasOpenEditor(\'' + esc(m.id) + '\')">'
             + '  <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:6px">'
-            + '    <div style="font-weight:700;font-size:14px">' + esc(m.name) + '</div>'
+            + '    <div style="font-weight:700;font-size:14px;display:flex;align-items:center;gap:6px">' + esc(m.name) + stBadge + '</div>'
             + '    <button class="btn btn-ghost btn-sm" title="删除" onclick="event.stopPropagation();_canvasDelete(\'' + esc(m.id) + '\',\'' + esc(m.name) + '\')" style="color:var(--error);padding:2px 4px"><span class="material-symbols-outlined" style="font-size:14px">delete</span></button>'
             + '  </div>'
             + (m.description ? '  <div style="font-size:12px;color:var(--text2);margin-bottom:8px;line-height:1.4">' + esc(m.description).slice(0, 100) + '</div>' : '')
@@ -22027,6 +22028,83 @@ async function _loadCanvasList() {
     box.innerHTML = '<div style="color:var(--error);padding:20px">加载失败: ' + esc(String(e)) + '</div>';
   }
 }
+
+// Render the status badge consistently across list cards + editor toolbar.
+// draft = grey  ready = green  disabled = orange
+function _canvasStatusBadge(status) {
+  var st = String(status || 'draft');
+  var palette = {
+    draft:    { bg: 'rgba(148,163,184,0.18)', fg: '#64748b', icon: 'edit_note',     label: '草稿' },
+    ready:    { bg: 'rgba(34,197,94,0.18)',   fg: '#16a34a', icon: 'check_circle',  label: '可执行' },
+    disabled: { bg: 'rgba(249,115,22,0.18)',  fg: '#ea580c', icon: 'pause_circle',  label: '已停用' },
+  };
+  var p = palette[st] || palette.draft;
+  return '<span style="display:inline-flex;align-items:center;gap:3px;padding:1px 8px;font-size:10px;border-radius:9px;background:' + p.bg + ';color:' + p.fg + ';font-weight:600">'
+    + '<span class="material-symbols-outlined" style="font-size:12px">' + p.icon + '</span>'
+    + p.label + '</span>';
+}
+
+// Render the status-transition button(s) for the editor toolbar based
+// on current executable_status. The "标为可执行" button validates first
+// (server-side); failures surface as a toast with the issue list.
+function _canvasStatusActions(wf) {
+  var st = String(wf.executable_status || 'draft');
+  if (st === 'draft') {
+    return '<button class="btn btn-sm" onclick="_canvasMarkReady()" title="校验图结构,通过后转为可执行" style="color:#16a34a"><span class="material-symbols-outlined" style="font-size:14px">check_circle</span> 标为可执行</button>';
+  }
+  if (st === 'ready') {
+    return '<button class="btn btn-sm" onclick="_canvasMarkDisabled()" title="暂停,新一轮不再被引擎挑选" style="color:#ea580c"><span class="material-symbols-outlined" style="font-size:14px">pause_circle</span> 停用</button>'
+         + '<button class="btn btn-sm" onclick="_canvasMarkDraft()" title="回到草稿态" style="color:#64748b"><span class="material-symbols-outlined" style="font-size:14px">edit_note</span> 回到草稿</button>';
+  }
+  if (st === 'disabled') {
+    return '<button class="btn btn-sm" onclick="_canvasMarkReady()" title="重新校验并启用" style="color:#16a34a"><span class="material-symbols-outlined" style="font-size:14px">play_circle</span> 重新启用</button>';
+  }
+  return '';
+}
+
+window._canvasMarkReady = async function() {
+  var wf = _canvasState.current;
+  if (!wf || !wf.id) { _toast('先保存 workflow', 'error'); return; }
+  // Save unsaved edits first so server validates the latest state
+  if (_canvasState.selectedNodeId) _canvasApplyConfig();
+  try {
+    var saved = await api('POST', '/api/portal/canvas-workflows', wf);
+    _canvasState.current = saved;
+  } catch (e) { _toast('保存失败: ' + e, 'error'); return; }
+  try {
+    var updated = await api('PUT', '/api/portal/canvas-workflows/' + encodeURIComponent(wf.id) + '/status', { status: 'ready' });
+    _canvasState.current = updated;
+    _toast('✓ 校验通过,已标为可执行', 'success');
+    _canvasRenderEditor();
+  } catch (e) {
+    // Validation failure — message contains issue list
+    var msg = String(e || '').replace(/^Error:\s*/, '');
+    alert('无法标为可执行:\n\n' + msg);
+  }
+};
+
+window._canvasMarkDraft = async function() {
+  var wf = _canvasState.current;
+  if (!wf || !wf.id) return;
+  try {
+    var updated = await api('PUT', '/api/portal/canvas-workflows/' + encodeURIComponent(wf.id) + '/status', { status: 'draft' });
+    _canvasState.current = updated;
+    _toast('已回到草稿态', 'info');
+    _canvasRenderEditor();
+  } catch (e) { _toast('切换失败: ' + e, 'error'); }
+};
+
+window._canvasMarkDisabled = async function() {
+  var wf = _canvasState.current;
+  if (!wf || !wf.id) return;
+  if (!confirm('停用后引擎不再启动新的执行。继续?')) return;
+  try {
+    var updated = await api('PUT', '/api/portal/canvas-workflows/' + encodeURIComponent(wf.id) + '/status', { status: 'disabled' });
+    _canvasState.current = updated;
+    _toast('已停用', 'info');
+    _canvasRenderEditor();
+  } catch (e) { _toast('切换失败: ' + e, 'error'); }
+};
 
 window._canvasNewWorkflow = function() {
   var name = prompt('Workflow 名称?', '未命名流程 ' + new Date().toLocaleString());
@@ -22075,8 +22153,10 @@ function _canvasRenderEditor() {
     + '  <div style="display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--border);background:var(--surface)">'
     + '    <button class="btn btn-ghost btn-sm" onclick="renderCanvasPage()"><span class="material-symbols-outlined" style="font-size:16px">arrow_back</span> 返回列表</button>'
     + '    <input id="canvas-name" value="' + esc(wf.name) + '" style="font-weight:600;font-size:14px;padding:4px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);flex:1;max-width:340px">'
+    +      _canvasStatusBadge(wf.executable_status || 'draft')
     + '    <span style="font-size:11px;color:var(--text3);font-family:monospace">' + esc(wf.id || '(unsaved)') + '</span>'
     + '    <div style="margin-left:auto;display:flex;gap:6px">'
+    +        (wf.id ? _canvasStatusActions(wf) : '')
     + '      <button class="btn btn-sm" onclick="_canvasExportJson()"><span class="material-symbols-outlined" style="font-size:14px">download</span> 导出 JSON</button>'
     + '      <button class="btn btn-primary btn-sm" onclick="_canvasSave()"><span class="material-symbols-outlined" style="font-size:14px">save</span> 保存</button>'
     + '    </div>'
