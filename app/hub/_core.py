@@ -260,6 +260,20 @@ class Hub:
         except Exception as _cwe:
             logger.warning("Canvas workflow store init failed: %s", _cwe)
 
+        # ── Canvas Executor (HANDOFF [D]) ──
+        # The runtime that picks up `executable_status=ready` workflows
+        # and drives them to completion. Stores per-run state +
+        # event-log under <data_dir>/canvas_runs/. Hub reference is
+        # passed in so agent / tool node executors can resolve agents
+        # and skills from their authoritative source.
+        try:
+            from .. import canvas_executor as _cx_mod
+            cx_dir = os.path.join(self._data_dir, "canvas_runs")
+            self.canvas_executor = _cx_mod.init_engine(cx_dir, hub=self)
+            logger.info("Canvas executor initialized at %s", cx_dir)
+        except Exception as _cxe:
+            logger.warning("Canvas executor init failed: %s", _cxe)
+
         # ── Skill Categories (admin-defined two-dimensional taxonomy) ──
         # Loaded right after skill_store so the API can join entries with
         # their category assignments. Two files:
