@@ -22443,6 +22443,43 @@ function _canvasSelectNode(nid) {
   _canvasRenderConfigPanel();
 }
 
+// HANDOFF [H] — list output variables a given node type produces.
+// Mirrors the dict shape returned by each _exec_* function in
+// canvas_executor.py; if you add a node type or extend an existing
+// executor's return dict, update this map too.
+var _CANVAS_NODE_OUTPUT_KEYS = {
+  start: ['started_at'],
+  end:   ['finished_at'],
+  agent: ['output', 'task_id', 'duration_s'],
+  tool:  ['output'],   // skill-specific keys can't be enumerated; agent
+                       // can still type {{node.<custom_key>}} manually
+  decision: [],
+  parallel: [],
+};
+
+// HANDOFF [H] — collect every node id that can reach `targetId`
+// transitively via edges. Used to populate the "available vars" panel:
+// only upstream nodes have produced outputs by the time `targetId`
+// runs, so they're the only legal sources.
+function _canvasUpstreamNodes(targetId) {
+  var wf = _canvasState.current;
+  if (!wf) return [];
+  var rev = {};   // dst -> [src, src, ...]
+  (wf.edges || []).forEach(function(e) {
+    if (!rev[e.to]) rev[e.to] = [];
+    rev[e.to].push(e.from);
+  });
+  var seen = {};
+  var stack = (rev[targetId] || []).slice();
+  while (stack.length) {
+    var nid = stack.pop();
+    if (seen[nid]) continue;
+    seen[nid] = true;
+    (rev[nid] || []).forEach(function(s) { stack.push(s); });
+  }
+  return Object.keys(seen);
+}
+
 function _canvasRenderConfigPanel() {
   var box = document.getElementById('canvas-config-panel');
   if (!box) return;
@@ -22485,6 +22522,39 @@ function _canvasRenderConfigPanel() {
   } else if (n.type === 'start' || n.type === 'end') {
     typeFields = '<div style="font-size:12px;color:var(--text3);line-height:1.5">' + esc(nt.label) + '节点无需配置。</div>';
   }
+  // HANDOFF [H] — Available-variables panel. Lists every output key
+  // produced by an upstream node, click-to-copy as {{node_id.key}}.
+  var upstream = _canvasUpstreamNodes(nid);
+  var varsBlock = '';
+  if (upstream.length > 0) {
+    var varRows = '';
+    upstream.forEach(function(uid) {
+      var un = _findNode(uid);
+      if (!un) return;
+      var unt = _NODE_TYPES[un.type] || _NODE_TYPES.agent;
+      var keys = _CANVAS_NODE_OUTPUT_KEYS[un.type] || ['output'];
+      if (keys.length === 0) return;
+      varRows += '<div style="margin-bottom:6px;font-size:11px">'
+              +    '<div style="color:var(--text2);margin-bottom:2px"><span style="color:' + unt.color + '">' + unt.icon + '</span> ' + esc(un.label || un.id) + ' <span style="color:var(--text3);font-family:monospace">' + esc(uid) + '</span></div>'
+              +    keys.map(function(k) {
+                     var ref = '{{' + uid + '.' + k + '}}';
+                     return '<button class="btn btn-ghost btn-xs" '
+                          + 'onclick="_canvasCopyVar(\'' + ref.replace(/'/g, "\\'") + '\')" '
+                          + 'title="点击复制" '
+                          + 'style="margin:1px 2px;padding:1px 6px;font-size:10px;font-family:monospace;background:var(--bg);border:1px solid var(--border);border-radius:3px;cursor:pointer">'
+                          + esc(ref) + '</button>';
+                   }).join('')
+              +  '</div>';
+    });
+    if (varRows) {
+      varsBlock = '<div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--border)">'
+                + '<div style="font-size:10px;color:var(--text3);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.05em">可用变量(上游节点输出)</div>'
+                + varRows
+                + '<div style="font-size:10px;color:var(--text3);margin-top:6px;line-height:1.4">在 prompt / 参数里粘贴 <code style="background:var(--bg);padding:0 3px;border-radius:2px">{{node_id.key}}</code> 引用上游输出</div>'
+                + '</div>';
+    }
+  }
+
   box.innerHTML =
       '<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid var(--border)">'
     + '  <span style="color:' + nt.color + ';font-size:18px">' + nt.icon + '</span>'
@@ -22494,10 +22564,85 @@ function _canvasRenderConfigPanel() {
     + '<div style="margin-bottom:8px"><label style="font-size:11px;color:var(--text3)">显示标签</label>'
     + '<input data-cfg="__label" value="' + esc(n.label || '') + '" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px"></div>'
     + typeFields
+    + '<div id="canvas-var-lint" style="font-size:11px;color:var(--error);margin-top:6px;line-height:1.5"></div>'
     + '<div style="display:flex;gap:6px;margin-top:14px">'
     + '  <button class="btn btn-sm" style="flex:1" onclick="_canvasApplyConfig()"><span class="material-symbols-outlined" style="font-size:14px">check</span> 应用</button>'
     + '  <button class="btn btn-sm" style="color:var(--error)" onclick="_canvasDeleteSelected()"><span class="material-symbols-outlined" style="font-size:14px">delete</span></button>'
-    + '</div>';
+    + '</div>'
+    + varsBlock;
+
+  // Wire live linting on the inputs/textareas — re-checks every
+  // keystroke. Cheap (regex over a single field's value).
+  document.querySelectorAll('#canvas-config-panel [data-cfg]').forEach(function(el) {
+    el.addEventListener('input', _canvasLintVarRefs);
+  });
+  _canvasLintVarRefs();
+}
+
+// HANDOFF [H] — copy a {{node_id.key}} reference to clipboard.
+window._canvasCopyVar = function(ref) {
+  try {
+    navigator.clipboard.writeText(ref);
+    _toast('已复制 ' + ref, 'success');
+  } catch (e) {
+    // Older browsers — fall back to a temporary textarea
+    var ta = document.createElement('textarea');
+    ta.value = ref;
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); _toast('已复制 ' + ref, 'success'); }
+    catch (_) { _toast('复制失败,请手动选择', 'error'); }
+    document.body.removeChild(ta);
+  }
+};
+
+// HANDOFF [H] — scan the visible config inputs for {{...}} patterns
+// and warn about references to vars that don't exist on any upstream
+// node. Catches typos like {{n_drwio.png_path}} (typo of n_drawio).
+function _canvasLintVarRefs() {
+  var nid = _canvasState.selectedNodeId;
+  if (!nid) return;
+  var lintBox = document.getElementById('canvas-var-lint');
+  if (!lintBox) return;
+  var upstream = _canvasUpstreamNodes(nid);
+  // Build the set of legal {node_id.key} pairs from upstream node types.
+  // Note: tool nodes can produce skill-specific custom keys we can't
+  // enumerate, so we only WARN for unknown nodes (not unknown keys
+  // on a known node — too noisy).
+  var legalNodes = {};
+  upstream.forEach(function(uid) {
+    legalNodes[uid] = true;
+  });
+  var issues = [];
+  var seen = {};
+  document.querySelectorAll('#canvas-config-panel [data-cfg]').forEach(function(el) {
+    var val = String(el.value || '');
+    var re = /\{\{\s*([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)\s*\}\}/g;
+    var m;
+    while ((m = re.exec(val)) !== null) {
+      var srcNode = m[1];
+      var key = m[2];
+      var label = '{{' + srcNode + '.' + key + '}}';
+      if (seen[label]) continue;
+      seen[label] = true;
+      if (!legalNodes[srcNode]) {
+        // Special-case helpful message: is the node id known but
+        // not upstream? Or genuinely unknown?
+        var knownButNotUpstream = (_canvasState.current.nodes || [])
+          .some(function(n) { return n.id === srcNode; });
+        if (knownButNotUpstream) {
+          issues.push(label + ' — 该节点存在但不是 ' + nid + ' 的上游');
+        } else {
+          issues.push(label + ' — 节点 id "' + srcNode + '" 不存在');
+        }
+      }
+    }
+  });
+  if (issues.length) {
+    lintBox.innerHTML = '<span class="material-symbols-outlined" style="font-size:13px;vertical-align:-2px">warning</span> 变量引用问题:<br>' + issues.map(esc).join('<br>');
+  } else {
+    lintBox.innerHTML = '';
+  }
 }
 
 window._canvasApplyConfig = function() {
