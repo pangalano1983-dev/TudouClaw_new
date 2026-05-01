@@ -282,31 +282,45 @@ shows agent following the new rule (no need to start a new chat).
 
 ---
 
-### 🟢 [G] Skill SKILL.md 补齐
+### ✅ [G] Skill SKILL.md 补齐 — DONE 2026-05-01 (commit `2b41389`)
 
 **User priority**: 强烈建议 (P1)
 **Risk**: LOW
-**Scope estimate**: 4 SKILL.md files × ~150 lines each
-**Status**: Not started.
+**Status**: **Done.** Real scope was much smaller than the original
+estimate — see "Reality vs. plan" below.
 
-**Targets** (priority order):
+**What landed**:
 
-1. `app/skills/builtin/send_email/SKILL.md` — currently MISSING.
-   Skill is just `main.py` + `manifest.yaml`. Needs:
-   * pre-call validation (recipient regex, subject non-empty, body
-     length, attachment file existence)
-   * post-call: log message_id, mention to user
-   * never silently send if recipient mismatches the user-confirmed
-     recipient (the bug that bit us 2026-04-30)
+1. `app/skills/builtin/send_email/SKILL.md` — added `## 工作流（4 步）`
+   (echo plan → validate → call → report message_id) and `## 质量门`
+   (pre-call validator: recipient regex, subject non-empty + length,
+   body non-empty, absolute-path attachment file existence). +54 lines.
+2. `app/skills/builtin/take_screenshot/SKILL.md` — added `## 工作流
+   （3 步）` and `## 质量门` (post-call validator: file exists, size
+   > 1KB to catch black/empty PNGs from permission errors or display
+   sleep, dimensions sanity). +48 lines.
 
-2. `app/skills/builtin/take_screenshot/SKILL.md` — has minimal stub,
-   add QA section (PNG dimensions sanity, file size > 1KB)
+**Reality vs. plan**:
 
-3. `app/skills/builtin/jimeng_video/SKILL.md` — same treatment.
+* HANDOFF said send_email/SKILL.md was MISSING — actually it existed
+  (a 72-line reference doc); we **augmented** rather than created.
+* `jimeng_video/SKILL.md` — already deprecated, `main.py` just raises
+  a migration RuntimeError. Skipped, no QA gate makes sense for a
+  no-op stub.
+* `summarize-pro` — third-party skill in `~/.tudou_claw/`, out of git
+  scope. Skipped per the original "not in git" caveat.
 
-4. `~/.tudou_claw/skills_installed/md_imported_summarize-pro/SKILL.md`
-   — third-party skill, **not in git**. To make changes
-   git-tracked, copy into `app/skills/builtin/` first.
+**Verification**: both files still parse via
+`read_entry_from_skill_md`; all embedded python blocks compile;
+validator functions exec correctly on representative valid/invalid
+inputs.
+
+**Note for [C]**: the gates here are **doc-only** — agent has to
+choose to run them. Platform-level enforcement (the pattern HANDOFF
+[C] describes) should reuse this same validation logic. Specifically,
+`fs.py write_file` doesn't see send_email args, but the MCP dispatcher
+hook ([C]'s 2nd integration point) can port the `validate_send_email`
+function from `send_email/SKILL.md` directly.
 
 **Template** (use the QA gate skeleton from
 `app/skills/builtin/tudou-builtin/pptx-author/SKILL.md` as the
