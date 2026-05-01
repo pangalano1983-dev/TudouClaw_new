@@ -21888,6 +21888,11 @@ function renderRolesSkillsHub() {
     { id: 'pending-skills',   label: window.t('tab.rs.skillForge',      '技能锻造 SkillForge'),   icon: 'auto_fix_high' },
     { id: 'self-improvement', label: window.t('tab.rs.selfImprove',     '学习闭环 / 经验沉淀'),    icon: 'psychology' },
   ];
+  // Admin-only tab — Skill 分类管理 (admin-defined two-dimensional taxonomy).
+  // Hidden for regular users so they don't see admin-only mutations.
+  if (typeof _isAdmin === 'function' && _isAdmin()) {
+    tabs.push({ id: 'skill-categories', label: '分类管理', icon: 'category' });
+  }
   // V2 mode: expose task templates + tier bindings under roles-skills
   // rather than creating whole new top-level nav items.
   if (typeof window.isV2Mode === 'function' && window.isV2Mode()) {
@@ -21904,6 +21909,7 @@ function renderRolesSkillsHub() {
     if (r.current === 'templates') renderTemplateLibrary();
     else if (r.current === 'skill-store') renderSkillStore();
     else if (r.current === 'skill-pkgs') renderSkillStore();  // legacy redirect
+    else if (r.current === 'skill-categories') renderSkillCategoriesAdmin();
     else if (r.current === 'pending-skills') renderPendingSkills();
     else if (r.current === 'self-improvement') renderSelfImprovement();
     else if (r.current === 'v2-templates') {
@@ -21920,8 +21926,233 @@ function renderRolesSkillsHub() {
   finally { sc.id = 'hub-roles-content'; _orig.id = 'content'; }
 }
 
+// ============ Skill Categories — admin-curated taxonomy ============
+//
+// Two dimensions: "scenarios" (business job) and "agent_types" (which
+// role typically uses it). Admin CRUD via /api/portal/skill-categories.
+// The store filter UI consumes the same dictionary via /skill-store
+// (it's bundled into the response to avoid a 2nd round-trip).
+//
+// Render flow:
+//   renderSkillCategoriesAdmin → loadSkillCategoriesAdmin (fetch dict)
+//                              → _renderCatColumn (per dimension)
+//                              → _showCatEditModal (add / edit one row)
+
+async function renderSkillCategoriesAdmin() {
+  var c = document.getElementById('content');
+  c.innerHTML = ''
+    + '<div style="padding:18px">'
+    + '  <div style="margin-bottom:14px"><h2 style="margin:0">Skill 分类管理</h2>'
+    + '    <div style="font-size:12px;color:var(--text3);margin-top:4px">'
+    + '      Admin 管理 skill 商店的两个分类维度。改完后立刻生效,不需要重启服务。'
+    + '      已被 skill 引用但被删除的分类会自动失效,无需迁移。</div></div>'
+    + '  <div id="cat-admin-content" style="color:var(--text3)">加载中…</div>'
+    + '</div>';
+  await loadSkillCategoriesAdmin();
+}
+
+async function loadSkillCategoriesAdmin() {
+  var box = document.getElementById('cat-admin-content');
+  if (!box) return;
+  try {
+    var data = await api('GET', '/api/portal/skill-categories');
+    box.innerHTML =
+      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:16px">'
+      + _renderCatColumn('业务场景 (scenarios)', 'scenarios', data.scenarios || [])
+      + _renderCatColumn('智能体类型 (agent_types)', 'agent_types', data.agent_types || [])
+      + '</div>';
+  } catch (e) {
+    box.innerHTML = '<div style="color:var(--error);padding:16px">加载失败: ' + esc(String(e)) + '</div>';
+  }
+}
+
+function _renderCatColumn(label, dim, items) {
+  var rows = items.map(function(c) {
+    return ''
+      + '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px;background:var(--surface)">'
+      + '  <span style="font-size:18px;width:24px;text-align:center">' + esc(c.icon || '·') + '</span>'
+      + '  <div style="flex:1;min-width:0">'
+      + '    <div style="font-size:13px;font-weight:600;color:var(--text)">' + esc(c.name) + '</div>'
+      + '    <div style="font-size:10px;color:var(--text3);font-family:monospace">' + esc(c.id) + '</div>'
+      + (c.description ? '    <div style="font-size:11px;color:var(--text2);margin-top:2px">' + esc(c.description) + '</div>' : '')
+      + '  </div>'
+      + '  <span style="font-size:10px;color:var(--text3);min-width:30px;text-align:right">#' + (c.order || 0) + '</span>'
+      + '  <button class="btn btn-ghost btn-sm" onclick="_showCatEditModal(\'' + dim + '\',' + JSON.stringify(c).replace(/'/g, "&#39;").replace(/"/g, '&quot;') + ')" title="编辑"><span class="material-symbols-outlined" style="font-size:16px">edit</span></button>'
+      + '  <button class="btn btn-ghost btn-sm" onclick="_deleteCat(\'' + dim + '\',\'' + esc(c.id) + '\',\'' + esc(c.name) + '\')" title="删除" style="color:var(--error)"><span class="material-symbols-outlined" style="font-size:16px">delete</span></button>'
+      + '</div>';
+  }).join('');
+  return ''
+    + '<div style="padding:14px;border:1px solid var(--border);border-radius:8px;background:var(--bg)">'
+    + '  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">'
+    + '    <div style="font-size:14px;font-weight:700">' + esc(label) + '<span style="margin-left:6px;font-size:11px;color:var(--text3);font-weight:400">· ' + items.length + ' 项</span></div>'
+    + '    <button class="btn btn-sm btn-primary" onclick="_showCatEditModal(\'' + dim + '\', null)"><span class="material-symbols-outlined" style="font-size:14px">add</span> 新增</button>'
+    + '  </div>'
+    + (items.length ? rows : '<div style="font-size:12px;color:var(--text3);text-align:center;padding:20px;border:1px dashed var(--border);border-radius:6px">暂无分类,点击"新增"添加第一个</div>')
+    + '</div>';
+}
+
+window._showCatEditModal = function(dim, existing) {
+  var isEdit = !!existing;
+  var c = existing || { id: '', name: '', icon: '', order: 99, description: '' };
+  var html = ''
+    + '<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;width:480px;max-width:95vw">'
+    + '  <h3 style="margin:0 0 16px 0">' + (isEdit ? '编辑分类' : '新增分类') + ' · ' + esc(dim === 'scenarios' ? '业务场景' : 'Agent 类型') + '</h3>'
+    + '  <div style="display:flex;flex-direction:column;gap:10px">'
+    + '    <div><label style="font-size:11px;color:var(--text3)">ID (slug, 仅小写字母/数字/-)</label>'
+    + '      <input id="cat-edit-id" value="' + esc(c.id) + '" ' + (isEdit ? 'disabled' : '') + ' placeholder="legal, design-pro, ..." style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-family:monospace;font-size:12px"></div>'
+    + '    <div><label style="font-size:11px;color:var(--text3)">显示名 *</label>'
+    + '      <input id="cat-edit-name" value="' + esc(c.name) + '" placeholder="法务合规" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)"></div>'
+    + '    <div style="display:flex;gap:10px">'
+    + '      <div style="flex:1"><label style="font-size:11px;color:var(--text3)">图标 (1 个 emoji)</label>'
+    + '        <input id="cat-edit-icon" value="' + esc(c.icon) + '" placeholder="⚖️" maxlength="4" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);text-align:center;font-size:18px"></div>'
+    + '      <div style="flex:1"><label style="font-size:11px;color:var(--text3)">排序 (越小越靠前)</label>'
+    + '        <input id="cat-edit-order" type="number" value="' + (c.order || 99) + '" min="0" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)"></div>'
+    + '    </div>'
+    + '    <div><label style="font-size:11px;color:var(--text3)">说明 (选填)</label>'
+    + '      <textarea id="cat-edit-desc" placeholder="什么时候用这个分类" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);min-height:60px;resize:vertical">' + esc(c.description) + '</textarea></div>'
+    + '  </div>'
+    + '  <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">'
+    + '    <button class="btn btn-ghost btn-sm" onclick="closeModal()">取消</button>'
+    + '    <button class="btn btn-primary btn-sm" onclick="_saveCatEdit(\'' + dim + '\')">保存</button>'
+    + '  </div>'
+    + '</div>';
+  showCustomModal(html);
+};
+
+window._saveCatEdit = async function(dim) {
+  var idEl = document.getElementById('cat-edit-id');
+  var body = {
+    dimension: dim,
+    id:    (idEl.value || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-'),
+    name:  (document.getElementById('cat-edit-name').value || '').trim(),
+    icon:  (document.getElementById('cat-edit-icon').value || '').trim(),
+    order: parseInt(document.getElementById('cat-edit-order').value || '99', 10),
+    description: (document.getElementById('cat-edit-desc').value || '').trim(),
+  };
+  if (!body.id) return _toast('ID 不能为空', 'error');
+  if (!body.name) return _toast('显示名不能为空', 'error');
+  try {
+    await api('POST', '/api/portal/skill-categories', body);
+    closeModal();
+    _toast('已保存', 'success');
+    await loadSkillCategoriesAdmin();
+  } catch (e) {
+    _toast('保存失败: ' + e, 'error');
+  }
+};
+
+// Open the per-skill category assignment modal. Uses the cached
+// categoriesPayload from the last /skill-store call so it's instant; if
+// for some reason the cache is empty, lazy-load the dictionary first.
+window._openSkillCategoryAssignModal = async function(skillId, skillName) {
+  var dict = _skillStoreState.categoriesPayload;
+  if (!dict || (!dict.scenarios && !dict.agent_types)) {
+    try { dict = await api('GET', '/api/portal/skill-categories'); }
+    catch (e) { return _toast('加载分类字典失败: ' + e, 'error'); }
+  }
+  var current;
+  try {
+    current = await api('GET', '/api/portal/skill-pkgs/' + encodeURIComponent(skillId) + '/categories');
+  } catch (e) { current = { scenarios: [], agent_types: [] }; }
+  var sel = { scenarios: new Set(current.scenarios || []),
+              agent_types: new Set(current.agent_types || []) };
+
+  function chips(dim) {
+    var items = dict[dim] || [];
+    if (!items.length) return '<div style="font-size:11px;color:var(--text3);padding:6px">尚无分类,请先去"分类管理"创建</div>';
+    return items.map(function(c) {
+      var on = sel[dim].has(c.id);
+      return '<span data-dim="' + dim + '" data-id="' + esc(c.id) + '" '
+        + 'style="padding:4px 10px;font-size:12px;border-radius:14px;cursor:pointer;border:1px solid ' + (on ? 'var(--primary)' : 'var(--border)') + ';background:' + (on ? 'var(--primary)' : 'var(--surface3)') + ';color:' + (on ? '#fff' : 'var(--text2)') + '">'
+        + (c.icon ? esc(c.icon) + ' ' : '') + esc(c.name) + '</span>';
+    }).join('');
+  }
+  var html = ''
+    + '<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;width:560px;max-width:95vw;max-height:80vh;overflow:auto">'
+    + '  <h3 style="margin:0 0 6px 0">管理分类</h3>'
+    + '  <div style="font-size:12px;color:var(--text3);margin-bottom:14px">' + esc(skillName) + ' · ' + esc(skillId) + '</div>'
+    + '  <div style="margin-bottom:14px">'
+    + '    <div style="font-size:11px;color:var(--text3);margin-bottom:6px">业务场景 (scenarios)</div>'
+    + '    <div id="assign-sc-chips" style="display:flex;flex-wrap:wrap;gap:6px">' + chips('scenarios') + '</div>'
+    + '  </div>'
+    + '  <div style="margin-bottom:14px">'
+    + '    <div style="font-size:11px;color:var(--text3);margin-bottom:6px">Agent 类型 (agent_types)</div>'
+    + '    <div id="assign-at-chips" style="display:flex;flex-wrap:wrap;gap:6px">' + chips('agent_types') + '</div>'
+    + '  </div>'
+    + '  <div style="display:flex;justify-content:flex-end;gap:8px">'
+    + '    <button class="btn btn-ghost btn-sm" onclick="closeModal()">取消</button>'
+    + '    <button class="btn btn-primary btn-sm" onclick="_saveSkillAssignments(\'' + esc(skillId) + '\')">保存</button>'
+    + '  </div>'
+    + '</div>';
+  showCustomModal(html);
+
+  // Wire up toggle behaviour. Click any chip to flip its selected state.
+  // Restyle in place so users see the toggle without a re-render.
+  document.querySelectorAll('#custom-modal-overlay span[data-dim]').forEach(function(span) {
+    span.onclick = function() {
+      var dim = span.getAttribute('data-dim');
+      var cid = span.getAttribute('data-id');
+      if (sel[dim].has(cid)) sel[dim].delete(cid); else sel[dim].add(cid);
+      var on = sel[dim].has(cid);
+      span.style.borderColor = on ? 'var(--primary)' : 'var(--border)';
+      span.style.background  = on ? 'var(--primary)' : 'var(--surface3)';
+      span.style.color       = on ? '#fff' : 'var(--text2)';
+    };
+  });
+
+  // Stash sel onto window so the save button can read the latest state.
+  window._currentSkillAssignSel = sel;
+};
+
+window._saveSkillAssignments = async function(skillId) {
+  var sel = window._currentSkillAssignSel || { scenarios: new Set(), agent_types: new Set() };
+  try {
+    await api('PUT', '/api/portal/skill-pkgs/' + encodeURIComponent(skillId) + '/categories', {
+      scenarios: Array.from(sel.scenarios),
+      agent_types: Array.from(sel.agent_types),
+    });
+    closeModal();
+    _toast('已保存', 'success');
+    // Refresh the store list so badges update
+    if (typeof loadSkillStore === 'function') loadSkillStore();
+  } catch (e) {
+    _toast('保存失败: ' + e, 'error');
+  }
+};
+
+window._deleteCat = async function(dim, catId, name) {
+  if (!confirm('删除分类 "' + name + '" (id=' + catId + ')?\n\n已经引用这个分类的 skill 会自动失去这个标签 (无需迁移)。')) return;
+  try {
+    await api('DELETE', '/api/portal/skill-categories/' + encodeURIComponent(dim) + '/' + encodeURIComponent(catId));
+    _toast('已删除', 'success');
+    await loadSkillCategoriesAdmin();
+  } catch (e) {
+    _toast('删除失败: ' + e, 'error');
+  }
+};
+
+// Helper: minimal centered modal wrapper if portal doesn't already have one.
+// Reuses .modal-overlay styles if present; falls back to inline styling.
+window.showCustomModal = window.showCustomModal || function(innerHtml) {
+  var existing = document.getElementById('custom-modal-overlay');
+  if (existing) existing.remove();
+  var ov = document.createElement('div');
+  ov.id = 'custom-modal-overlay';
+  ov.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center';
+  ov.onclick = function(e) { if (e.target === ov) closeModal(); };
+  ov.innerHTML = innerHtml;
+  document.body.appendChild(ov);
+};
+window.closeModal = window.closeModal || function() {
+  var m = document.getElementById('custom-modal-overlay');
+  if (m) m.remove();
+};
+
+
 // ============ Skill Store (Hub-level marketplace) ============
-var _skillStoreState = { q: '', source: '', tag: '', entries: [], stats: null, allTags: [] };
+var _skillStoreState = { q: '', source: '', tag: '', entries: [], stats: null, allTags: [],
+                         scenarios: [], agentTypes: [],
+                         categoriesPayload: null, assignments: {} };
 
 function _fmtSize(bytes) {
   if (!bytes) return '';
@@ -21955,6 +22186,7 @@ async function renderSkillStore() {
     + '      <option value="local">local 本地</option>'
     + '    </select>'
     + '  </div>'
+    + '  <div id="store-cat-filters" style="margin-bottom:10px"></div>'
     + '  <div id="store-tag-filters" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px"></div>'
     + '  <div id="store-stats" style="font-size:11px;color:var(--text3);margin-bottom:10px"></div>'
     + '  <div id="store-list" style="color:var(--text3)">加载中…</div>'
@@ -22001,6 +22233,48 @@ function _renderTagFilterBar() {
   bar.innerHTML = clearChip + chips;
 }
 
+// ─────────── Skill category dual-dimension filter ───────────
+// Two extra rows of chips (one per dimension) above the tag filter row.
+// Multi-select within a dimension; dimensions combined with AND.
+// State lives on _skillStoreState.scenarios / .agentTypes (csv arrays).
+window._skillStoreFilterByCategory = function(dim, catId) {
+  if (!dim || !catId) return;
+  var key = (dim === 'scenarios') ? 'scenarios' : 'agentTypes';
+  var cur = _skillStoreState[key] || [];
+  var idx = cur.indexOf(catId);
+  if (idx >= 0) cur.splice(idx, 1); else cur.push(catId);
+  _skillStoreState[key] = cur;
+  loadSkillStore();
+};
+function _renderCategoryFilterBars() {
+  var bar = document.getElementById('store-cat-filters');
+  if (!bar) return;
+  var cats = _skillStoreState.categoriesPayload || { scenarios: [], agent_types: [] };
+  if ((cats.scenarios || []).length === 0 && (cats.agent_types || []).length === 0) {
+    bar.innerHTML = ''; return;
+  }
+  function row(label, dim, items, active) {
+    if (!items.length) return '';
+    var chips = items.map(function(c) {
+      var isOn = active.indexOf(c.id) >= 0;
+      var st = isOn
+        ? 'padding:3px 10px;font-size:11px;border-radius:12px;background:var(--primary);color:#fff;cursor:pointer;border:1px solid var(--primary)'
+        : 'padding:3px 10px;font-size:11px;border-radius:12px;background:var(--surface3);color:var(--text2);cursor:pointer;border:1px solid var(--border)';
+      return '<span style="' + st + '" onclick="_skillStoreFilterByCategory(\'' + dim + '\',\'' + esc(c.id) + '\')">'
+              + (c.icon ? esc(c.icon) + ' ' : '') + esc(c.name) + '</span>';
+    }).join('');
+    var clearBtn = active.length
+      ? '<span style="padding:3px 10px;font-size:11px;border-radius:12px;background:var(--surface3);color:var(--text3);cursor:pointer;border:1px solid var(--border)" onclick="_skillStoreState.' + (dim === 'scenarios' ? 'scenarios' : 'agentTypes') + '=[];loadSkillStore()" title="清除">✕</span>'
+      : '';
+    return '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:6px">'
+         + '<span style="font-size:11px;color:var(--text3);min-width:70px">' + label + '</span>'
+         + chips + clearBtn + '</div>';
+  }
+  bar.innerHTML =
+    row('业务场景', 'scenarios',  cats.scenarios   || [], _skillStoreState.scenarios   || []) +
+    row('Agent 类型', 'agent_types', cats.agent_types || [], _skillStoreState.agentTypes || []);
+}
+
 var _storeLoadTimer = null;
 function _debouncedLoadStore() {
   if (_storeLoadTimer) clearTimeout(_storeLoadTimer);
@@ -22014,6 +22288,9 @@ async function loadSkillStore() {
   if (_skillStoreState.q) params.push('q=' + encodeURIComponent(_skillStoreState.q));
   if (_skillStoreState.source) params.push('source=' + encodeURIComponent(_skillStoreState.source));
   if (_skillStoreState.tag) params.push('tag=' + encodeURIComponent(_skillStoreState.tag));
+  // Two new dimensions — server accepts CSV
+  if ((_skillStoreState.scenarios   || []).length) params.push('scenario='   + encodeURIComponent(_skillStoreState.scenarios.join(',')));
+  if ((_skillStoreState.agentTypes  || []).length) params.push('agent_type=' + encodeURIComponent(_skillStoreState.agentTypes.join(',')));
   var qs = params.length ? ('?' + params.join('&')) : '';
   // Issue an UNFILTERED fetch in parallel (cheap — same handler) so we can
   // build the tag filter bar from ALL skills, not just the ones matching
@@ -22025,6 +22302,10 @@ async function loadSkillStore() {
     var data = await api('GET', '/api/portal/skill-store' + qs);
     _skillStoreState.entries = data.entries || [];
     _skillStoreState.stats = data.stats || null;
+    // Cache category dictionary + per-skill assignments for badge rendering
+    _skillStoreState.categoriesPayload = data.categories || { scenarios: [], agent_types: [] };
+    _skillStoreState.assignments = data.assignments || {};
+    _renderCategoryFilterBars();
     // Aggregate tag counts from the unfiltered set (when filtered) or
     // current entries (when no filter active).
     var tagSource = data.entries || [];
@@ -22159,9 +22440,44 @@ async function loadSkillStore() {
         +  '</div>'
         +  '<div style="font-size:12px;color:var(--text2);line-height:1.5;min-height:36px">'+desc+'</div>'
         +  _renderTagChips(e)
+        +  _renderCategoryBadges(e)
         +  '<div style="display:flex;gap:6px;margin-top:auto">'+actions+'</div>'
         + '</div>'
       );
+    }
+
+    // Render the admin-assigned category badges for a skill (≠ free-text tags).
+    // Lookup from the cached assignments + categoriesPayload bundled with the
+    // /skill-store response, so this is a pure render — no extra requests.
+    // Admin sees an inline "+ 管理" pill that opens the assignment modal.
+    function _renderCategoryBadges(e) {
+      var asg = (_skillStoreState.assignments || {})[e.id]
+             || (_skillStoreState.assignments || {})[e.installed_id]
+             || { scenarios: [], agent_types: [] };
+      var dict = _skillStoreState.categoriesPayload || { scenarios: [], agent_types: [] };
+      function lookupName(dim, cid) {
+        var arr = dict[dim] || [];
+        for (var i = 0; i < arr.length; i++) if (arr[i].id === cid) return arr[i];
+        return null;
+      }
+      var badges = [];
+      (asg.scenarios || []).forEach(function(cid) {
+        var c = lookupName('scenarios', cid); if (!c) return;
+        badges.push('<span title="业务场景" style="padding:1px 6px;font-size:10px;border-radius:8px;background:rgba(56,189,248,0.18);color:#0284c7;border:1px solid rgba(56,189,248,0.3)">'
+          + (c.icon ? esc(c.icon) + ' ' : '') + esc(c.name) + '</span>');
+      });
+      (asg.agent_types || []).forEach(function(cid) {
+        var c = lookupName('agent_types', cid); if (!c) return;
+        badges.push('<span title="Agent 类型" style="padding:1px 6px;font-size:10px;border-radius:8px;background:rgba(168,85,247,0.18);color:#9333ea;border:1px solid rgba(168,85,247,0.3)">'
+          + (c.icon ? esc(c.icon) + ' ' : '') + esc(c.name) + '</span>');
+      });
+      // Admin gets a "+ 管理" pill even when no categories are assigned yet.
+      var adminBtn = '';
+      if (typeof _isAdmin === 'function' && _isAdmin()) {
+        adminBtn = '<span title="管理分类" style="padding:1px 6px;font-size:10px;border-radius:8px;background:var(--surface3);color:var(--text2);border:1px dashed var(--border);cursor:pointer" onclick="event.stopPropagation();_openSkillCategoryAssignModal(\'' + esc(e.id) + '\',\'' + esc(e.name) + '\')">+ 管理</span>';
+      }
+      if (!badges.length && !adminBtn) return '';
+      return '<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:-2px">' + badges.join('') + adminBtn + '</div>';
     }
 
     // Render up to 5 tag chips on a card; click filters the store by that tag.

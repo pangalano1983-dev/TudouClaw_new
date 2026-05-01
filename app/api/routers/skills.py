@@ -544,14 +544,21 @@ async def get_skill_store_catalog(
     tag: str = Query("", description="Filter by tag"),
     q: str = Query("", description="Search query"),
     all: str = Query("0", description="Include disallowed"),
+    scenario: str = Query("", description="Filter by category scenarios (csv)"),
+    agent_type: str = Query("", description="Filter by category agent_types (csv)"),
     hub=Depends(get_hub),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Get skill store catalog — matches legacy portal_routes_get."""
+    """Get skill store catalog — matches legacy portal_routes_get.
+
+    New (2026-05-01): `scenario` and `agent_type` accept CSV lists of
+    category ids and filter the result down to skills that match at
+    least one id in each given dimension. Empty = no constraint.
+    """
     try:
         store = getattr(hub, "skill_store", None)
         if store is None:
-            return {"entries": [], "installed": {}, "annotations": [], "stats": {}}
+            return {"entries": [], "installed": {}, "annotations": [], "stats": {}, "categories": {}, "assignments": {}}
 
         include_all = all in ("1", "true", "yes")
         entries = store.list_catalog(
@@ -560,6 +567,32 @@ async def get_skill_store_catalog(
             query=q or "",
             include_disallowed=include_all,
         )
+
+        # Apply category filters (post-filter — keeps the existing
+        # tag/source/q query semantics intact, then narrows further).
+        try:
+            from ...skills.categories import get_assignments
+            asg_store = get_assignments()
+        except Exception:
+            asg_store = None
+
+        scenarios_filter = [s.strip() for s in (scenario or "").split(",") if s.strip()]
+        agent_types_filter = [a.strip() for a in (agent_type or "").split(",") if a.strip()]
+        if asg_store and (scenarios_filter or agent_types_filter):
+            keep_ids = set(asg_store.filter_skills(
+                [e.id for e in entries],
+                scenarios=scenarios_filter or None,
+                agent_types=agent_types_filter or None,
+            ))
+            entries = [e for e in entries if e.id in keep_ids]
+
+        # Build per-entry assignments map for UI badges
+        assignments_map: dict = {}
+        if asg_store:
+            for e in entries:
+                a = asg_store.get(e.id)
+                if a["scenarios"] or a["agent_types"]:
+                    assignments_map[e.id] = a
 
         # Pull installed-skill metadata for UI
         installed_map: dict = {}
@@ -577,16 +610,195 @@ async def get_skill_store_catalog(
             except Exception:
                 pass
 
+        # Bundle the live category dictionary so UI doesn't need a 2nd round-trip
+        try:
+            from ...skills.categories import get_store as _cat_get
+            cat_store = _cat_get()
+            categories_payload = cat_store.list_all() if cat_store else {"scenarios": [], "agent_types": []}
+        except Exception:
+            categories_payload = {"scenarios": [], "agent_types": []}
+
         return {
             "entries": [e.to_dict() for e in entries],
             "installed": installed_map,
             "annotations": store.list_annotations(),
             "stats": store.stats(),
+            "categories": categories_payload,
+            "assignments": assignments_map,
         }
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Skill categories — admin-defined two-dimensional taxonomy
+# (scenarios = business job, agent_types = which role uses it)
+# Added 2026-05-01.
+# ---------------------------------------------------------------------------
+
+def _require_admin(user: CurrentUser) -> None:
+    """Raise 403 if the caller isn't an admin/superAdmin."""
+    role = getattr(user, "role", "") or ""
+    if role not in ("admin", "superAdmin"):
+        raise HTTPException(status_code=403, detail="admin role required")
+
+
+@router.get("/skill-categories")
+async def list_skill_categories(
+    user: CurrentUser = Depends(get_current_user),
+):
+    """List both dimensions of the category dictionary.
+    Read-only — any logged-in user can see the taxonomy (the store UI
+    needs it to render filter chips). Mutations are admin-only below."""
+    try:
+        from ...skills.categories import get_store
+        store = get_store()
+        if store is None:
+            return {"scenarios": [], "agent_types": []}
+        return store.list_all()
+    except Exception as e:
+        logger.exception("list_skill_categories failed")
+        raise HTTPException(500, str(e))
+
+
+@router.post("/skill-categories")
+async def upsert_skill_category(
+    body: dict = Body(...),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Admin-only: create or update one category in the given dimension.
+
+    Body: ``{"dimension": "scenarios"|"agent_types",
+             "id": "...", "name": "...", "icon": "...", "order": 1,
+             "description": "..."}``
+    """
+    _require_admin(user)
+    try:
+        from ...skills.categories import get_store, SkillCategory, DIMENSIONS
+        store = get_store()
+        if store is None:
+            raise HTTPException(503, "category store not initialized")
+        dim = str(body.get("dimension", ""))
+        if dim not in DIMENSIONS:
+            raise HTTPException(400, f"dimension must be one of {DIMENSIONS}")
+        cat = SkillCategory(
+            id=str(body.get("id", "")).strip(),
+            name=str(body.get("name", "")).strip(),
+            icon=str(body.get("icon", "")).strip(),
+            order=int(body.get("order", 0) or 0),
+            description=str(body.get("description", "")).strip(),
+        )
+        if not cat.id or not cat.name:
+            raise HTTPException(400, "id and name are required")
+        stored = store.upsert(dim, cat)
+        return {"ok": True, "category": stored.to_dict(), "dimensions": store.list_all()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("upsert_skill_category failed")
+        raise HTTPException(500, str(e))
+
+
+@router.delete("/skill-categories/{dimension}/{cat_id}")
+async def delete_skill_category(
+    dimension: str,
+    cat_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Admin-only: remove one category. Skill assignments to it become
+    orphaned but are filtered out at read time, so no migration needed."""
+    _require_admin(user)
+    try:
+        from ...skills.categories import get_store, DIMENSIONS
+        store = get_store()
+        if store is None:
+            raise HTTPException(503, "category store not initialized")
+        if dimension not in DIMENSIONS:
+            raise HTTPException(400, f"dimension must be one of {DIMENSIONS}")
+        ok = store.delete(dimension, cat_id)
+        if not ok:
+            raise HTTPException(404, f"category {dimension}/{cat_id} not found")
+        return {"ok": True, "dimensions": store.list_all()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("delete_skill_category failed")
+        raise HTTPException(500, str(e))
+
+
+@router.post("/skill-categories/{dimension}/reorder")
+async def reorder_skill_categories(
+    dimension: str,
+    body: dict = Body(...),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Admin-only: rewrite display order from a drag-sort UI.
+    Body: ``{"ordered_ids": ["id1", "id2", ...]}``"""
+    _require_admin(user)
+    try:
+        from ...skills.categories import get_store, DIMENSIONS
+        store = get_store()
+        if store is None:
+            raise HTTPException(503, "category store not initialized")
+        if dimension not in DIMENSIONS:
+            raise HTTPException(400, f"dimension must be one of {DIMENSIONS}")
+        ids = body.get("ordered_ids") or []
+        if not isinstance(ids, list):
+            raise HTTPException(400, "ordered_ids must be a list")
+        store.reorder(dimension, [str(x) for x in ids])
+        return {"ok": True, "dimensions": store.list_all()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("reorder_skill_categories failed")
+        raise HTTPException(500, str(e))
+
+
+@router.put("/skill-pkgs/{skill_id}/categories")
+async def set_skill_pkg_categories(
+    skill_id: str,
+    body: dict = Body(...),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Admin-only: assign categories to one skill (replaces any prior set).
+    Body: ``{"scenarios": [...], "agent_types": [...]}``"""
+    _require_admin(user)
+    try:
+        from ...skills.categories import get_assignments
+        store = get_assignments()
+        if store is None:
+            raise HTTPException(503, "assignment store not initialized")
+        result = store.set(
+            skill_id,
+            list(body.get("scenarios") or []),
+            list(body.get("agent_types") or []),
+        )
+        return {"ok": True, "skill_id": skill_id, "assignments": result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("set_skill_pkg_categories failed")
+        raise HTTPException(500, str(e))
+
+
+@router.get("/skill-pkgs/{skill_id}/categories")
+async def get_skill_pkg_categories(
+    skill_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Read current category memberships for one skill. Any logged-in
+    user can read (the store filter UI needs it)."""
+    try:
+        from ...skills.categories import get_assignments
+        store = get_assignments()
+        if store is None:
+            return {"scenarios": [], "agent_types": []}
+        return store.get(skill_id)
+    except Exception as e:
+        logger.exception("get_skill_pkg_categories failed")
+        raise HTTPException(500, str(e))
 
 
 @router.post("/skill-store")

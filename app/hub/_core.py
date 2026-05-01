@@ -247,6 +247,23 @@ class Hub:
         except Exception as _se:
             logger.warning("Skill store init failed: %s", _se)
 
+        # ── Skill Categories (admin-defined two-dimensional taxonomy) ──
+        # Loaded right after skill_store so the API can join entries with
+        # their category assignments. Two files:
+        #   skill_categories.json            — the dimension dictionary (admin-curated)
+        #   skill_category_assignments.json  — skill_id → category memberships
+        # Failures here are non-fatal: the store falls back to "no
+        # categories", which simply hides the filter chips in the UI.
+        try:
+            from ..skills import categories as _cats_mod
+            cats_file = os.path.join(self._data_dir, "skill_categories.json")
+            asg_file  = os.path.join(self._data_dir, "skill_category_assignments.json")
+            cs, asgs = _cats_mod.init_stores(cats_file, asg_file)
+            logger.info("Skill categories initialized: %d scenarios + %d agent_types",
+                        len(cs.list_all()["scenarios"]), len(cs.list_all()["agent_types"]))
+        except Exception as _ce:
+            logger.warning("Skill categories init failed: %s", _ce)
+
         # ── Meetings + Standalone Tasks ──
         try:
             from .. import meeting as _meeting_mod
