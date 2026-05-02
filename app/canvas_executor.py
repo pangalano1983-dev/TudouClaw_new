@@ -389,7 +389,7 @@ class WorkflowEngine:
                     return
 
                 node = nodes_by_id[ready]
-                self._execute_node(run, node)
+                self._execute_node(run, node, edges)
 
         except Exception as e:
             logger.exception("run %s crashed", run.id)
@@ -424,13 +424,17 @@ class WorkflowEngine:
                 return nid
         return None
 
-    def _execute_node(self, run: WorkflowRun, node: dict) -> None:
+    def _execute_node(self, run: WorkflowRun, node: dict,
+                      edges: list[dict]) -> None:
         """Execute one node end-to-end: state transitions + dispatch +
         event emission + variable capture.
 
         Failure of an individual node does NOT raise — it's recorded
         as NodeState.FAILED so the driver can decide whether to skip
         downstream or stop.
+
+        ``edges`` is the workflow's edge list — needed for the decision
+        node's post-execution hook (skip non-chosen branches).
         """
         nid = node["id"]
         ntype = node.get("type", "")
@@ -446,8 +450,7 @@ class WorkflowEngine:
             executor = _NODE_EXECUTORS.get(ntype)
             if executor is None:
                 raise NotImplementedError(
-                    f"node type {ntype!r} not supported in MVP "
-                    f"(decision/parallel are deferred — see canvas_executor.py)"
+                    f"node type {ntype!r} not supported by this engine"
                 )
 
             # Variable substitution on the config bag before dispatch.
@@ -469,6 +472,13 @@ class WorkflowEngine:
                 "node_id": nid, "node_type": ntype,
                 "outputs": outputs if isinstance(outputs, dict) else {},
             })
+
+            # Post-hook: decision nodes mark non-chosen branches as
+            # SKIPPED so the driver doesn't try to execute them.
+            if ntype == "decision" and isinstance(outputs, dict):
+                self._skip_unchosen_branches(
+                    run, nid, str(outputs.get("branch", "")), edges
+                )
         except Exception as e:
             run.node_states[nid] = NodeState.FAILED
             run.node_finished[nid] = time.time()
@@ -478,6 +488,39 @@ class WorkflowEngine:
                 "node_id": nid, "node_type": ntype,
                 "error": run.node_errors[nid],
             })
+
+    def _skip_unchosen_branches(self, run: WorkflowRun, decision_nid: str,
+                                 chosen_branch: str,
+                                 edges: list[dict]) -> None:
+        """Walk edges out of a decision node; mark targets of
+        non-matching edges as SKIPPED so the driver won't run them.
+
+        Edge-label semantics: each outgoing edge from a decision node
+        carries a ``label`` of "yes" / "no" / etc. The decision node's
+        executor returns ``branch`` (e.g., "yes" if the condition was
+        truthy). Edges whose label != chosen_branch get their target
+        skipped. Edges with no label fall through to the chosen branch
+        (so authors who didn't label edges still get linear flow).
+        """
+        chosen_lower = chosen_branch.strip().lower()
+        for e in edges:
+            if e.get("from") != decision_nid:
+                continue
+            edge_label = (e.get("label") or "").strip().lower()
+            if not edge_label or edge_label == chosen_lower:
+                continue   # edge is taken — don't skip
+            target = e.get("to")
+            if target and run.node_states.get(target) == NodeState.PENDING:
+                run.node_states[target] = NodeState.SKIPPED
+                run.node_finished[target] = time.time()
+                self.store.save_state(run)
+                self._emit(run, "node_skipped", {
+                    "node_id": target,
+                    "reason": (
+                        f"decision '{decision_nid}' chose '{chosen_branch}', "
+                        f"edge label '{edge_label}' not taken"
+                    ),
+                })
 
     def _finish(self, run: WorkflowRun, state: RunState, error: str) -> None:
         run.state = state
@@ -620,11 +663,90 @@ def _exec_tool(engine: WorkflowEngine, run: WorkflowRun,
     return {"output": result}
 
 
+def _exec_decision(engine: WorkflowEngine, run: WorkflowRun,
+                   node: dict, config: dict) -> dict:
+    """Decision node: evaluates ``config.condition`` against the run
+    variables and returns the branch name to take.
+
+    Required config:
+      * ``condition`` — a Python boolean expression. Has access to:
+        - ``vars["node_id.key"]`` — full vars dict
+        - flattened identifiers: ``vars["n1.output"]`` is also exposed
+          as ``n1_output`` (dots/dashes → underscores) for ergonomics
+        - basic literals/builtins: True, False, None, int, str, float,
+          len, bool
+
+    Edges out of this node carry ``label`` = "yes" / "no" / etc; the
+    driver's post-hook (``_skip_unchosen_branches``) marks the
+    non-matching branches as SKIPPED.
+
+    Trust note: this uses Python ``eval`` with restricted builtins.
+    Workflow authors are admin-authenticated (canvas API requires
+    admin auth) and already have arbitrary command execution via the
+    bash tool, so the trust boundary is "admin = trusted code". The
+    restrictions here prevent accidental footguns, not deliberate
+    attacks.
+    """
+    expr = config.get("condition", "")
+    if not expr or not isinstance(expr, str):
+        raise ValueError("decision node missing config.condition")
+
+    safe_locals: dict[str, Any] = {"vars": dict(run.vars)}
+    for k, v in run.vars.items():
+        flat = k.replace(".", "_").replace("-", "_")
+        if flat.isidentifier() and flat not in safe_locals:
+            safe_locals[flat] = v
+
+    safe_globals = {
+        "__builtins__": {
+            "True": True, "False": False, "None": None,
+            "int": int, "str": str, "float": float,
+            "len": len, "bool": bool, "abs": abs,
+            "min": min, "max": max,
+        }
+    }
+    try:
+        result = eval(expr, safe_globals, safe_locals)
+    except Exception as e:
+        raise RuntimeError(
+            f"decision condition {expr!r} eval failed: "
+            f"{type(e).__name__}: {e}"
+        )
+
+    branch = "yes" if bool(result) else "no"
+    # Store raw_result as a primitive (str/int/bool/float). Anything
+    # exotic (objects, lists) gets stringified so JSON serialization
+    # of run state doesn't break.
+    raw = result if isinstance(result, (int, str, bool, float)) else str(result)
+    return {"branch": branch, "raw_result": raw}
+
+
+def _exec_parallel(engine: WorkflowEngine, run: WorkflowRun,
+                   node: dict, config: dict) -> dict:
+    """Parallel node: no-op success.
+
+    The DAG semantics already give us fan-out for free — once this
+    node completes, every downstream node with this as its only
+    upstream becomes ready, and the driver picks them up one at a
+    time. The implicit "join" happens because any node that has
+    multiple upstreams will wait for all of them via the existing
+    ``_pick_ready`` deps check.
+
+    True concurrency (running the fan-out branches on parallel
+    threads) is a perf optimization, not a correctness requirement —
+    deferred. Documented behavior: "parallel" is currently a
+    visual/logical fan-out marker.
+    """
+    return {"fanned_out_at": time.time()}
+
+
 _NODE_EXECUTORS: dict[str, Callable] = {
-    "start": _exec_start,
-    "end":   _exec_end,
-    "agent": _exec_agent,
-    "tool":  _exec_tool,
+    "start":    _exec_start,
+    "end":      _exec_end,
+    "agent":    _exec_agent,
+    "tool":     _exec_tool,
+    "decision": _exec_decision,
+    "parallel": _exec_parallel,
 }
 
 
