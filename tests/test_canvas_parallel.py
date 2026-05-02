@@ -186,3 +186,47 @@ def test_cancel_propagation_aborts_sibling(tmp_path, monkeypatch):
     assert run.node_states["end"] == NodeState.SKIPPED, (
         f"end expected SKIPPED (cascade), got {run.node_states['end']}"
     )
+
+
+def test_validator_rejects_same_agent_in_parallel():
+    from app.canvas_workflows import WorkflowStore
+    wf = {
+        "nodes": [
+            {"id": "s", "type": "start"},
+            {"id": "a", "type": "agent", "config": {"agent_id": "agent_x", "prompt": "p"}},
+            {"id": "b", "type": "agent", "config": {"agent_id": "agent_x", "prompt": "p"}},
+            {"id": "e", "type": "end"},
+        ],
+        "edges": [
+            {"from": "s", "to": "a"},
+            {"from": "s", "to": "b"},
+            {"from": "a", "to": "e"},
+            {"from": "b", "to": "e"},
+        ],
+    }
+    issues = WorkflowStore.validate_for_execution(wf)
+    assert any("agent_x" in i and "parallel" in i for i in issues), \
+        f"expected same-agent rejection, got: {issues}"
+
+
+def test_validator_accepts_same_agent_in_serial():
+    """Same agent in two SERIAL nodes (one is ancestor of the other)
+    is fine — they don't run concurrently."""
+    from app.canvas_workflows import WorkflowStore
+    wf = {
+        "nodes": [
+            {"id": "s", "type": "start"},
+            {"id": "a", "type": "agent", "config": {"agent_id": "agent_x", "prompt": "p"}},
+            {"id": "b", "type": "agent", "config": {"agent_id": "agent_x", "prompt": "p"}},
+            {"id": "e", "type": "end"},
+        ],
+        "edges": [
+            {"from": "s", "to": "a"},
+            {"from": "a", "to": "b"},
+            {"from": "b", "to": "e"},
+        ],
+    }
+    issues = WorkflowStore.validate_for_execution(wf)
+    # Should NOT mention same-agent issue
+    assert not any("parallel" in i for i in issues), \
+        f"unexpectedly flagged: {issues}"

@@ -301,6 +301,46 @@ class WorkflowStore:
             if t != "end" and not adj.get(n["id"]):
                 issues.append(f"node '{n.get('label') or n['id']}' ({t}) has no outgoing edge — execution would dead-end here")
 
+        # Same agent in parallel-reachable nodes — chat_async serializes
+        # per-agent so they wouldn't actually run concurrently, AND the
+        # canvas_executor's per-node working_dir is per-NODE not per-AGENT,
+        # so the parent agent state would race. Reject at validation.
+        agent_node_map = {
+            n["id"]: n.get("config", {}).get("agent_id")
+            for n in nodes if n.get("type") == "agent"
+        }
+
+        def _ancestors(start_id: str) -> set[str]:
+            seen = set()
+            stack = [start_id]
+            while stack:
+                cur = stack.pop()
+                for src in (e.get("from") for e in edges if e.get("to") == cur):
+                    if src and src not in seen:
+                        seen.add(src)
+                        stack.append(src)
+            return seen
+
+        def _are_parallel_reachable(a: str, b: str) -> bool:
+            return a not in _ancestors(b) and b not in _ancestors(a)
+
+        seen_pairs = set()
+        for nid_a, agent_a in agent_node_map.items():
+            for nid_b, agent_b in agent_node_map.items():
+                if nid_a >= nid_b or not agent_a or agent_a != agent_b:
+                    continue
+                pair = (nid_a, nid_b) if nid_a < nid_b else (nid_b, nid_a)
+                if pair in seen_pairs:
+                    continue
+                seen_pairs.add(pair)
+                if _are_parallel_reachable(nid_a, nid_b):
+                    issues.append(
+                        f"agent {agent_a} appears in nodes "
+                        f"'{nid_a}' and '{nid_b}' that can run in parallel "
+                        f"— same agent can't be on two parallel branches "
+                        f"(chat_async serializes per-agent)"
+                    )
+
         # Reachability from start
         if starts:
             seen = set()
