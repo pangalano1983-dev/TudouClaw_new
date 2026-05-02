@@ -58,6 +58,45 @@ if (document.readyState === 'loading') {
   _loadBranding();
 }
 
+// ─── Desktop floater auto-activation (Phase A1, 2026-05-02) ───
+// On portal page load, if at least one agent has desktop_enabled=true,
+// fire `tudouclaw://open` so the Mac floater app shows itself.
+// Once per browser session — sessionStorage flag prevents re-firing
+// on every internal navigation. First time ever: macOS asks
+// "Open TudouClaw?"; subsequent loads are silent.
+async function _maybeActivateDesktopFloater() {
+  try {
+    if (sessionStorage.getItem('tudouFloaterActivated')) return;
+    const res = await fetch('/api/portal/agents/desktop');
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data.agents || data.agents.length === 0) return;
+    sessionStorage.setItem('tudouFloaterActivated', '1');
+    const a = document.createElement('a');
+    a.href = 'tudouclaw://open';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // Best-effort dismiss when the tab closes — A2 will replace this
+    // with a heartbeat from the desktop app for reliable auto-hide.
+    window.addEventListener('beforeunload', () => {
+      const b = document.createElement('a');
+      b.href = 'tudouclaw://hide';
+      b.style.display = 'none';
+      document.body.appendChild(b);
+      b.click();
+    }, { once: true });
+  } catch (_) {
+    // Scheme not registered (app not installed) → nothing to do.
+  }
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', _maybeActivateDesktopFloater);
+} else {
+  _maybeActivateDesktopFloater();
+}
+
 // ============ _ui — UI component helpers (Plan A polish, 2026-05-02) ============
 // Centralized HTML builders so we stop hand-writing inline style blocks
 // for chips, badges, buttons, icons, and section headers. Read tokens

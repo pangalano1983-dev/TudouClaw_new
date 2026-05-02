@@ -23,11 +23,19 @@
         "resizable": true,
         "skipTaskbar": true,
         "visibleOnAllWorkspaces": true,
-        "shadow": false
+        "shadow": false,
+        "visible": false
       }
     ],
     "security": {
       "csp": null
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["tudouclaw"]
+      }
     }
   },
   "bundle": {
