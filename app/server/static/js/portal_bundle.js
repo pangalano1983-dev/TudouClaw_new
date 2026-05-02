@@ -22359,6 +22359,10 @@ function _canvasRenderEditor() {
   var c = document.getElementById('content');
   var wf = _canvasState.current;
   if (!wf) return;
+  // Persist user's preferred log panel state across renders. Default
+  // collapsed; auto-opens when a run starts (handled in _canvasStartRun).
+  var logExpanded = !!_canvasState._logExpanded;
+  var logHeightPx = logExpanded ? 220 : 32;
   c.innerHTML =
       '<div style="display:flex;flex-direction:column;height:calc(100vh - 80px)">'
     // Toolbar
@@ -22366,6 +22370,7 @@ function _canvasRenderEditor() {
     + '    <button class="btn btn-ghost btn-sm" onclick="renderCanvasPage()"><span class="material-symbols-outlined" style="font-size:16px">arrow_back</span> 返回列表</button>'
     + '    <input id="canvas-name" value="' + esc(wf.name) + '" style="font-weight:600;font-size:14px;padding:4px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);flex:1;max-width:340px">'
     +      _canvasStatusBadge(wf.executable_status || 'draft')
+    + '    <span id="canvas-run-status-pill" style="display:none"></span>'
     + '    <span style="font-size:11px;color:var(--text3);font-family:monospace">' + esc(wf.id || '(unsaved)') + '</span>'
     + '    <div style="margin-left:auto;display:flex;gap:6px">'
     +        (wf.id ? _canvasStatusActions(wf) : '')
@@ -22401,9 +22406,190 @@ function _canvasRenderEditor() {
     + '      <div style="font-size:12px;color:var(--text3);margin-top:10px;line-height:1.5">点击画布上的节点查看 / 编辑属性</div>'
     + '    </div>'
     + '  </div>'
+    // Bottom log drawer — collapsed by default, auto-opens on run start.
+    + '  <div id="canvas-log-drawer" style="height:' + logHeightPx + 'px;border-top:1px solid var(--border);background:var(--surface);transition:height 0.2s ease;display:flex;flex-direction:column;flex-shrink:0">'
+    + '    <div onclick="_canvasToggleLog()" style="padding:6px 14px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none;border-bottom:'+(logExpanded?'1px solid var(--border-light)':'none')+'">'
+    + '      <div style="display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600">'
+    + '        <span class="material-symbols-outlined" style="font-size:16px;transform:rotate('+(logExpanded?'0':'180')+'deg);transition:transform 0.2s">expand_more</span>'
+    + '        <span>运行日志</span>'
+    + '        <span id="canvas-log-counter" style="font-size:10px;color:var(--text3);font-weight:500"></span>'
+    + '      </div>'
+    + '      <div style="display:flex;gap:6px;align-items:center">'
+    + '        <button onclick="event.stopPropagation();_canvasClearLog()" title="清空日志" style="padding:2px 6px;font-size:10px;background:none;border:1px solid var(--border);border-radius:4px;color:var(--text3);cursor:pointer">清空</button>'
+    + '      </div>'
+    + '    </div>'
+    + '    <div id="canvas-log-body" style="flex:1;overflow:auto;padding:'+(logExpanded?'8px 14px':'0')+';font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:1.5;display:'+(logExpanded?'block':'none')+'"></div>'
+    + '  </div>'
     + '</div>';
   _canvasRedrawSvg();
   _canvasBindKeyboard();
+  _canvasRenderLogBody();   // restore prior events if any
+}
+
+window._canvasToggleLog = function() {
+  _canvasState._logExpanded = !_canvasState._logExpanded;
+  _canvasRenderEditor();
+};
+
+window._canvasClearLog = function() {
+  _canvasState._runEvents = [];
+  _canvasRenderLogBody();
+  _canvasUpdateLogCounter();
+};
+
+function _canvasUpdateLogCounter() {
+  var el = document.getElementById('canvas-log-counter');
+  if (!el) return;
+  var n = (_canvasState._runEvents || []).length;
+  el.textContent = n ? '· ' + n + ' 条' : '';
+}
+
+function _canvasFormatLogEvent(evt) {
+  var t = evt.type || '';
+  var d = evt.data || {};
+  var ts = evt.ts ? new Date(evt.ts * 1000) : new Date();
+  var hh = String(ts.getHours()).padStart(2, '0');
+  var mm = String(ts.getMinutes()).padStart(2, '0');
+  var ss = String(ts.getSeconds()).padStart(2, '0');
+  var ms = String(ts.getMilliseconds()).padStart(3, '0');
+  var time = hh + ':' + mm + ':' + ss + '.' + ms;
+  // Per-type icon + color
+  var ICONS = {
+    run_created:   {sym: '◆', color: '#94a3b8',  text: 'run created'},
+    run_started:   {sym: '▶', color: '#3b82f6',  text: 'run started'},
+    run_succeeded: {sym: '✓', color: '#16a34a',  text: 'run succeeded'},
+    run_failed:    {sym: '✗', color: '#dc2626',  text: 'run failed'},
+    run_aborted:   {sym: '◼', color: '#ea580c',  text: 'run aborted'},
+    node_started:  {sym: '●', color: '#f59e0b',  text: '→'},
+    node_succeeded:{sym: '✓', color: '#16a34a',  text: '✓'},
+    node_failed:   {sym: '✗', color: '#dc2626',  text: '✗'},
+    node_skipped:  {sym: '⊘', color: '#94a3b8',  text: '⊘'},
+  };
+  var spec = ICONS[t] || {sym: '·', color: 'var(--text3)', text: t};
+  var detail = '';
+  if (t.startsWith('node_')) {
+    var nid = d.node_id || '?';
+    var ntype = d.node_type ? ' (' + d.node_type + ')' : '';
+    detail = '<b style="color:var(--text)">' + esc(nid) + '</b>' + esc(ntype);
+    if (t === 'node_failed' && d.error) {
+      detail += '  <span style="color:#dc2626">— ' + esc(String(d.error).slice(0, 120)) + '</span>';
+    }
+    if (t === 'node_skipped' && d.reason) {
+      detail += '  <span style="color:var(--text3)">— ' + esc(String(d.reason).slice(0, 120)) + '</span>';
+    }
+    if (t === 'node_succeeded' && d.outputs) {
+      var keys = Object.keys(d.outputs);
+      if (keys.length) {
+        detail += '  <span style="color:var(--text3)">→ ' + esc(keys.slice(0, 4).join(', ')) + (keys.length > 4 ? ', …' : '') + '</span>';
+      }
+    }
+  } else if (t === 'run_started') {
+    detail = '<span style="color:var(--text2)">' + esc(d.workflow_name || '') + '</span>';
+  } else if (t === 'run_succeeded' || t === 'run_failed' || t === 'run_aborted') {
+    if (d.duration_s !== undefined) detail = '<span style="color:var(--text3)">' + d.duration_s.toFixed(2) + 's</span>';
+    if (d.error) detail += '  <span style="color:#dc2626">' + esc(String(d.error).slice(0, 200)) + '</span>';
+  }
+  return '<div style="display:flex;gap:8px;padding:2px 0;border-bottom:1px solid var(--border-light)">'
+    + '<span style="color:var(--text3);flex-shrink:0;font-size:10px;padding-top:1px">' + time + '</span>'
+    + '<span style="color:' + spec.color + ';flex-shrink:0;font-weight:700;font-size:13px;line-height:1">' + spec.sym + '</span>'
+    + '<span style="flex:1;min-width:0;word-break:break-word">' + detail + '</span>'
+    + '</div>';
+}
+
+function _canvasAppendLogEvent(evt) {
+  if (!_canvasState._runEvents) _canvasState._runEvents = [];
+  _canvasState._runEvents.push(evt);
+  // Cap at 500 events to keep DOM size manageable on long runs
+  if (_canvasState._runEvents.length > 500) _canvasState._runEvents.shift();
+  var body = document.getElementById('canvas-log-body');
+  if (!body) return;
+  var atBottom = body.scrollTop + body.clientHeight >= body.scrollHeight - 20;
+  body.insertAdjacentHTML('beforeend', _canvasFormatLogEvent(evt));
+  if (atBottom) body.scrollTop = body.scrollHeight;
+  _canvasUpdateLogCounter();
+}
+
+function _canvasRenderLogBody() {
+  var body = document.getElementById('canvas-log-body');
+  if (!body) return;
+  var events = _canvasState._runEvents || [];
+  body.innerHTML = events.length
+    ? events.map(_canvasFormatLogEvent).join('')
+    : '<div style="color:var(--text3);font-size:11px;padding:8px 0">点击右上角"运行"启动 — 事件会流式出现在这里</div>';
+  body.scrollTop = body.scrollHeight;
+  _canvasUpdateLogCounter();
+}
+
+// ─────────── Run-status pill in toolbar ───────────
+// Replaces the implicit "node colors changing" feedback with an
+// explicit overall-run indicator so the user can't miss it. Lives
+// next to the static executable_status badge in the editor toolbar.
+//
+// States:
+//   running   → blue pulse + elapsed-seconds counter
+//   succeeded → green check + total elapsed
+//   failed    → red x + brief reason
+//   (cleared after 30s on terminal states so the badge doesn't linger)
+
+function _canvasSetRunStatus(status, payload) {
+  _canvasState._runStatus = {
+    status: status,        // 'running' | 'succeeded' | 'failed' | 'aborted'
+    startedAt: (status === 'running') ? Date.now() : (_canvasState._runStatus && _canvasState._runStatus.startedAt) || Date.now(),
+    payload: payload || {},
+  };
+  _canvasRenderRunStatusPill();
+  // Start / stop the live elapsed-time tick
+  if (_canvasState._runTickHandle) {
+    clearInterval(_canvasState._runTickHandle);
+    _canvasState._runTickHandle = null;
+  }
+  if (status === 'running') {
+    _canvasState._runTickHandle = setInterval(_canvasRenderRunStatusPill, 250);
+  } else {
+    // Auto-clear terminal status after 30s so the badge doesn't stick around forever
+    setTimeout(function() {
+      if (_canvasState._runStatus && _canvasState._runStatus.status === status) {
+        _canvasState._runStatus = null;
+        _canvasRenderRunStatusPill();
+      }
+    }, 30000);
+  }
+}
+
+function _canvasRenderRunStatusPill() {
+  var el = document.getElementById('canvas-run-status-pill');
+  if (!el) return;
+  var rs = _canvasState._runStatus;
+  if (!rs) {
+    el.style.display = 'none';
+    el.innerHTML = '';
+    return;
+  }
+  var STYLES = {
+    running:   {bg:'rgba(245,158,11,0.18)',  fg:'#b45309', icon:'sync', label:'运行中', pulse:true},
+    succeeded: {bg:'rgba(34,197,94,0.18)',   fg:'#16a34a', icon:'check_circle', label:'运行成功'},
+    failed:    {bg:'rgba(239,68,68,0.18)',   fg:'#dc2626', icon:'error', label:'运行失败'},
+    aborted:   {bg:'rgba(234,88,12,0.18)',   fg:'#ea580c', icon:'stop_circle', label:'已中止'},
+  };
+  var s = STYLES[rs.status] || STYLES.running;
+  var elapsedS = ((Date.now() - rs.startedAt) / 1000);
+  var elapsedTxt;
+  if (rs.status === 'running') {
+    elapsedTxt = elapsedS.toFixed(1) + 's';
+  } else {
+    var d = (rs.payload && typeof rs.payload.duration_s === 'number') ? rs.payload.duration_s : elapsedS;
+    elapsedTxt = d.toFixed(1) + 's';
+  }
+  var pulseStyle = s.pulse ? 'animation:_cvRunPulse 1.4s ease-in-out infinite;' : '';
+  var detail = '';
+  if (rs.status === 'failed' && rs.payload && rs.payload.error) {
+    detail = ' · ' + esc(String(rs.payload.error).slice(0, 40));
+  }
+  el.style.display = 'inline-flex';
+  el.style.cssText = 'display:inline-flex;align-items:center;gap:4px;padding:3px 10px;font-size:11px;border-radius:10px;background:'+s.bg+';color:'+s.fg+';font-weight:600;margin-left:6px;'+pulseStyle;
+  el.innerHTML = '<span class="material-symbols-outlined" style="font-size:14px">'+s.icon+'</span>'
+    + '<span>'+s.label+'</span>'
+    + '<span style="opacity:0.75">· '+elapsedTxt+esc(detail)+'</span>';
 }
 
 function _canvasRedrawSvg() {
@@ -23044,6 +23230,21 @@ window._canvasStartRun = async function() {
     return;
   }
   _toast('▶ 运行已启动 (run ' + (run.id || '').slice(-8) + ')', 'info');
+
+  // Reset + auto-expand the bottom log drawer so the user sees events
+  // streaming in. Inserts a synthetic "run dispatched" entry first so
+  // there's always SOMETHING in the log when the drawer opens, even
+  // if the SSE stream takes a moment to deliver the first event.
+  _canvasState._runEvents = [];
+  _canvasState._logExpanded = true;
+  _canvasRenderEditor();   // re-render to apply the expanded drawer
+  _canvasSetRunStatus('running', {run_id: run.id});
+  _canvasAppendLogEvent({
+    ts: Date.now()/1000,
+    type: 'run_created',
+    data: {run_id: run.id, workflow_name: wf.name},
+  });
+
   // Mark every node as pending → all run nodes start grey
   var initial = {};
   (wf.nodes || []).forEach(function(n) { initial[n.id] = 'pending'; });
@@ -23058,6 +23259,11 @@ window._canvasStartRun = async function() {
   es.onmessage = function(msg) {
     var evt;
     try { evt = JSON.parse(msg.data); } catch (_) { return; }
+    // Stream every event into the log. Do this BEFORE state mutations
+    // so the log row appears even if a downstream handler throws.
+    if (evt.type && evt.type !== 'done' && evt.type !== 'timeout') {
+      _canvasAppendLogEvent(evt);
+    }
     var t = evt.type || '';
     var d = evt.data || {};
     if (t === 'node_started') {
@@ -23070,10 +23276,16 @@ window._canvasStartRun = async function() {
     } else if (t === 'node_skipped') {
       var m = {}; m[d.node_id] = 'skipped'; _canvasApplyRunState(m);
     } else if (t === 'run_succeeded') {
+      _canvasSetRunStatus('succeeded', d);
       _toast('✓ 运行成功 (' + (d.duration_s || 0).toFixed(1) + 's)', 'success');
       _canvasStopRunStream();
-    } else if (t === 'run_failed' || t === 'run_aborted') {
+    } else if (t === 'run_failed') {
+      _canvasSetRunStatus('failed', d);
       _toast('✗ 运行失败: ' + (d.error || '(unknown)').slice(0, 100), 'error');
+      _canvasStopRunStream();
+    } else if (t === 'run_aborted') {
+      _canvasSetRunStatus('aborted', d);
+      _toast('◼ 已中止', 'info');
       _canvasStopRunStream();
     } else if (t === 'done' || t === 'timeout') {
       _canvasStopRunStream();
