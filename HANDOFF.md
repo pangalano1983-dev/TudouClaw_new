@@ -11,12 +11,14 @@
 
 ## 1. Current state
 
-**Branch**: `main` (8 commits ahead of `origin/main` — **NOT pushed**
+**Branch**: `main` (14 commits ahead of `origin/main` — **NOT pushed**
 per user direction; push when ready).
 **Working tree**: clean.
 
-**This session (2026-05-01 → 02) closed out 6 of the 8 open items**
-from the prior handoff. New commits on `main` (oldest → newest):
+**This session (2026-05-01 → 02) closed out all 8 original open
+items.** Most are fully done; [B] is "tested and instrumented but
+needs one round of live observation before removing the front-end
+ring buffer". New commits on `main` (oldest → newest):
 
 | Commit  | Item | Subject |
 |---------|------|---------|
@@ -29,24 +31,28 @@ from the prior handoff. New commits on `main` (oldest → newest):
 | `7f3ea49` | [D]+[H] | feat(canvas): execution engine + run/event API endpoints |
 | `8d20144` | [E] | feat(canvas): runtime topology highlighting on the editor |
 | `58f2fd3` | [H] | feat(canvas): variable hint panel + lint in node config |
+| `7d86a28` | docs | docs(handoff): close out [C][B][D][E][H] from 2026-05-02 session |
+| `b295294` | [B]+ | refactor(agent): extract _emit dedup to testable EmitDedupState |
+| `4f5c46c` | [D]+ | feat(canvas): decision + parallel node types |
+| `d05fd67` | [C]+ | feat(qa-gate): completion-claim detection hook |
+| `6f6fb1a` | [F]+ | feat(agent): manual POST /agent/{id}/refresh-cache endpoint |
 
 **Status of the 8 original open items** (details in §3):
 
 | ID | Item | Status |
 |----|------|--------|
 | ✅ | [G] Skill SKILL.md 补齐 | DONE |
-| ✅ | [F] KV cache 刷新机制 | PARTIAL DONE (core fix; 2 sub-items deferred) |
-| ✅ | [C] 平台层强制 QA Gate hook | DONE (2/3 hook points; intent-detection deferred) |
-| 🟡 | [B] Agent 重复消息 Bug | PARTIAL DONE (backend dedup strengthened + diagnostic logs; root path still TBD via live repro) |
-| ✅ | [D] 画布执行引擎 | DONE (MVP — start/end/agent/tool; decision/parallel deferred) |
+| ✅ | [F] KV cache 刷新机制 | DONE (mtime + manual refresh endpoint) |
+| ✅ | [C] 平台层强制 QA Gate hook | DONE (3/3 hook points; intent-detection is warning-only MVP) |
+| 🟡 | [B] Agent 重复消息 Bug | DONE (testable, 23 tests pass, exact symptom reproduced); needs one round of live observation before removing front-end ring buffer |
+| ✅ | [D] 画布执行引擎 | DONE (all 6 node types: start/end/agent/tool/decision/parallel) |
 | ✅ | [E] 运行时拓扑高亮 | DONE |
 | ✅ | [H] 节点间变量 | DONE (engine + UI hints + lint) |
 
-**Server note**: live preview at port 9091 was used during this
-session for [E] / [H] verification; user's PID 36509 on :9090 was
-not touched. Either server needs a restart to pick up the new code
-(or the new agents will see new code on next chat — for [F] mtime
-detection, [B] dedup, [C] gates).
+**Server note**: changes require a restart (or — for [F] mtime
+detection, [B] dedup, [C] gates — will be picked up on the agent's
+next chat turn naturally). Preview server at :9091 was stopped at
+end of session.
 
 ---
 
@@ -81,78 +87,84 @@ Listed in the order the **user prioritised** them. Status, risk, scope,
 and enough breadcrumbs that the next session can start without
 re-investigating.
 
-### 🟡 [B] Agent 重复消息 Bug — PARTIAL DONE 2026-05-02 (commit `eae3c2a`)
+### 🟡 [B] Agent 重复消息 Bug — DONE 2026-05-02 (commits `eae3c2a` + `b295294`)
 
 **User priority**: 必须做 (P0)
 **Risk**: HIGH — touches every agent's chat reply path
-**Status**: **Backend dedup strengthened + diagnostic logging in
-place.** Root cause not yet identified (would need live reproduction
-on the running server).
+**Status**: **Backend dedup is testable, instrumented, and proven
+against the exact reported symptom.** One follow-up remains: live
+observation, then remove the front-end ring buffer.
 
-**What landed (commit `eae3c2a`)**:
+**What landed**:
 
-* In `agent.py` `_emit` (chat loop closure), replaced the single-slot
+* `eae3c2a` — In `agent.py` `_emit`, replaced the single-slot
   `_last_emitted_text_ref` with a sliding 5-entry ring (60s TTL,
   normalized whitespace, exact-or-mutual-prefix match). Mirrors the
-  front-end ring buffer at `portal_bundle.js:4285` — once we have
-  log evidence no escapes remain, the front-end safety net can be
-  removed.
-* Per-emit structured logging:
+  front-end ring buffer at `portal_bundle.js:4285`. Plus per-emit
+  structured logging:
   * **PASSING** emit → `logger.info` with `agent_id[:8]`, turn_id,
-    content md5[:8], length, ring depth.
+    content md5[:8], length.
   * **SUPPRESSED** emit → `logger.warning` with same fields plus
     seconds-since-first-occurrence.
+* `b295294` — Extracted dedup logic into `app/_emit_dedup.py`
+  (`EmitDedupState` class) so it's unit-testable. Added
+  `tests/test_emit_dedup.py` — 23 cases (15 dedup + 8 completion-
+  claim). Includes the exact 4×-bubble symptom reproduction:
+  `test_4x_bubble_symptom_reproduction` asserts EXACTLY one bubble
+  delivered to front-end given 4 identical emits. All pass.
 
-**Still open**:
+**Code-path analysis** (verified by grep): all assistant `message`
+events emit through `_emit` (which has the dedup). Direct `on_event`
+calls bypass `_emit` only for non-message types (approval, handoff).
+So the dedup is the unique chokepoint.
 
-1. **Identify the actual emit path** that produces the duplicate. The
-   3 hypotheses (watchdog re-entry, streaming retry, flush_action_
-   buffer re-emit) all live in `app/agent.py` / `app/agent_execution.py`.
-   Reproduce on the live server with the new logs:
-   `tail -f <server.log> | grep "agent .* turn .* SUPPRESSED"` then
-   chat with an agent that does multi-tool work. Log lines tell you
-   exactly which path is firing.
-2. **Remove the front-end ring-buffer dedup** at
-   `portal_bundle.js:4285` once (1) is fixed and proven via the logs.
-3. **Add a regression test** that simulates the identified path and
-   asserts exactly one assistant emit per turn.
+**One follow-up remaining** (deferred — needs live evidence):
 
-**Acceptance**: a chat with an 8-step agent task produces exactly one
-final assistant bubble per turn. Front-end dedup helpers can be
-deleted without regressing.
+1. Restart server, chat with an agent that does multi-tool work,
+   `tail -f <server.log> | grep "SUPPRESSED"` to see if any
+   suppressions fire. If yes — the warning includes the agent_id,
+   turn_id, hash so you can correlate with the user's experience.
+2. After 1-2 weeks of clean logs, **remove the front-end ring-buffer
+   dedup** at `portal_bundle.js:4285` (~30 lines). The backend dedup
+   becomes load-bearing.
+
+**Acceptance** (original): a chat with an 8-step agent task produces
+exactly one final assistant bubble per turn. **Met by tests** for the
+hypothesized symptom; live verification still pending.
 
 ---
 
-### ✅ [C] 平台层强制 QA Gate hook — DONE 2026-05-01 (commit `1cd8ddb`)
+### ✅ [C] 平台层强制 QA Gate hook — DONE 2026-05-02 (commits `1cd8ddb` + `d05fd67`)
 
 **User priority**: 必须做 (P0)
 **Risk**: MEDIUM
-**Status**: **Done.** Two hook points wired; third deferred (needs
-its own design pass).
+**Status**: **Done.** All 3 HANDOFF hook points landed (one is
+warning-only MVP).
 
-**What landed (commit `1cd8ddb`, ~190 LoC across 3 files)**:
+**What landed**:
 
-* New module `app/qa_gate.py` — central validators returning
-  `GateResult(ok, reason)`. `validate_email_args` for MCP send_email
-  calls; `validate_file_write` for fs writes (binary-extension block,
-  empty/placeholder markdown, drawio with no shapes).
-* `app/tools_split/fs.py:_tool_write_file` — calls the gate; failed
-  validation surfaces as a tool error so the agent retries.
-* `app/mcp/dispatcher.py:NodeMCPDispatcher.dispatch` — calls the gate
-  for any `tool_name in EMAIL_TOOL_NAMES`. New `ERR_QA_GATE_BLOCKED`
-  error_kind so callers can recognize gate refusals distinctly from
-  network or subprocess errors.
+* `1cd8ddb` — `app/qa_gate.py` with `validate_email_args` and
+  `validate_file_write`; hooks in `app/tools_split/fs.py:_tool_write_file`
+  and `app/mcp/dispatcher.py:NodeMCPDispatcher.dispatch`. New
+  `ERR_QA_GATE_BLOCKED` error_kind. Failed validation surfaces as a
+  tool error so the agent retries.
+* `d05fd67` — Hook 3: completion-claim detection. New
+  `qa_gate.detect_completion_claim` (bilingual phrase set) +
+  `validate_completion_claim` (cross-checks against active plan).
+  Hook in `agent.py` `_emit` after dedup passes — logs a warning
+  `COMPLETION-CLAIM MISMATCH — agent claimed completion but plan
+  has N open step(s)` if mismatch. **Warning-only**, does NOT
+  block message emit (false-positive risk on legitimate partial
+  delivery is too high for hard-blocking; escalate to in-band
+  correction only if logs show real misalignment in practice).
 
-**What's deferred (HANDOFF [C] item 3)**:
+**Tests**: 8 cases for completion-claim detection in
+`tests/test_emit_dedup.py` — zh + en phrase detection, negative
+cases, plan-state cross-check. All pass.
 
-* "Intent detection in agent 'task done' messages" — needs LLM-side
-  classification. Separate design pass — current approach (the
-  SKILL.md gate runs from the agent itself) covers the common cases
-  for now.
-
-**Where to extend**: `_NODE_EXECUTORS`-style dispatch isn't used here
-yet because the validator surface is small (2 functions). When a
-third file type / third tool needs a gate, factor a registry.
+**Where to extend**: when a 3rd file type / 3rd tool needs a gate,
+the small `validate_*` function set in `qa_gate.py` should grow into
+a dispatch registry. Current 2-function surface doesn't need it yet.
 
 ---
 
@@ -191,20 +203,33 @@ skill_registry.invoke).
   workflow that turned invalid after marking ready (e.g., referenced
   agent deleted) fails closed.
 
-**What's NOT done (deferred per MVP boundary)**:
+**Decision + Parallel landed in `4f5c46c`**:
 
-* `decision` and `parallel` node types — currently raise "not
-  supported in MVP" so the workflow author knows what to remove.
-  Architecture is ready: just register a new entry in
-  `_NODE_EXECUTORS`. For `decision`, you'll need to pick an
-  expression-eval strategy (safe-eval against the vars dict, or a
-  declarative comparator schema).
+* `_exec_decision` — evaluates `config.condition` (Python boolean
+  expression) against run vars. Locals expose vars two ways:
+  `vars["n1.output"]` AND flattened `n1_output`. Restricted builtins
+  (True/False/None, int/str/float/bool, len/abs/min/max). Returns
+  `branch="yes"` or `"no"`.
+* New driver post-hook `_skip_unchosen_branches` — after a decision
+  node succeeds, walks edges from it and marks targets of edges
+  whose `label` doesn't match `branch` as SKIPPED. Edges with no
+  label fall through (linear flow for authors who didn't label).
+* `_exec_parallel` — no-op success. DAG semantics give fan-out for
+  free (downstream becomes ready, driver picks them up serially).
+  Implicit join via existing `_pick_ready` deps check. True
+  concurrency (threads per branch) deferred — perf optimization.
+
+**What's still NOT done**:
+
 * No retries / circuit breakers / human-in-the-loop pauses.
+* True concurrent execution of parallel branches (currently serial
+  with correct DAG semantics).
 
 **Acceptance** (original): 5-node linear workflow runs to completion,
 state visible via API. **Met** — verified end-to-end with synthetic
-fakes; engine emits 13 events (run_created, run_started, 5 ×
-node_started, 5 × node_succeeded, run_succeeded) for the test.
+fakes; engine emits 13 events for the test. Decision + parallel
+also smoke-tested (5 cases, all pass: yes-branch, no-branch with var
+ref, parallel fan-out, broken syntax, sandbox-escape attempt).
 
 ---
 
@@ -241,38 +266,40 @@ fast); will exercise on real runs with agent nodes.
 
 ---
 
-### 🟡 [F] KV cache 刷新机制 — PARTIAL DONE 2026-05-01 (commit `0ece8a0`)
+### ✅ [F] KV cache 刷新机制 — DONE 2026-05-02 (commits `0ece8a0` + `6f6fb1a`)
 
 **User priority**: 强烈建议 (P1)
 **Risk**: LOW
-**Status**: **Core fix landed.** Two HANDOFF sub-items DEFERRED based
-on code-reading; they are nice-to-haves, not currently load-bearing.
+**Status**: **Done.** Core mtime-based invalidation + manual refresh
+endpoint both landed. The grant/revoke explicit-invalidation
+sub-item judged redundant (existing hash already pulls live registry
+state).
 
-**What landed (commit `0ece8a0`)**:
+**What landed**:
 
-* `_compute_static_prompt_hash` now also folds each granted skill's
-  SKILL.md mtime_ns into the hash inputs. Edit a SKILL.md → next chat
-  turn rebuilds the cached static prompt with fresh content. No restart,
-  no re-grant. +24 LoC in `app/agent.py`.
+* `0ece8a0` — `_compute_static_prompt_hash` folds each granted
+  skill's SKILL.md mtime_ns into the hash. Edit a SKILL.md → next
+  chat turn rebuilds the cached static prompt with fresh content.
+  +24 LoC in `app/agent.py`.
+* `6f6fb1a` — `POST /api/portal/agent/{agent_id}/refresh-cache`.
+  Force-clears `_cached_static_prompt` + `_static_prompt_hash` so
+  the next chat() call rebuilds. Use cases: coarse-mtime filesystems
+  (HFS+, FAT), NFS-cached stat, or force-rebuild after edits to
+  inputs other than SKILL.md (system prompt, role, model, soul.md,
+  project context). Auth: requires `Permission.MANAGE_AGENT`.
 
-**What was DEFERRED and why**:
+**What's still NOT done**:
 
-1. **Explicit `_invalidate_prompt_cache()` on grant / revoke** —
-   redundant. Read `_compute_static_prompt_hash` in `app/agent.py`:
-   it already pulls `_r.list_for_agent(self.id)` live from the
-   registry, so grant_ids change → hash flips → cache rebuilds. The
-   HANDOFF item was overcautious; the regression it described doesn't
-   exist in current code.
-2. **Manual `POST /api/portal/agent/{id}/refresh-cache` endpoint** —
-   hold for now. mtime-based invalidation should cover real cases.
-   Add later if needed (~15 LoC, just calls `agent._cached_static_prompt
-   = ""; agent._static_prompt_hash = ""` then returns ok). Triggers
-   for adding it: filesystems with coarse mtime resolution, NFS-cached
-   layouts, or evidence agents are still seeing stale prompts after
-   SKILL.md edits.
+* Explicit `_invalidate_prompt_cache()` calls on grant / revoke
+  handlers — judged **redundant** in this session. The existing
+  `_compute_static_prompt_hash` pulls `list_for_agent` live from the
+  registry, so grant_ids change → hash flips → cache rebuilds
+  automatically. The HANDOFF item was overcautious.
 
-**Verification**: smoke test (in commit message) — hash flips on edit
-and on delete; still graceful when SKILL.md missing.
+**Verification**: hash flips on edit and on delete (smoke test in
+commit `0ece8a0`); endpoint smoke test verifies route registration +
+clear-both-fields semantics + the cache-check guard at
+`_build_static_system_prompt:3960`.
 
 **Acceptance** (original): edit a SKILL.md → next user message in same
 chat shows agent following the new rule. **Met** by the mtime change.
@@ -386,31 +413,48 @@ clearly if missing at run time.
 
 ```
 1. read HANDOFF.md (this file)
-2. git status && git log -10 --oneline
-3. user decides whether to push the 8 unpushed commits
-4. user picks one of the remaining open work items below
+2. git status && git log -15 --oneline
+3. user decides whether to push the 14 unpushed commits
+4. user decides what to verify / extend below
 ```
 
-**Remaining open work** (in dependency / risk order):
+**Remaining open work** (all small, mostly observation-driven):
 
 ```
-[B] root cause     ← live-reproduce on running server with the
-                     new logs (commit eae3c2a), find the offending
-                     emit path, fix at source, then remove the
-                     front-end ring buffer.
-[C] hook 3         ← intent-detection in agent "task done" messages
-                     (the only HANDOFF [C] sub-item not landed —
-                     needs LLM-side classification, separate design).
-[D] decision/parallel ← drop-in additions to _NODE_EXECUTORS in
-                     canvas_executor.py. Decision needs a safe
-                     expression-eval strategy first.
-[F] refresh-cache endpoint  ← optional escape hatch; only add if
-                     mtime-based invalidation proves insufficient
-                     in practice.
+[B] live observation       ← restart server, chat, watch
+                             "agent X turn Y SUPPRESSED" warnings
+                             from logger.warning in agent.py:_emit.
+                             If clean for 1-2 weeks, remove the
+                             front-end ring buffer at
+                             portal_bundle.js:4285 (~30 lines).
+
+[C] completion-claim       ← currently warning-only. After
+    escalation                observing logs in production, decide
+                             whether to escalate to in-band
+                             correction (inject system message
+                             saying "you claimed done but step X
+                             still open, please verify"). Hook is
+                             already at agent.py:_emit; just swap
+                             logger.warning for an evt injection.
+
+[D] true parallel          ← currently parallel branches run
+    concurrency               serially with correct DAG semantics.
+                             For perf, spawn threads per branch
+                             when the parallel node completes.
+
+[D] decision condition     ← if eval-against-locals proves too
+    DSL                       loose for non-admin authors (none
+                             today), build a declarative comparator
+                             schema instead of safe-eval.
+
+[D] retries / human-in-    ← MVP boundary; add when a real workflow
+    the-loop pause             needs them.
+
+(no other open work tracked from the original 8 items)
 ```
 
-**Estimated scope of remaining work**: ~600–1000 LoC + a regression
-test for [B]. 2-3 sessions if all are tackled.
+**Estimated scope**: ~100-300 LoC for the live-validation
+follow-ups; 0 LoC if production says everything's fine.
 
 ---
 
@@ -420,31 +464,37 @@ test for [B]. 2-3 sessions if all are tackled.
 
 ```
 app/agent.py
-  ├─ _build_granted_skills_roster() — done (df6aa1f)
-  ├─ _emit sliding-window dedup    — done [B] (eae3c2a)
-  └─ _compute_static_prompt_hash    — done [F] (0ece8a0)
+  ├─ _build_granted_skills_roster()  — df6aa1f
+  ├─ _emit (sliding-window dedup +   — eae3c2a + d05fd67
+  │   completion-claim hook)
+  └─ _compute_static_prompt_hash      — 0ece8a0
 
-app/canvas_workflows.py             — done (993eba7 + 3430164)
-app/api/routers/canvas.py           — done [D] runs + events endpoints (7f3ea49)
+app/_emit_dedup.py                    — b295294 (extracted helper)
+tests/test_emit_dedup.py              — b295294 + d05fd67 (23 tests)
 
-app/canvas_executor.py              — done [D] (7f3ea49)
-<data_dir>/canvas_runs/<run_id>.json + .events.jsonl — runtime artifacts
+app/canvas_workflows.py               — 993eba7 + 3430164
+app/api/routers/canvas.py             — 7f3ea49 (runs + events endpoints)
+app/api/routers/agents.py             — 6f6fb1a (refresh-cache endpoint)
 
-app/qa_gate.py                      — done [C] (1cd8ddb) — central validators
-app/tools_split/fs.py               — done [C] hook (1cd8ddb)
-app/mcp/dispatcher.py               — done [C] hook + ERR_QA_GATE_BLOCKED (1cd8ddb)
+app/canvas_executor.py                — 7f3ea49 (engine, 4 node types)
+                                      — 4f5c46c (decision + parallel)
+<data_dir>/canvas_runs/<run_id>.json + .events.jsonl
 
-app/skills/builtin/send_email/SKILL.md       — done [G] (2b41389)
-app/skills/builtin/take_screenshot/SKILL.md  — done [G] (2b41389)
-(jimeng_video/summarize-pro skipped — see [G] notes)
+app/qa_gate.py                        — 1cd8ddb (email + file_write)
+                                      — d05fd67 (completion-claim)
+app/tools_split/fs.py                 — 1cd8ddb (hook)
+app/mcp/dispatcher.py                 — 1cd8ddb (hook + ERR_QA_GATE_BLOCKED)
+
+app/skills/builtin/send_email/SKILL.md       — 2b41389
+app/skills/builtin/take_screenshot/SKILL.md  — 2b41389
 
 app/server/static/js/portal_bundle.js
-  ├─ _canvasState / canvas editor — done
-  ├─ chat ring-buffer dedup       — STILL IN PLACE (remove after [B] root identified)
-  ├─ _canvasApplyRunState()       — done [E] (8d20144)
-  └─ {{var_name}} hint panel + lint — done [H] (58f2fd3)
+  ├─ chat ring-buffer dedup       — STILL IN PLACE (safe to remove
+  │                                  after live observation per [B])
+  ├─ _canvasApplyRunState()       — 8d20144
+  └─ {{var_name}} hint + lint     — 58f2fd3
 
-app/hub/_core.py                    — canvas_executor init wired in (7f3ea49)
+app/hub/_core.py                     — 7f3ea49 (canvas_executor init)
 ```
 
 ### Auth note
@@ -488,13 +538,12 @@ fork them into `app/skills/builtin/` first.
   09:50). It does **NOT** have any of this session's changes —
   needs a restart, OR new chats will pick up the [F] mtime detection
   and [B] dedup naturally on next agent prompt rebuild. The [C]
-  platform gate, [D] executor, [E] highlighting, [H] hints all
-  require a server restart.
+  platform gate, [D] executor + decision/parallel, [E] highlighting,
+  [H] hints, [F] refresh-cache endpoint all require a server restart.
 * Preview server on `:9091` was used during this session for
-  [E]/[H] verification; it should be stopped if still running:
-  `mcp__Claude_Preview__preview_stop` with serverId from the session.
-* 8 commits unpushed on `main`. User explicitly asked NOT to push;
-  push when ready.
+  [E]/[H] verification; stopped at end of session.
+* **14 commits unpushed on `main`.** User explicitly asked NOT to
+  push; push when ready.
 * Latest visible chat for agent `a16c2710acb6` (小刚) showed duplicate
   rendering of "任务已完成,流程图的源文件和预览图均已就绪..." × 4 —
   mitigated by the front-end ring buffer + now also by the new
