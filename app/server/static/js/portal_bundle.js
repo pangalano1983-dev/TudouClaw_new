@@ -26443,6 +26443,7 @@ function renderSettingsHub() {
   var c = document.getElementById('content');
   var tabs = [
     { id: 'branding',    label: window.t('tab.settings.branding',     '品牌'),         icon: 'workspaces' },
+    { id: 'system',      label: window.t('tab.settings.system',       '系统配置'),    icon: 'tune' },
     { id: 'config',      label: window.t('tab.settings.globalConfig', '全局配置'),    icon: 'settings' },
     { id: 'providers',   label: window.t('tab.settings.providers',    'LLM 提供商'),  icon: 'dns' },
     // 'llm_tiers' tab hidden — replaced by per-agent LLM Router
@@ -26471,6 +26472,9 @@ function renderSettingsHub() {
     if (r.current === 'branding') {
       actionsEl.innerHTML = '';
       renderBrandingSettings();
+    } else if (r.current === 'system') {
+      actionsEl.innerHTML = '';
+      renderSystemSettings();
     } else if (r.current === 'config') renderConfig();
     else if (r.current === 'providers') {
       // "+ Add Provider" button now lives inside renderProviders() page
@@ -26877,6 +26881,7 @@ function renderSettingsPage() {
   var c = document.getElementById('content');
   var tabs = [
     { id: 'branding',   label: window.t('tab.settings.branding',     '品牌'),          icon: 'workspaces' },
+    { id: 'system',     label: window.t('tab.settings.system',       '系统配置'),     icon: 'tune' },
     { id: 'providers',  label: window.t('tab.settings.providers',    'LLM Providers'), icon: 'dns' },
     // 'llm_tiers' tab hidden — replaced by per-agent LLM Router
     // (extra_llms + auto_route). Tier backend still exists but no UI
@@ -26911,6 +26916,7 @@ function renderSettingsPage() {
   if (actionsEl) actionsEl.innerHTML = _tabActions[_settingsSubTab] || '';
   switch(_settingsSubTab) {
     case 'branding': renderBrandingSettings(sc); break;
+    case 'system': renderSystemSettings(sc); break;
     case 'providers': renderProviders(sc); break;
     case 'llm_tiers': renderLLMTiers(sc); break;
     case 'roles_v2': renderRolePresetsV2(sc); break;
@@ -27048,6 +27054,91 @@ window._brandingReset = async function() {
     _toast('重置失败: ' + e, 'error');
   }
 };
+
+// ============ System Settings (系统配置) ============
+async function renderSystemSettings(container) {
+  var c = container || document.getElementById('content');
+  if (!c) return;
+  c.innerHTML = '<div style="padding:24px;color:var(--text3);font-size:13px">Loading…</div>';
+
+  var data;
+  try {
+    data = await api('GET', '/api/portal/system-settings');
+  } catch (e) {
+    c.innerHTML = '<div style="padding:24px;color:var(--error)">加载失败: ' + esc(String(e)) + '</div>';
+    return;
+  }
+  var settings = (data && data.settings) || {};
+  var defaults = (data && data.defaults) || {};
+
+  function renderSelect(path, current, defaultVal) {
+    var opts = '';
+    for (var i = 1; i <= 32; i++) {
+      opts += '<option value="' + i + '"' + (i === current ? ' selected' : '') + '>' + i + '</option>';
+    }
+    return '<select onchange="_systemSettingsPatch(\'' + path + '\', parseInt(this.value, 10))" '
+      + 'style="padding:6px 12px;border:1px solid var(--border);border-radius:6px;'
+      + 'background:var(--bg);color:var(--text);font-size:13px;min-width:80px">'
+      + opts + '</select>'
+      + '<span style="font-size:11px;color:var(--text3);margin-left:8px">默认 ' + defaultVal + '</span>';
+  }
+
+  var canvasMax = (settings.canvas && settings.canvas.max_parallel_nodes) || 6;
+  var canvasDefault = (defaults.canvas && defaults.canvas.max_parallel_nodes) || 6;
+  var delegateMax = (settings.delegate && settings.delegate.max_parallel_children) || 6;
+  var delegateDefault = (defaults.delegate && defaults.delegate.max_parallel_children) || 6;
+  var anyDiverged = (canvasMax !== canvasDefault) || (delegateMax !== delegateDefault);
+
+  c.innerHTML = ''
+    + '<div style="padding:24px;max-width:680px">'
+    +   '<h2 style="margin:0 0 6px;font-size:18px">系统配置</h2>'
+    +   '<div style="font-size:12px;color:var(--text3);margin-bottom:24px">影响整个部署的运行时参数。改完保存后，下次画布运行 / agent 调用立即生效。</div>'
+
+    +   '<div style="background:var(--surface);border:1px solid var(--border-light);border-radius:10px;padding:18px;margin-bottom:14px">'
+    +     '<div style="font-size:13px;font-weight:700;margin-bottom:4px">画布编排 (Canvas)</div>'
+    +     '<div style="font-size:11px;color:var(--text3);margin-bottom:12px">每次画布运行同时最多跑几个节点</div>'
+    +     '<div style="display:flex;align-items:center;gap:8px">'
+    +       '<span style="font-size:12px;flex:1">Max parallel nodes per run</span>'
+    +       renderSelect('canvas.max_parallel_nodes', canvasMax, canvasDefault)
+    +     '</div>'
+    +   '</div>'
+
+    +   '<div style="background:var(--surface);border:1px solid var(--border-light);border-radius:10px;padding:18px;margin-bottom:14px">'
+    +     '<div style="font-size:13px;font-weight:700;margin-bottom:4px">Agent 委派 (Delegate)</div>'
+    +     '<div style="font-size:11px;color:var(--text3);margin-bottom:12px">父 agent 一次 delegate_parallel 调用最多并发几个子 agent</div>'
+    +     '<div style="display:flex;align-items:center;gap:8px">'
+    +       '<span style="font-size:12px;flex:1">Max parallel children per call</span>'
+    +       renderSelect('delegate.max_parallel_children', delegateMax, delegateDefault)
+    +     '</div>'
+    +   '</div>'
+
+    +   '<button class="btn btn-ghost btn-sm" onclick="_systemSettingsResetDefaults()" '
+    +     (anyDiverged ? '' : 'disabled style="opacity:0.5"')
+    +     '><span class="material-symbols-outlined" style="font-size:14px">restart_alt</span> Reset to defaults</button>'
+    + '</div>';
+}
+
+async function _systemSettingsPatch(path, value) {
+  try {
+    await api('PATCH', '/api/portal/system-settings', { path: path, value: value });
+    _toast('已保存', 'success');
+    renderSystemSettings();   // re-render so Reset button state updates
+  } catch (e) {
+    _toast('保存失败: ' + e, 'error');
+  }
+}
+
+async function _systemSettingsResetDefaults() {
+  // Two single-path PATCHes — keep API surface minimal
+  try {
+    await api('PATCH', '/api/portal/system-settings', { path: 'canvas.max_parallel_nodes', value: 6 });
+    await api('PATCH', '/api/portal/system-settings', { path: 'delegate.max_parallel_children', value: 6 });
+    _toast('已重置为默认', 'success');
+    renderSystemSettings();
+  } catch (e) {
+    _toast('重置失败: ' + e, 'error');
+  }
+}
 
 // ============ LLM Tiers Page (V2) ============
 async function renderLLMTiers(container) {
