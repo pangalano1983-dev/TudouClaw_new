@@ -230,6 +230,49 @@ async def get_canvas_run(wf_id: str, run_id: str,
     return state
 
 
+@router.post("/canvas-workflows/{wf_id}/runs/{run_id}/retry")
+async def retry_canvas_run(wf_id: str, run_id: str,
+                            body: dict = Body(...),
+                            user: CurrentUser = Depends(get_current_user)):
+    """Retry a failed/aborted run.
+
+    Body: ``{"mode": "restart" | "resume"}`` (default "resume").
+
+    * ``restart`` — fresh run from scratch (new run_id, empty shared
+      dir, new audit log). Same effect as POST /runs but explicit.
+    * ``resume``  — keep SUCCEEDED nodes' state + outputs; reset
+      FAILED + SKIPPED + RUNNING(stale) nodes to PENDING. Same
+      run_id, sharedfile/artifact/audit history preserved. Useful
+      when an upstream agent took 5min and only a downstream node
+      failed — don't redo the work.
+
+    Returns: ``{mode, run_id}``. For ``restart`` the run_id is NEW;
+    for ``resume`` it's the original.
+    """
+    store = _store_or_503()
+    engine = _engine_or_503()
+    _verify_run_belongs_to_workflow(engine, wf_id, run_id)
+    wf = store.get(wf_id)
+    if not wf:
+        raise HTTPException(404, f"workflow {wf_id} not found")
+    if str(wf.get("executable_status", "")) != "ready":
+        raise HTTPException(400, "workflow is not ready (executable_status != 'ready')")
+
+    mode = (body.get("mode") or "resume").strip().lower()
+    if mode not in ("restart", "resume"):
+        raise HTTPException(400, "mode must be 'restart' or 'resume'")
+
+    try:
+        if mode == "restart":
+            run = engine.trigger(wf, started_by=getattr(user, "user_id", "") or "")
+            return {"mode": "restart", "run_id": run.id, "is_new": True}
+        else:
+            run = engine.resume_run(run_id, wf)
+            return {"mode": "resume", "run_id": run.id, "is_new": False}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @router.get("/canvas-workflows/{wf_id}/runs/{run_id}/log")
 async def get_canvas_run_log(wf_id: str, run_id: str,
                               user: CurrentUser = Depends(get_current_user)):

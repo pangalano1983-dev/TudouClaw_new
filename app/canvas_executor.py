@@ -399,6 +399,123 @@ class WorkflowEngine:
         with self._lock:
             return self._runs.get(run_id)
 
+    # ── Retry ──
+
+    def resume_run(self, run_id: str, workflow: dict) -> WorkflowRun:
+        """Resume a failed/aborted run from its failed nodes.
+
+        Reuses the SAME ``run_id`` (and therefore the same shared dir,
+        artifact index, audit log) — appends new events to the existing
+        events.jsonl. SUCCEEDED nodes keep their state + outputs vars
+        intact so downstream nodes can still ``{{...}}``-reference
+        them.
+
+        Reset semantics:
+          * FAILED  → PENDING, clear node_errors[id], clear node_finished[id]
+          * SKIPPED → PENDING, clear node_finished[id]
+          * RUNNING (stale, e.g. crashed) → PENDING
+          * SUCCEEDED → unchanged
+          * PENDING → unchanged
+
+        Run-level fields:
+          * state         → RUNNING
+          * error         → ""
+          * finished_at   → 0.0
+          * started_at    → unchanged (preserves original start time;
+                            individual node started_at gets refreshed
+                            when the driver picks them up)
+
+        Spawns a fresh driver thread. Caller doesn't await — UI polls
+        via /runs/{id} or the SSE events stream.
+        """
+        from .canvas_workflows import WorkflowStore
+        # Pre-flight: re-validate workflow (agent could have been
+        # deleted between original run and retry).
+        issues = WorkflowStore.validate_for_execution(workflow)
+        if issues:
+            raise ValueError(
+                "workflow failed pre-flight validation:\n  • "
+                + "\n  • ".join(issues)
+            )
+
+        state = self.store.load_state(run_id)
+        if not state:
+            raise ValueError(f"run {run_id} not found on disk")
+        cur_state = state.get("state")
+        if cur_state in ("running",):
+            raise ValueError(
+                f"run {run_id} is currently {cur_state} — abort it first "
+                f"before retrying"
+            )
+        if cur_state == "succeeded":
+            raise ValueError(
+                f"run {run_id} already succeeded — nothing to retry"
+            )
+
+        # Rebuild WorkflowRun from on-disk state
+        run = WorkflowRun(
+            id=state.get("id", run_id),
+            workflow_id=state.get("workflow_id", ""),
+            workflow_name=state.get("workflow_name", ""),
+            started_by=state.get("started_by", ""),
+            state=RunState.RUNNING,
+            started_at=float(state.get("started_at") or time.time()),
+            finished_at=0.0,
+            error="",
+            node_states={k: NodeState(v) for k, v in (state.get("node_states") or {}).items()},
+            node_started=dict(state.get("node_started") or {}),
+            node_finished=dict(state.get("node_finished") or {}),
+            node_errors=dict(state.get("node_errors") or {}),
+            vars=dict(state.get("vars") or {}),
+        )
+
+        # Reset non-success nodes
+        reset_count = 0
+        for nid, st in list(run.node_states.items()):
+            if st in (NodeState.FAILED, NodeState.SKIPPED, NodeState.RUNNING):
+                run.node_states[nid] = NodeState.PENDING
+                run.node_errors.pop(nid, None)
+                run.node_finished.pop(nid, None)
+                reset_count += 1
+
+        # Pre-flight: nothing to do if no nodes were reset (e.g. all
+        # SUCCEEDED but state was somehow FAILED). Caller handled the
+        # only-succeeded case above; this is a safety net.
+        if reset_count == 0:
+            raise ValueError(
+                f"run {run_id} has no failed/skipped nodes to retry"
+            )
+
+        with self._lock:
+            self._runs[run.id] = run
+        self.store.save_state(run)
+        self._emit(run, "run_resumed", {
+            "reset_count": reset_count,
+            "kept_succeeded": sum(1 for s in run.node_states.values() if s == NodeState.SUCCEEDED),
+        })
+
+        t = threading.Thread(
+            target=self._drive_resumed,
+            args=(run, workflow),
+            name=f"canvas-resume-{run.id[:8]}",
+            daemon=True,
+        )
+        t.start()
+        return run
+
+    def _drive_resumed(self, run: WorkflowRun, workflow: dict) -> None:
+        """Like ``_drive`` but doesn't emit ``run_started`` (use
+        ``run_resumed`` instead) and doesn't reset run.started_at."""
+        # Don't re-emit run_started; resume_run already emitted run_resumed.
+        # Just call the main driver loop body. To minimize duplication,
+        # we inline only the differences and delegate to a shared helper.
+        try:
+            self._drive_loop(run, workflow)
+        except Exception as e:
+            logger.exception("resumed run %s crashed", run.id)
+            self._finish(run, RunState.FAILED,
+                         f"engine crashed during resume: {type(e).__name__}: {e}")
+
     # ── Event emission ──
 
     def _emit(self, run: WorkflowRun, event_type: str,
@@ -431,7 +548,17 @@ class WorkflowEngine:
             "workflow_id": run.workflow_id,
             "workflow_name": run.workflow_name,
         })
+        try:
+            self._drive_loop(run, workflow)
+        except Exception as e:
+            logger.exception("run %s crashed", run.id)
+            self._finish(run, RunState.FAILED,
+                         f"engine crashed: {type(e).__name__}: {e}")
 
+    def _drive_loop(self, run: WorkflowRun, workflow: dict) -> None:
+        """Common driver loop body. Shared by ``_drive`` (fresh runs)
+        and ``_drive_resumed`` (retries). Iterates until all nodes are
+        in terminal state or no more progress is possible."""
         nodes_by_id = {n["id"]: n for n in workflow.get("nodes") or []}
         edges = workflow.get("edges") or []
 
@@ -443,41 +570,35 @@ class WorkflowEngine:
             if src in nodes_by_id and dst in nodes_by_id:
                 deps[dst].append(src)
 
-        try:
-            while True:
-                ready = self._pick_ready(run, nodes_by_id, deps)
-                if ready is None:
-                    # Nothing ready — either we're done, or we've stalled.
-                    if all(s in TERMINAL_NODE_STATES
-                           for s in run.node_states.values()):
-                        # All nodes terminal → run done.
-                        any_failed = any(
-                            s == NodeState.FAILED
-                            for s in run.node_states.values()
-                        )
-                        if any_failed:
-                            self._finish(run, RunState.FAILED,
-                                         "one or more nodes failed")
-                        else:
-                            self._finish(run, RunState.SUCCEEDED, "")
-                        return
-                    # Stalled — some nodes pending but no deps satisfied.
-                    # Means a cycle (validate should've caught this) or a
-                    # disconnected subgraph. Bail.
-                    pending = [nid for nid, s in run.node_states.items()
-                               if s == NodeState.PENDING]
-                    self._finish(run, RunState.FAILED,
-                                 f"stalled — pending nodes have unsatisfied "
-                                 f"deps: {pending[:5]}")
+        while True:
+            ready = self._pick_ready(run, nodes_by_id, deps)
+            if ready is None:
+                # Nothing ready — either we're done, or we've stalled.
+                if all(s in TERMINAL_NODE_STATES
+                       for s in run.node_states.values()):
+                    # All nodes terminal → run done.
+                    any_failed = any(
+                        s == NodeState.FAILED
+                        for s in run.node_states.values()
+                    )
+                    if any_failed:
+                        self._finish(run, RunState.FAILED,
+                                     "one or more nodes failed")
+                    else:
+                        self._finish(run, RunState.SUCCEEDED, "")
                     return
+                # Stalled — some nodes pending but no deps satisfied.
+                # Means a cycle (validate should've caught this) or a
+                # disconnected subgraph. Bail.
+                pending = [nid for nid, s in run.node_states.items()
+                           if s == NodeState.PENDING]
+                self._finish(run, RunState.FAILED,
+                             f"stalled — pending nodes have unsatisfied "
+                             f"deps: {pending[:5]}")
+                return
 
-                node = nodes_by_id[ready]
-                self._execute_node(run, node, edges)
-
-        except Exception as e:
-            logger.exception("run %s crashed", run.id)
-            self._finish(run, RunState.FAILED,
-                         f"engine crashed: {type(e).__name__}: {e}")
+            node = nodes_by_id[ready]
+            self._execute_node(run, node, edges)
 
     def _pick_ready(self, run: WorkflowRun,
                     nodes_by_id: dict[str, dict],
