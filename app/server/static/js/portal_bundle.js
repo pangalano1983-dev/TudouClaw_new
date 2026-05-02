@@ -26086,6 +26086,7 @@ function renderIntegrationsHub() {
 function renderSettingsHub() {
   var c = document.getElementById('content');
   var tabs = [
+    { id: 'branding',    label: window.t('tab.settings.branding',     '品牌'),         icon: 'workspaces' },
     { id: 'config',      label: window.t('tab.settings.globalConfig', '全局配置'),    icon: 'settings' },
     { id: 'providers',   label: window.t('tab.settings.providers',    'LLM 提供商'),  icon: 'dns' },
     // 'llm_tiers' tab hidden — replaced by per-agent LLM Router
@@ -26111,7 +26112,10 @@ function renderSettingsHub() {
   var _orig = document.getElementById('content');
   sc.id = 'content'; _orig.id = 'content-outer';
   try {
-    if (r.current === 'config') renderConfig();
+    if (r.current === 'branding') {
+      actionsEl.innerHTML = '';
+      renderBrandingSettings();
+    } else if (r.current === 'config') renderConfig();
     else if (r.current === 'providers') {
       // "+ Add Provider" button now lives inside renderProviders() page
       // header (matches Permissions / Nodes pattern). No topbar action.
