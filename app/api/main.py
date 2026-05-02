@@ -440,6 +440,7 @@ def create_app() -> FastAPI:
         v2 as v2_router,
         orchestration as orchestration_router,
         canvas as canvas_router,
+        branding as branding_router,
     )
 
     # ── API routers ──────────────────────────────────────────────────
@@ -474,6 +475,7 @@ def create_app() -> FastAPI:
     app.include_router(v2_router.router)
     app.include_router(orchestration_router.router)
     app.include_router(canvas_router.router)
+    app.include_router(branding_router.router)
 
     # ── Static files (JS/CSS used by portal templates) ───────────────
     server_static = os.path.join(os.path.dirname(__file__), "..", "server", "static")

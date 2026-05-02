@@ -9,6 +9,55 @@ let _adminCtx = { user_id: '', username: '', role: '', display_name: '', agent_i
 let _settingsSubTab = 'providers'; // Current sub-tab inside Settings view
 let _agentsSubTab = null; // Current node tab inside Agents view (null = first node)
 
+// ============ Branding (site name + logo) ============
+// Single TudouClaw deployment = one company; admin can override the
+// header in Settings → 品牌. Fetched once on portal boot; cached on
+// window._branding so the next tab switch doesn't refetch.
+
+window._branding = window._branding || {site_name: 'Tudou Claws', site_subtitle: 'Admin Console', logo_url: ''};
+
+async function _loadBranding() {
+  try {
+    var r = await fetch('/api/portal/branding', {credentials: 'include'});
+    if (!r.ok) return;
+    var d = await r.json();
+    window._branding = d || window._branding;
+    _applyBranding();
+  } catch (e) { /* fall back to defaults */ }
+}
+
+function _applyBranding() {
+  var b = window._branding || {};
+  var nameEl = document.getElementById('brand-site-name');
+  var subEl = document.getElementById('node-info');
+  var logoImg = document.getElementById('brand-logo-img');
+  var logoFallback = document.getElementById('brand-logo-fallback');
+  if (nameEl) nameEl.textContent = b.site_name || 'Tudou Claws';
+  if (subEl && b.site_subtitle) subEl.textContent = b.site_subtitle;
+  if (logoImg && logoFallback) {
+    if (b.logo_url) {
+      logoImg.src = b.logo_url;
+      logoImg.style.display = 'block';
+      logoFallback.style.display = 'none';
+    } else {
+      logoImg.style.display = 'none';
+      logoFallback.style.display = '';
+    }
+  }
+  // Page title too
+  if (b.site_name && document.title) {
+    document.title = b.site_name + ' Portal';
+  }
+}
+
+// Run early — fire-and-forget; the header has sensible defaults so
+// even if this fails the page is usable.
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', _loadBranding);
+} else {
+  _loadBranding();
+}
+
 // ============ _ui — UI component helpers (Plan A polish, 2026-05-02) ============
 // Centralized HTML builders so we stop hand-writing inline style blocks
 // for chips, badges, buttons, icons, and section headers. Read tokens
@@ -26106,6 +26155,7 @@ function _refreshNodeSwitcher() {
 function renderSettingsPage() {
   var c = document.getElementById('content');
   var tabs = [
+    { id: 'branding',   label: window.t('tab.settings.branding',     '品牌'),          icon: 'workspaces' },
     { id: 'providers',  label: window.t('tab.settings.providers',    'LLM Providers'), icon: 'dns' },
     // 'llm_tiers' tab hidden — replaced by per-agent LLM Router
     // (extra_llms + auto_route). Tier backend still exists but no UI
@@ -26139,6 +26189,7 @@ function renderSettingsPage() {
   };
   if (actionsEl) actionsEl.innerHTML = _tabActions[_settingsSubTab] || '';
   switch(_settingsSubTab) {
+    case 'branding': renderBrandingSettings(sc); break;
     case 'providers': renderProviders(sc); break;
     case 'llm_tiers': renderLLMTiers(sc); break;
     case 'roles_v2': renderRolePresetsV2(sc); break;
@@ -26153,6 +26204,129 @@ function renderSettingsPage() {
     default: sc.innerHTML = '<div style="color:var(--text3);padding:20px">Select a settings tab</div>';
   }
 }
+
+// ============ Branding Settings (品牌) ============
+async function renderBrandingSettings(container) {
+  var c = container || document.getElementById('content');
+  c.innerHTML = '<div style="color:var(--text3);padding:20px">加载…</div>';
+  try {
+    var b = await api('GET', '/api/portal/branding');
+    var current = window._branding = b || window._branding;
+    c.innerHTML =
+      '<div style="max-width:640px">'
+      + _ui.sectionHeader('品牌设置', {
+          icon: 'workspaces',
+          action: '<button class="btn btn-ghost btn-sm" onclick="_brandingReset()" title="清除自定义,恢复默认">'
+            + _ui.icon('restart_alt', {size: 14}) + ' 恢复默认</button>',
+        })
+      + '<p style="font-size:12px;color:var(--text3);margin:0 0 18px;line-height:1.6">'
+      + '本部署的品牌信息(站点名 + Logo)。改动会立即生效在头部 / 标题栏 / 登录页。一套 TudouClaw = 一个公司,所以这里是全局设置。'
+      + '</p>'
+      // ── Site name ──
+      + '<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:14px">'
+      +   '<label style="display:block;font-size:12px;font-weight:600;color:var(--text2);margin-bottom:6px">站点名 (Site Name)</label>'
+      +   '<input id="brand-site-name-input" value="' + esc(current.site_name || '') + '" '
+      +     'placeholder="Tudou Claws" '
+      +     'style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:14px;font-weight:600">'
+      +   '<div style="font-size:11px;color:var(--text3);margin-top:6px">显示在左上角 + 浏览器标签页。留空恢复默认 "Tudou Claws"。</div>'
+      + '</div>'
+      // ── Subtitle ──
+      + '<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:14px">'
+      +   '<label style="display:block;font-size:12px;font-weight:600;color:var(--text2);margin-bottom:6px">副标题 (Subtitle)</label>'
+      +   '<input id="brand-site-subtitle-input" value="' + esc(current.site_subtitle || '') + '" '
+      +     'placeholder="Admin Console" '
+      +     'style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:13px">'
+      +   '<div style="font-size:11px;color:var(--text3);margin-top:6px">站点名下方的小字。可填业务名 / 部门名 / "BETA" 等。</div>'
+      + '</div>'
+      // ── Logo URL ──
+      + '<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:14px">'
+      +   '<label style="display:block;font-size:12px;font-weight:600;color:var(--text2);margin-bottom:6px">Logo URL (可选)</label>'
+      +   '<input id="brand-logo-url-input" value="' + esc(current.logo_url || '') + '" '
+      +     'placeholder="https://… 或留空使用默认图标" '
+      +     'oninput="_brandingPreviewLogo()" '
+      +     'style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:13px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">'
+      +   '<div style="font-size:11px;color:var(--text3);margin-top:8px">支持任意公开 URL(http/https)或 base64 data URI。建议正方形 / 高对比度 / ≤200KB。</div>'
+      // Live preview
+      +   '<div style="margin-top:12px;padding:12px;background:var(--bg);border-radius:8px;display:flex;align-items:center;gap:10px">'
+      +     '<div id="brand-preview-logo-wrap" style="width:48px;height:48px;border-radius:12px;background:linear-gradient(135deg,var(--primary),var(--primary-container));display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden">'
+      +       '<span class="material-symbols-outlined" id="brand-preview-fallback" style="font-size:26px;color:#282572">token</span>'
+      +       '<img id="brand-preview-img" alt="" style="display:none;width:100%;height:100%;object-fit:cover">'
+      +     '</div>'
+      +     '<div>'
+      +       '<div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.4px;margin-bottom:2px">实时预览</div>'
+      +       '<div id="brand-preview-name" style="font-size:14px;font-weight:700">' + esc(current.site_name || 'Tudou Claws') + '</div>'
+      +     '</div>'
+      +   '</div>'
+      + '</div>'
+      + '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:18px">'
+      +   '<button class="btn btn-primary" onclick="_brandingSave()">'
+      +     _ui.icon('save', {size: 14, va: '-3px'}) + ' 保存'
+      +   '</button>'
+      + '</div>'
+      + '</div>';
+    // Wire live preview for the name field too
+    var nameIn = document.getElementById('brand-site-name-input');
+    if (nameIn) nameIn.addEventListener('input', function() {
+      var p = document.getElementById('brand-preview-name');
+      if (p) p.textContent = nameIn.value || 'Tudou Claws';
+    });
+    _brandingPreviewLogo();
+  } catch (e) {
+    c.innerHTML = '<div style="color:var(--error);padding:20px">加载失败: ' + esc(String(e)) + '</div>';
+  }
+}
+
+window._brandingPreviewLogo = function() {
+  var input = document.getElementById('brand-logo-url-input');
+  var img = document.getElementById('brand-preview-img');
+  var fallback = document.getElementById('brand-preview-fallback');
+  if (!input || !img || !fallback) return;
+  var v = input.value.trim();
+  if (v) {
+    img.src = v;
+    img.style.display = 'block';
+    fallback.style.display = 'none';
+  } else {
+    img.style.display = 'none';
+    fallback.style.display = '';
+  }
+};
+
+window._brandingSave = async function() {
+  var siteName = document.getElementById('brand-site-name-input').value.trim();
+  var subtitle = document.getElementById('brand-site-subtitle-input').value.trim();
+  var logoUrl  = document.getElementById('brand-logo-url-input').value.trim();
+  try {
+    var updated = await api('POST', '/api/portal/branding', {
+      site_name: siteName,
+      site_subtitle: subtitle,
+      logo_url: logoUrl,
+    });
+    window._branding = updated;
+    _applyBranding();              // refresh header immediately
+    // Also refresh the in-form preview so it reflects what's actually
+    // persisted (programmatic .value = ... doesn't fire `input` events).
+    var p = document.getElementById('brand-preview-name');
+    if (p) p.textContent = updated.site_name || 'Tudou Claws';
+    _brandingPreviewLogo();
+    _toast('品牌已保存', 'success');
+  } catch (e) {
+    _toast('保存失败: ' + e, 'error');
+  }
+};
+
+window._brandingReset = async function() {
+  if (!confirm('恢复默认 (Tudou Claws / Admin Console / 内置图标)?')) return;
+  try {
+    var d = await api('POST', '/api/portal/branding/reset', {});
+    window._branding = d;
+    _applyBranding();
+    renderBrandingSettings();   // refresh form
+    _toast('已恢复默认', 'info');
+  } catch (e) {
+    _toast('重置失败: ' + e, 'error');
+  }
+};
 
 // ============ LLM Tiers Page (V2) ============
 async function renderLLMTiers(container) {

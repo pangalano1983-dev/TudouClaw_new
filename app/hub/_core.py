@@ -285,6 +285,17 @@ class Hub:
         except Exception as _cae:
             logger.warning("Canvas artifact store init failed: %s", _cae)
 
+        # ── Branding (site name + logo) ──
+        # Single TudouClaw deployment = one company; branding is global
+        # not per-tenant. Falls back to "Tudou Claws" defaults if the
+        # admin hasn't customized.
+        try:
+            from .. import branding as _brand_mod
+            self.branding_store = _brand_mod.init_store(self._data_dir)
+            logger.info("Branding store initialized")
+        except Exception as _be:
+            logger.warning("Branding store init failed: %s", _be)
+
         # ── Skill Categories (admin-defined two-dimensional taxonomy) ──
         # Loaded right after skill_store so the API can join entries with
         # their category assignments. Two files:
