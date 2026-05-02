@@ -21412,24 +21412,49 @@ function _kmShowCreateDomainKb() {
     });
   }).catch(function(){});
 
-  // Load embedding model catalog. Stash on the dropdown for the
-  // change handler so we can paint the description without a 2nd
-  // round-trip.
+  // Load embedding model catalog. Two groups:
+  //   1. curated (recommended/safe options)
+  //   2. local_extra (other models the admin pre-downloaded — accepted
+  //      because presence in cache implies user-vetted)
   api('GET', '/api/portal/domain-kb/embedding-models').then(function(data) {
     var sel = document.getElementById('km-dkb-embed-model');
     var note = document.getElementById('km-dkb-embed-note');
-    if (!sel || !data || !data.models) return;
+    if (!sel || !data) return;
     sel.innerHTML = '';
-    data.models.forEach(function(m) {
-      var label = m.label || m.id || '默认';
-      if (m.dim) label += ' · ' + m.dim + ' dim';
-      if (m.size_mb) label += ' · ~' + (m.size_mb >= 1024 ? (m.size_mb/1024).toFixed(1)+'GB' : m.size_mb+'MB');
-      var opt = document.createElement('option');
-      opt.value = m.id;
-      opt.textContent = label;
-      opt.dataset.note = m.note || '';
-      sel.appendChild(opt);
-    });
+
+    var fmtSize = function(mb) {
+      if (!mb) return '';
+      return ' · ~' + (mb >= 1024 ? (mb/1024).toFixed(1) + 'GB' : mb + 'MB');
+    };
+    var addGroup = function(label, models) {
+      if (!models || !models.length) return;
+      var grp = document.createElement('optgroup');
+      grp.label = label;
+      models.forEach(function(m) {
+        var lab = m.label || m.id || '默认';
+        if (m.recommended) lab = '⭐ ' + lab + ' (推荐)';
+        if (m.local && !m.recommended) lab = '✓ ' + lab + ' (已下载)';
+        if (m.dim) lab += ' · ' + m.dim + ' dim';
+        lab += fmtSize(m.size_mb);
+        var opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = lab;
+        opt.dataset.note = m.note || '';
+        if (m.recommended) opt.dataset.recommended = '1';
+        grp.appendChild(opt);
+      });
+      sel.appendChild(grp);
+    };
+    addGroup('内置选项', data.models || []);
+    addGroup('本地已缓存（自定义）', data.local_extra || []);
+
+    // Pre-select the recommended option if any
+    for (var i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].dataset.recommended === '1') {
+        sel.selectedIndex = i;
+        break;
+      }
+    }
     var update = function() {
       var sel2 = document.getElementById('km-dkb-embed-model');
       var note2 = document.getElementById('km-dkb-embed-note');

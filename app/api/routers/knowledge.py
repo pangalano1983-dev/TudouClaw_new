@@ -406,30 +406,114 @@ async def list_domain_knowledge_bases(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Allow-list of embedding models the user can pick at KB-creation time.
-# Each entry: (model_id, dim, ~download_size, one-line tag for the UI).
-# Adding a new option requires verifying SentenceTransformer can load it
-# offline / via HF Hub. Empty model_id = use server default.
-ALLOWED_EMBEDDING_MODELS = [
+# Curated list of embedding models the UI proactively recommends.
+# Marker fields:
+#   recommended  — UI pre-selects this (and shows ⭐ badge)
+#   note         — one-liner shown under the dropdown when selected
+#   size_mb      — first-download cost (for the "(~XGB)" hint)
+# Anything cached locally (see _scan_local_st_models) is also accepted
+# at create time so admins who pre-downloaded their own model don't
+# have to wait for us to add it here.
+CURATED_EMBEDDING_MODELS = [
     {"id": "", "label": "默认 (服务器配置)", "dim": None, "size_mb": None,
      "note": "fallback to DEFAULT_EMBEDDING_MODEL"},
-    {"id": "all-MiniLM-L6-v2", "label": "all-MiniLM-L6-v2", "dim": 384, "size_mb": 80,
-     "note": "英文为主, 体积小, 速度快"},
     {"id": "BAAI/bge-m3", "label": "BAAI/bge-m3", "dim": 1024, "size_mb": 2300,
-     "note": "多语言, 召回最强 (推荐), 首次下载较慢"},
+     "note": "多语言 + 中文最强 + 跨语言对齐, 当前最佳通用选项",
+     "recommended": True},
     {"id": "BAAI/bge-large-zh-v1.5", "label": "BAAI/bge-large-zh-v1.5", "dim": 1024, "size_mb": 1300,
-     "note": "中文优化"},
+     "note": "纯中文 KB + 资源紧张时用 (体积比 bge-m3 小 70%)"},
+    {"id": "all-MiniLM-L6-v2", "label": "all-MiniLM-L6-v2", "dim": 384, "size_mb": 80,
+     "note": "英文为主, 体积小, 速度快 (旧默认)"},
     {"id": "paraphrase-multilingual-MiniLM-L12-v2",
      "label": "paraphrase-multilingual-MiniLM-L12-v2", "dim": 384, "size_mb": 470,
      "note": "多语言 + 体积小"},
 ]
-_ALLOWED_MODEL_IDS = {m["id"] for m in ALLOWED_EMBEDDING_MODELS}
+
+
+def _scan_local_st_models() -> list[dict]:
+    """Scan the HF cache directories for sentence-transformer models the
+    user has already downloaded. Lets admins use any model they've
+    pre-fetched without needing it added to the curated list.
+
+    Detection: a HuggingFace model dir is a sentence-transformer if its
+    snapshot contains ``config_sentence_transformers.json``. Plain
+    transformers / LLM weights skip — those won't work as embedders.
+    """
+    import os
+    from pathlib import Path
+    out: dict[str, dict] = {}
+    seen_roots = set()
+    for env_var in ("SENTENCE_TRANSFORMERS_HOME", "HF_HOME", "HF_HUB_CACHE"):
+        root = os.environ.get(env_var)
+        if not root:
+            continue
+        for search_root in (root, os.path.join(root, "hub")):
+            if not os.path.isdir(search_root) or search_root in seen_roots:
+                continue
+            seen_roots.add(search_root)
+            try:
+                entries = os.listdir(search_root)
+            except OSError:
+                continue
+            for entry in entries:
+                if not entry.startswith("models--"):
+                    continue
+                model_dir = os.path.join(search_root, entry)
+                snap_dir = os.path.join(model_dir, "snapshots")
+                if not os.path.isdir(snap_dir):
+                    continue
+                is_st = False
+                try:
+                    for sha in os.listdir(snap_dir):
+                        marker = os.path.join(snap_dir, sha, "config_sentence_transformers.json")
+                        if os.path.isfile(marker):
+                            is_st = True
+                            break
+                except OSError:
+                    continue
+                if not is_st:
+                    continue
+                # "models--BAAI--bge-m3" → "BAAI/bge-m3"
+                parts = entry[len("models--"):].split("--")
+                model_id = "/".join(parts) if len(parts) > 1 else parts[0]
+                # Approx size
+                try:
+                    size_mb = sum(
+                        f.stat().st_size for f in Path(model_dir).rglob("*") if f.is_file()
+                    ) // (1024 * 1024)
+                except OSError:
+                    size_mb = None
+                out.setdefault(model_id, {
+                    "id": model_id,
+                    "label": model_id,
+                    "dim": None,        # not known without loading the model
+                    "size_mb": size_mb,
+                    "note": "本地已缓存",
+                    "local": True,
+                })
+    return list(out.values())
+
+
+def _allowed_model_ids() -> set[str]:
+    """Anything in the curated list OR already cached locally is OK."""
+    ids = {m["id"] for m in CURATED_EMBEDDING_MODELS}
+    for m in _scan_local_st_models():
+        ids.add(m["id"])
+    return ids
 
 
 @router.get("/domain-kb/embedding-models")
 async def list_embedding_models(user: CurrentUser = Depends(get_current_user)):
-    """Catalog of selectable embedding models for KB creation."""
-    return {"models": ALLOWED_EMBEDDING_MODELS}
+    """Catalog of selectable embedding models for KB creation.
+
+    Returns curated entries + any sentence-transformer model the admin
+    has already pre-downloaded (so they can pick a custom model without
+    needing it added to the curated list).
+    """
+    curated = list(CURATED_EMBEDDING_MODELS)
+    curated_ids = {m["id"] for m in curated}
+    extra = [m for m in _scan_local_st_models() if m["id"] not in curated_ids]
+    return {"models": curated, "local_extra": extra}
 
 
 @router.post("/domain-kb/create")
@@ -455,13 +539,17 @@ async def create_domain_knowledge_base(
         provider_id = body.get("provider_id", "") or ""
         embedding_model = (body.get("embedding_model") or "").strip()
         # Empty string = use server default (existing behavior). Otherwise
-        # must be in the allow-list — random HF model names could be huge,
-        # untrusted, or fail to load and leave the KB in a broken state.
-        if embedding_model and embedding_model not in _ALLOWED_MODEL_IDS:
+        # must be in the curated list OR already cached locally — random
+        # HF model names could be huge, untrusted, or fail to load and
+        # leave the KB in a broken state. Local cache hits are vetted by
+        # the act of downloading itself.
+        if embedding_model and embedding_model not in _allowed_model_ids():
             raise HTTPException(
                 400,
                 f"embedding_model not allowed: {embedding_model!r}. "
-                f"GET /domain-kb/embedding-models for the catalog.",
+                f"GET /domain-kb/embedding-models for the catalog, or "
+                f"pre-download the model into ~/.tudou_claw/hf_cache/ "
+                f"to whitelist it.",
             )
         tags = body.get("tags") or []
         if not isinstance(tags, list):
