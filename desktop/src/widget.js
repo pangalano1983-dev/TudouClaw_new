@@ -10,6 +10,7 @@
 // that error inline so you can see it's wired.
 
 const API_BASE = 'http://127.0.0.1:9090/api/portal';
+const STATIC_BASE = 'http://127.0.0.1:9090/static';
 const POLL_MS = 5000;
 const PERSONA_MAX_CHARS = 320;
 
@@ -93,8 +94,34 @@ function rebuildPicker() {
   picker.style.display = agents.length > 1 ? '' : 'none';
 }
 
+// ── Per-agent identity ────────────────────────────
+// Deterministic hue from agent.id so the same agent always gets the
+// same color. djb2-ish; output 0..359.
+function avatarHue(agent) {
+  const seed = (agent && (agent.id || agent.name)) || 'x';
+  let h = 5381;
+  for (let i = 0; i < seed.length; i++) {
+    h = ((h << 5) + h + seed.charCodeAt(i)) >>> 0;
+  }
+  return h % 360;
+}
+
+// First grapheme of the agent name (handles Chinese, emoji, etc).
+function avatarInitial(agent) {
+  const name = ((agent && agent.name) || '').trim();
+  if (!name) return '?';
+  const ch = Array.from(name)[0] || '?';
+  return /[a-z]/i.test(ch) ? ch.toUpperCase() : ch;
+}
+
 function renderAgent() {
-  if (!currentAgent) return;
+  if (!currentAgent) {
+    avatar.classList.add('empty');
+    avatar.title = '未连接到 TudouClaw';
+    return;
+  }
+  avatar.classList.remove('empty');
+
   $('#agent-name').textContent = currentAgent.name || 'Agent';
   $('#agent-role').textContent = currentAgent.role_title || ('id ' + (currentAgent.id || '').slice(0, 6));
   const persona = (currentAgent.soul_md || '').trim();
@@ -102,11 +129,42 @@ function renderAgent() {
     ? persona.slice(0, PERSONA_MAX_CHARS) + '…'
     : (persona || '（未填写性格设定）');
 
+  // Per-agent hue
+  avatar.style.setProperty('--avatar-hue', String(avatarHue(currentAgent)));
+
+  // Identity layer: robot_avatar SVG > initial letter > sci-fi face
+  const robotImg = $('#avatar-robot');
+  const initialEl = $('#avatar-initial');
+  const faceSvg = $('#avatar-face');
+  if (currentAgent.robot_avatar) {
+    robotImg.src = `${STATIC_BASE}/robots/${currentAgent.robot_avatar}.svg`;
+    robotImg.hidden = false;
+    initialEl.hidden = true;
+    faceSvg.style.display = 'none';
+    // If robot SVG fails to load (404), fall back to initial
+    robotImg.onerror = () => {
+      robotImg.hidden = true;
+      initialEl.textContent = avatarInitial(currentAgent);
+      initialEl.hidden = false;
+    };
+  } else {
+    robotImg.hidden = true;
+    initialEl.textContent = avatarInitial(currentAgent);
+    initialEl.hidden = false;
+    faceSvg.style.display = 'none';
+  }
+
+  // Status (drives animation + status dot — color stays per-agent)
   const status = (currentAgent.status || 'idle').toLowerCase();
   statusPill.textContent = status;
   statusPill.dataset.status = status;
   avatar.classList.remove('idle', 'busy', 'error');
   avatar.classList.add(['idle', 'busy', 'error'].includes(status) ? status : 'idle');
+
+  // Hover tooltip (system tooltip, ~500ms delay built-in)
+  avatar.title = `${currentAgent.name || 'Agent'}` +
+    (currentAgent.role_title ? ` · ${currentAgent.role_title}` : '') +
+    ` · ${status}`;
 
   // Lottie mount (placeholder — Phase 4 will load real Lottie JSON)
   if (currentAgent.desktop_lottie_url) {

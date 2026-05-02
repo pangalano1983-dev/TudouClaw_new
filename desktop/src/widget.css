@@ -12,13 +12,22 @@ html, body {
 }
 
 /* ── Avatar (small state) ───────────────────────── */
+/* Per-agent hue is set on .avatar via inline style: --avatar-hue: 230;
+   Status only modulates lightness/animation/ring — keeps each agent's
+   color identifiable even when busy/erroring. */
 .avatar {
   position: fixed;
   inset: 6px;
   border-radius: 50%;
-  background: radial-gradient(circle at 32% 30%, #8b9cff 0%, #4253c9 55%, #1a2168 100%);
+  --avatar-hue: 230;
+  background: radial-gradient(
+    circle at 32% 30%,
+    hsl(var(--avatar-hue) 70% 70%) 0%,
+    hsl(var(--avatar-hue) 60% 38%) 55%,
+    hsl(var(--avatar-hue) 55% 18%) 100%
+  );
   box-shadow:
-    0 0 28px rgba(120, 140, 255, 0.45),
+    0 0 28px hsla(var(--avatar-hue), 70%, 60%, 0.45),
     inset 0 0 24px rgba(255, 255, 255, 0.08),
     0 6px 18px rgba(0, 0, 0, 0.55);
   cursor: grab;
@@ -27,11 +36,26 @@ html, body {
   justify-content: center;
   animation: breathe 4s ease-in-out infinite;
   border: 1px solid rgba(255, 255, 255, 0.12);
+  position: fixed;
+  overflow: hidden;
 }
 .avatar:active { cursor: grabbing; }
 
-.avatar .face { width: 62%; height: 62%; opacity: 0.9; }
-.lottie-mount { position: absolute; inset: 0; }
+/* Identity layers — only one is shown at a time, set by widget.js */
+.face         { width: 62%; height: 62%; opacity: 0.9; pointer-events: none; }
+.avatar-robot { position: absolute; inset: 14%; width: 72%; height: 72%; pointer-events: none; }
+.avatar-initial {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 58px; font-weight: 700;
+  color: rgba(255, 255, 255, 0.95);
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif;
+  letter-spacing: -0.02em;
+  pointer-events: none;
+  user-select: none;
+}
+.lottie-mount { position: absolute; inset: 0; pointer-events: none; }
 
 .status-dot {
   position: absolute;
@@ -41,16 +65,36 @@ html, body {
   background: #4ade80;
   box-shadow: 0 0 10px rgba(74, 222, 128, 0.7);
   border: 2px solid rgba(20, 22, 32, 0.85);
+  pointer-events: none;
 }
+
+/* Status modulators — keep agent hue, change brightness + animation */
 .avatar.busy {
-  background: radial-gradient(circle at 32% 30%, #ffd58b 0%, #c98c42 55%, #683f1a 100%);
+  background: radial-gradient(
+    circle at 32% 30%,
+    hsl(var(--avatar-hue) 80% 75%) 0%,
+    hsl(var(--avatar-hue) 75% 45%) 55%,
+    hsl(var(--avatar-hue) 70% 25%) 100%
+  );
   animation: pulse 1.4s ease-in-out infinite;
 }
 .avatar.busy .status-dot { background: #fbbf24; box-shadow: 0 0 10px rgba(251, 191, 36, 0.7); }
 .avatar.error {
-  background: radial-gradient(circle at 32% 30%, #ff8b8b 0%, #c94242 55%, #681a1a 100%);
+  /* Keep hue so you can still tell which agent it is — add a red ring */
+  outline: 2px solid #ef4444;
+  outline-offset: 2px;
+  animation: pulse 0.85s ease-in-out infinite;
 }
 .avatar.error .status-dot { background: #ef4444; box-shadow: 0 0 10px rgba(239, 68, 68, 0.7); }
+
+/* Empty state — no agent connected. Mute the saturation, show the
+   sci-fi face, hide the per-agent identity layers. */
+.avatar.empty {
+  --avatar-hue: 230;
+  filter: saturate(0.4) brightness(0.85);
+}
+.avatar.empty .avatar-initial,
+.avatar.empty .avatar-robot { display: none !important; }
 
 /* ── Card (expanded state) ──────────────────────── */
 .card {

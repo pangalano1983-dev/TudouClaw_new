@@ -8,9 +8,13 @@
 </head>
 <body>
   <!-- Small state: floating avatar -->
-  <div id="avatar" class="avatar idle" data-tauri-drag-region title="点击展开">
-    <svg class="face" viewBox="0 0 64 64" aria-hidden="true">
-      <!-- simple sci-fi face: two glowing eyes + visor arc -->
+  <div id="avatar" class="avatar idle empty" data-tauri-drag-region title="未连接到 TudouClaw">
+    <!-- Identity layers (priority: lottie > robot_avatar > initial > face) -->
+    <div id="lottie-mount" class="lottie-mount"></div>
+    <img id="avatar-robot" class="avatar-robot" alt="" hidden />
+    <div id="avatar-initial" class="avatar-initial" hidden></div>
+    <svg id="avatar-face" class="face" viewBox="0 0 64 64" aria-hidden="true">
+      <!-- Sci-fi fallback face shown only when no agent is connected -->
       <defs>
         <radialGradient id="g-eye" cx="50%" cy="50%" r="50%">
           <stop offset="0%" stop-color="#fff"/>
@@ -22,7 +26,6 @@
       <path d="M16 42 Q32 50 48 42" stroke="rgba(255,255,255,0.65)" stroke-width="1.5" fill="none" stroke-linecap="round"/>
     </svg>
     <div class="status-dot" id="status-dot"></div>
-    <div id="lottie-mount" class="lottie-mount"></div>
   </div>
 
   <!-- Expanded state: card with name / persona / chat -->
