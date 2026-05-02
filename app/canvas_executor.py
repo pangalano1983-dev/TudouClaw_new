@@ -566,6 +566,19 @@ def _exec_agent(engine: WorkflowEngine, run: WorkflowRun,
 
     Optional config:
       * ``timeout`` — seconds to wait for completion (default 300)
+
+    Side effects (HANDOFF artifact closed-loop, 2026-05-02):
+      * Before invoking, snapshot ``<run>/shared/`` so the post-scan
+        can diff for newly-produced files.
+      * Set ``agent.working_dir`` to ``<run>/shared/`` so relative
+        write_file paths land in the workflow shared dir (visible
+        to downstream nodes).
+      * Add ``<run>/shared/`` to the agent's sandbox ``allowed_dirs``
+        for the duration of the call.
+      * After completion, register every new/modified file as an
+        artifact and inject ``{node_id.file_<sanitized_name>}`` into
+        ``run.vars`` so downstream nodes can ``{{...}}``-reference
+        the path.
     """
     if engine.hub is None:
         raise RuntimeError(
@@ -585,42 +598,133 @@ def _exec_agent(engine: WorkflowEngine, run: WorkflowRun,
     if agent is None:
         raise RuntimeError(f"agent {agent_id!r} not found in hub")
 
-    # Submit chat turn — chat_async returns a ChatTask we can poll.
-    task = agent.chat_async(str(prompt),
-                            source=f"canvas:{run.workflow_id}:{node['id']}")
-
-    # Poll until terminal. ChatTaskStatus enum has terminal members
-    # COMPLETED / FAILED / ABORTED.
-    from .chat_task import ChatTaskStatus
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if task.status in (ChatTaskStatus.COMPLETED,
-                           ChatTaskStatus.FAILED,
-                           ChatTaskStatus.ABORTED):
-            break
-        time.sleep(0.5)
-    else:
-        # Timeout — try to abort the task so we don't leave it running
+    # ── Artifact closed-loop setup ──
+    # Pre-scan + redirect agent's working_dir to the shared workspace.
+    # Engine restores the prior working_dir + sandbox in the `finally`
+    # below, no matter how the chat ends.
+    from . import canvas_artifacts as _ca
+    artifact_store = _ca.get_store()
+    pre_snapshot: dict[str, float] = {}
+    prior_working_dir = None
+    sandbox_extended = False
+    if artifact_store is not None:
+        shared_dir = artifact_store.shared_dir(run.id)
+        pre_snapshot = artifact_store.snapshot_dir(run.id)
+        # Set the agent's working_dir for the duration of this turn.
+        prior_working_dir = getattr(agent, "working_dir", None)
         try:
-            task.abort()
+            agent.working_dir = str(shared_dir)
         except Exception:
-            pass
-        raise TimeoutError(
-            f"agent node timed out after {timeout}s "
-            f"(task {task.id}, status {task.status.value})"
+            prior_working_dir = None   # couldn't set; don't try to restore
+        # Extend sandbox to allow the shared dir as writable.
+        try:
+            from . import sandbox as _sb
+            pol = _sb.get_current_policy()
+            if pol is not None and str(shared_dir) not in pol.allowed_dirs:
+                pol.allowed_dirs.append(str(shared_dir))
+                sandbox_extended = True
+        except Exception as _se:
+            logger.debug("sandbox extension failed: %s", _se)
+        artifact_store.record_audit(
+            run.id,
+            actor_agent_id=agent_id,
+            actor_node_id=node.get("id", ""),
+            action="scan_start",
+            extra={"pre_files": len(pre_snapshot)},
         )
 
-    if task.status != ChatTaskStatus.COMPLETED:
-        raise RuntimeError(
-            f"agent task {task.id} ended in {task.status.value}: "
-            f"{(task.error or task.result or '')[:200]}"
-        )
+    try:
+        # Submit chat turn — chat_async returns a ChatTask we can poll.
+        task = agent.chat_async(str(prompt),
+                                source=f"canvas:{run.workflow_id}:{node['id']}")
 
-    return {
-        "output": task.result or "",
-        "task_id": task.id,
-        "duration_s": task.updated_at - task.created_at,
-    }
+        # Poll until terminal. ChatTaskStatus enum has terminal members
+        # COMPLETED / FAILED / ABORTED.
+        from .chat_task import ChatTaskStatus
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if task.status in (ChatTaskStatus.COMPLETED,
+                               ChatTaskStatus.FAILED,
+                               ChatTaskStatus.ABORTED):
+                break
+            time.sleep(0.5)
+        else:
+            # Timeout — try to abort the task so we don't leave it running
+            try:
+                task.abort()
+            except Exception:
+                pass
+            raise TimeoutError(
+                f"agent node timed out after {timeout}s "
+                f"(task {task.id}, status {task.status.value})"
+            )
+
+        if task.status != ChatTaskStatus.COMPLETED:
+            raise RuntimeError(
+                f"agent task {task.id} ended in {task.status.value}: "
+                f"{(task.error or task.result or '')[:200]}"
+            )
+
+        outputs: dict[str, Any] = {
+            "output": task.result or "",
+            "task_id": task.id,
+            "duration_s": task.updated_at - task.created_at,
+        }
+
+        # ── Artifact closed-loop post-scan ──
+        # Diff the shared dir against the pre-snapshot; register every
+        # new/modified file as an artifact + inject vars so downstream
+        # nodes can reference them via {{node_id.file_*}}.
+        if artifact_store is not None:
+            try:
+                new_artifacts = artifact_store.diff_and_register(
+                    run.id,
+                    pre_snapshot=pre_snapshot,
+                    producer_node_id=node.get("id", ""),
+                    producer_agent_id=agent_id,
+                )
+                for art in new_artifacts:
+                    # Absolute path so downstream {{...}} substitution
+                    # gives the agent something it can read directly.
+                    abs_path = str(artifact_store.shared_dir(run.id) / art.rel_path)
+                    # vars_key = "{node_id}.file_{sanitized_name}"; the
+                    # caller of this executor strips the "{node_id}." prefix
+                    # when storing in run.vars (see _execute_node), so we
+                    # return the suffix only.
+                    suffix = art.vars_key.split(".", 1)[-1]
+                    outputs[suffix] = abs_path
+                # Also a list of artifact ids for programmatic access
+                outputs["artifact_ids"] = [a.id for a in new_artifacts]
+                outputs["artifact_count"] = len(new_artifacts)
+                artifact_store.record_audit(
+                    run.id,
+                    actor_agent_id=agent_id,
+                    actor_node_id=node.get("id", ""),
+                    action="scan_end",
+                    extra={"new_artifacts": len(new_artifacts),
+                           "artifact_ids": [a.id for a in new_artifacts]},
+                )
+            except Exception as _pse:
+                logger.warning("artifact post-scan failed for %s/%s: %s",
+                               run.id, node.get("id"), _pse)
+
+        return outputs
+    finally:
+        # Restore agent state regardless of outcome.
+        if prior_working_dir is not None:
+            try:
+                agent.working_dir = prior_working_dir
+            except Exception:
+                pass
+        if sandbox_extended:
+            try:
+                from . import sandbox as _sb
+                pol = _sb.get_current_policy()
+                if pol is not None and artifact_store is not None:
+                    sd = str(artifact_store.shared_dir(run.id))
+                    pol.allowed_dirs[:] = [d for d in pol.allowed_dirs if d != sd]
+            except Exception:
+                pass
 
 
 def _exec_tool(engine: WorkflowEngine, run: WorkflowRun,

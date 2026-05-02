@@ -274,6 +274,17 @@ class Hub:
         except Exception as _cxe:
             logger.warning("Canvas executor init failed: %s", _cxe)
 
+        # ── Canvas Artifact Store (HANDOFF artifact closed-loop) ──
+        # Per-run shared workspace + artifact metadata + audit log,
+        # backing the workflow artifact-sharing feature. Same root dir
+        # as the executor (canvas_runs/<run_id>/) — they coexist.
+        try:
+            from .. import canvas_artifacts as _ca_mod
+            self.canvas_artifact_store = _ca_mod.init_store(cx_dir)
+            logger.info("Canvas artifact store initialized at %s", cx_dir)
+        except Exception as _cae:
+            logger.warning("Canvas artifact store init failed: %s", _cae)
+
         # ── Skill Categories (admin-defined two-dimensional taxonomy) ──
         # Loaded right after skill_store so the API can join entries with
         # their category assignments. Two files:

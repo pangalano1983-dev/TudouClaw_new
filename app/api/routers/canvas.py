@@ -40,6 +40,24 @@ def _engine_or_503():
     return eng
 
 
+def _artifact_store_or_503():
+    from ...canvas_artifacts import get_store
+    s = get_store()
+    if s is None:
+        raise HTTPException(503, "canvas artifact store not initialized")
+    return s
+
+
+def _verify_run_belongs_to_workflow(engine, wf_id: str, run_id: str) -> dict:
+    """Helper: load run state + 404 if it doesn't belong to wf_id."""
+    state = engine.store.load_state(run_id)
+    if not state:
+        raise HTTPException(404, f"run {run_id} not found")
+    if state.get("workflow_id") != wf_id:
+        raise HTTPException(404, f"run {run_id} doesn't belong to workflow {wf_id}")
+    return state
+
+
 @router.get("/canvas-workflows")
 async def list_canvas_workflows(user: CurrentUser = Depends(get_current_user)):
     """Return summaries of every saved canvas workflow,
@@ -251,3 +269,118 @@ async def stream_canvas_run_events(wf_id: str, run_id: str,
             await asyncio.sleep(0.5)
 
     return StreamingResponse(_gen(), media_type="text/event-stream")
+
+
+# ── Run artifacts (HANDOFF artifact closed-loop, 2026-05-02) ──────────
+
+
+@router.get("/canvas-workflows/{wf_id}/runs/{run_id}/artifacts")
+async def list_run_artifacts(wf_id: str, run_id: str,
+                              user: CurrentUser = Depends(get_current_user)):
+    """List every artifact registered to one run.
+
+    Returns ``{artifacts: [{id, name, size_bytes, sha256, mime,
+    producer_node_id, producer_agent_id, marked, description, tags,
+    vars_key, created_at}, ...]}``. Marked deliverables come first;
+    auto-detected files (likely intermediate) follow.
+    """
+    engine = _engine_or_503()
+    _verify_run_belongs_to_workflow(engine, wf_id, run_id)
+    store = _artifact_store_or_503()
+    items = store.list_artifacts(run_id)
+    items.sort(key=lambda a: (not a.marked, -(a.created_at or 0)))
+    return {"artifacts": [a.to_dict() for a in items]}
+
+
+@router.get("/canvas-workflows/{wf_id}/runs/{run_id}/artifacts/{artifact_id}")
+async def download_run_artifact(wf_id: str, run_id: str, artifact_id: str,
+                                 user: CurrentUser = Depends(get_current_user)):
+    """Download one artifact's bytes. Records a ``read`` audit row.
+
+    Auth check: requires the user to have access to the workflow.
+    Future: per-artifact ACL (e.g., agent-only artifacts that admins
+    can't see) — not implemented in MVP.
+    """
+    from fastapi.responses import FileResponse
+    engine = _engine_or_503()
+    _verify_run_belongs_to_workflow(engine, wf_id, run_id)
+    store = _artifact_store_or_503()
+    res = store.open_for_read(
+        run_id, artifact_id,
+        actor_agent_id=getattr(user, "user_id", "") or "",
+        actor_node_id="api:download",
+    )
+    if res is None:
+        raise HTTPException(404, f"artifact {artifact_id} not found in run {run_id}")
+    art, full = res
+    return FileResponse(
+        path=str(full),
+        media_type=art.mime or "application/octet-stream",
+        filename=art.name,
+    )
+
+
+@router.post("/canvas-workflows/{wf_id}/runs/{run_id}/artifacts/{artifact_id}/mark")
+async def mark_run_artifact(wf_id: str, run_id: str, artifact_id: str,
+                             body: dict = Body(...),
+                             user: CurrentUser = Depends(get_current_user)):
+    """Promote an auto-detected artifact to a marked deliverable +
+    optionally add a description / tags. (Plan C, admin-side.)
+
+    Body: ``{"description": "...", "tags": ["..."]}`` (both optional).
+    """
+    engine = _engine_or_503()
+    _verify_run_belongs_to_workflow(engine, wf_id, run_id)
+    store = _artifact_store_or_503()
+    art = store.mark_artifact(
+        run_id,
+        name_or_id=artifact_id,
+        actor_agent_id=getattr(user, "user_id", "") or "",
+        actor_node_id="api:mark",
+        description=str(body.get("description", "") or ""),
+        tags=list(body.get("tags") or []),
+    )
+    if art is None:
+        raise HTTPException(404, f"artifact {artifact_id} not found in run {run_id}")
+    return art.to_dict()
+
+
+@router.delete("/canvas-workflows/{wf_id}/runs/{run_id}/artifacts/{artifact_id}")
+async def delete_run_artifact(wf_id: str, run_id: str, artifact_id: str,
+                               user: CurrentUser = Depends(get_current_user)):
+    """Remove an artifact from the index AND delete its underlying
+    file on disk. Records a ``delete`` audit row before removal.
+    """
+    engine = _engine_or_503()
+    _verify_run_belongs_to_workflow(engine, wf_id, run_id)
+    store = _artifact_store_or_503()
+    ok = store.delete_artifact(
+        run_id, artifact_id,
+        actor_agent_id=getattr(user, "user_id", "") or "",
+        actor_node_id="api:delete",
+    )
+    if not ok:
+        raise HTTPException(404, f"artifact {artifact_id} not found in run {run_id}")
+    return {"ok": True, "artifact_id": artifact_id}
+
+
+@router.get("/canvas-workflows/{wf_id}/runs/{run_id}/audit")
+async def list_run_audit(wf_id: str, run_id: str,
+                          user: CurrentUser = Depends(get_current_user)):
+    """Return the full audit log for one run. Append-only JSONL, so
+    even if an artifact is later deleted its register/read trail
+    survives.
+
+    Filter helpers (query params, all optional):
+      * ``artifact_id`` — only rows touching this artifact
+      * ``action``      — one of register / mark / read / delete /
+                           scan_start / scan_end
+      * ``actor_agent_id`` — only rows by this agent
+    """
+    engine = _engine_or_503()
+    _verify_run_belongs_to_workflow(engine, wf_id, run_id)
+    store = _artifact_store_or_503()
+    rows, _offset = store.read_audit(run_id)
+    # Newest first feels natural for an audit view.
+    rows.sort(key=lambda r: -(r.get("ts") or 0))
+    return {"audit": rows, "count": len(rows)}
