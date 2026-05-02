@@ -22457,7 +22457,16 @@ function _canvasStatusActions(wf) {
     return '<button class="btn btn-sm" onclick="_canvasMarkReady()" title="校验图结构,通过后转为可执行" style="color:#16a34a"><span class="material-symbols-outlined" style="font-size:14px">check_circle</span> 标为可执行</button>';
   }
   if (st === 'ready') {
-    return '<button class="btn btn-sm" onclick="_canvasStartRun()" title="启动执行 — 节点会在画布上实时高亮" style="color:#16a34a;font-weight:600"><span class="material-symbols-outlined" style="font-size:14px">play_arrow</span> 运行</button>'
+    // Disable 「运行」 if a run is already in flight — prevents the
+    // "外面点了一次,进来又点了一次" double-spawn bug. The status pill
+    // next to the button is the user's hint that something is already
+    // running; this just makes it physically unclickable.
+    var rs = _canvasState._runStatus || {};
+    var inFlight = (rs.status === 'running' || rs.status === 'queued');
+    var runBtn = inFlight
+      ? '<button class="btn btn-sm" disabled title="已有 run 在执行中,等它完成再点" style="color:#9ca3af;cursor:not-allowed;opacity:0.55;font-weight:600"><span class="material-symbols-outlined" style="font-size:14px">hourglass_top</span> 运行中…</button>'
+      : '<button class="btn btn-sm" onclick="_canvasStartRun()" title="启动执行 — 节点会在画布上实时高亮" style="color:#16a34a;font-weight:600"><span class="material-symbols-outlined" style="font-size:14px">play_arrow</span> 运行</button>';
+    return runBtn
          + '<button class="btn btn-sm" onclick="_canvasMarkDisabled()" title="暂停,新一轮不再被引擎挑选" style="color:#ea580c"><span class="material-symbols-outlined" style="font-size:14px">pause_circle</span> 停用</button>'
          + '<button class="btn btn-sm" onclick="_canvasMarkDraft()" title="回到草稿态" style="color:#64748b"><span class="material-symbols-outlined" style="font-size:14px">edit_note</span> 回到草稿</button>';
   }
@@ -22617,13 +22626,20 @@ async function _canvasLoadRunLog(wfId, runId, silent) {
       };
       _canvasRenderRunStatusPill();
     } else if (events.length) {
-      // No terminal event — run still going (or crashed without recording)
+      // No terminal event — run still going. Reattach to the live SSE
+      // stream so node states keep updating, and re-render the toolbar
+      // so the 「运行」 button shows its disabled "运行中…" state.
+      // (Bug fix 2026-05-02: previously the editor showed stale state
+      // and the Run button was clickable, leading to double-spawned
+      // runs when users entered the editor while a run was in flight.)
       _canvasState._runStatus = {
         status: 'running',
         startedAt: events[0].ts * 1000,
         payload: {run_id: runId},
       };
       _canvasRenderRunStatusPill();
+      _canvasAttachRunStream(wfId, runId);
+      _canvasRenderEditor();
     }
     // Reapply node visual state from the events (last write wins)
     var nodeStates = {};
@@ -24069,12 +24085,78 @@ function _canvasStopRunStream() {
   }
 }
 
+// Shared SSE handler — used by both _canvasStartRun (fresh run) and
+// _canvasLoadRunLog (reattach to an in-flight run when the editor is
+// re-opened). Closes any prior stream on the state object first, so
+// repeat calls can't leak a connection.
+function _canvasAttachRunStream(wfId, runId) {
+  _canvasStopRunStream();
+  var url = '/api/portal/canvas-workflows/' + encodeURIComponent(wfId) + '/runs/' + encodeURIComponent(runId) + '/events';
+  var es = new EventSource(url);
+  _canvasState._runStream = es;
+  es.onmessage = function(msg) {
+    var evt;
+    try { evt = JSON.parse(msg.data); } catch (_) { return; }
+    if (evt.type && evt.type !== 'done' && evt.type !== 'timeout') {
+      _canvasAppendLogEvent(evt);
+    }
+    var t = evt.type || '';
+    var d = evt.data || {};
+    if (t === 'node_started') {
+      var m = {}; m[d.node_id] = 'running'; _canvasApplyRunState(m);
+    } else if (t === 'node_succeeded') {
+      var m = {}; m[d.node_id] = 'succeeded'; _canvasApplyRunState(m);
+      _canvasRefreshArtifactsList();
+    } else if (t === 'node_failed') {
+      var m = {}; m[d.node_id] = 'failed'; _canvasApplyRunState(m);
+      _toast('节点失败: ' + d.node_id + ' — ' + (d.error || '').slice(0, 80), 'error');
+    } else if (t === 'node_skipped') {
+      var m = {}; m[d.node_id] = 'skipped'; _canvasApplyRunState(m);
+    } else if (t === 'run_succeeded') {
+      _canvasSetRunStatus('succeeded', d);
+      _toast('✓ 运行成功 (' + (d.duration_s || 0).toFixed(1) + 's)', 'success');
+      _canvasStopRunStream();
+      _canvasRenderEditor();   // refresh toolbar so 「运行」 re-enables
+    } else if (t === 'run_failed') {
+      _canvasSetRunStatus('failed', d);
+      _toast('✗ 运行失败: ' + (d.error || '(unknown)').slice(0, 100), 'error');
+      _canvasStopRunStream();
+      _canvasRenderEditor();
+    } else if (t === 'run_aborted') {
+      _canvasSetRunStatus('aborted', d);
+      _toast('◼ 已中止', 'info');
+      _canvasStopRunStream();
+      _canvasRenderEditor();
+    } else if (t === 'done' || t === 'timeout') {
+      _canvasStopRunStream();
+      _canvasRenderEditor();
+    }
+  };
+  es.onerror = function() {
+    if (es.readyState === EventSource.CLOSED) {
+      _canvasStopRunStream();
+    }
+  };
+}
+
 window._canvasStartRun = async function() {
   var wf = _canvasState.current;
   if (!wf || !wf.id) { _toast('先保存 workflow', 'error'); return; }
   if (String(wf.executable_status || '') !== 'ready') {
     _toast('需要先标为"可执行"', 'error');
     return;
+  }
+  // Defense in depth: even if the toolbar button got rendered in its
+  // enabled state somehow, refuse to fire a 2nd run while the 1st is
+  // still going. This is the bug fix for "外面点了一次,进来又点了一次"
+  // where two runs were spawned because the editor didn't know about
+  // the run started from the overview card.
+  var rs = _canvasState._runStatus;
+  if (rs && (rs.status === 'running' || rs.status === 'queued')) {
+    var ridShort = ((rs.payload || {}).run_id || '').slice(-8);
+    if (!confirm('已有 run ' + ridShort + ' 在执行中。确定要并发再启动一次吗？\n（一般不需要 — 通常是上次点击没看到结果，请先等当前 run 完成）')) {
+      return;
+    }
   }
   _canvasStopRunStream();
   _canvasResetRunState();
@@ -24088,81 +24170,25 @@ window._canvasStartRun = async function() {
   }
   _toast('▶ 运行已启动 (run ' + (run.id || '').slice(-8) + ')', 'info');
 
-  // Reset + auto-expand the bottom log drawer so the user sees events
-  // streaming in. Inserts a synthetic "run dispatched" entry first so
-  // there's always SOMETHING in the log when the drawer opens, even
-  // if the SSE stream takes a moment to deliver the first event.
   _canvasState._runEvents = [];
-  _canvasState._runArtifacts = [];   // reset so previous run doesn't leak in
+  _canvasState._runArtifacts = [];
   _canvasState._nodeRunStates = {};
   _canvasState._currentRunState = null;
   _canvasState._logExpanded = true;
-  _canvasRenderEditor();   // re-render to apply the expanded drawer
+  _canvasRenderEditor();
   _canvasSetRunStatus('running', {run_id: run.id});
-  _canvasUpdateArtifactsButton();    // hide the button until artifacts arrive
+  _canvasUpdateArtifactsButton();
   _canvasAppendLogEvent({
     ts: Date.now()/1000,
     type: 'run_created',
     data: {run_id: run.id, workflow_name: wf.name},
   });
 
-  // Mark every node as pending → all run nodes start grey
   var initial = {};
   (wf.nodes || []).forEach(function(n) { initial[n.id] = 'pending'; });
   _canvasApplyRunState(initial);
 
-  // Open SSE stream and apply state on each event. EventSource is
-  // available cross-browser; closes itself when the server sends
-  // type=done.
-  var url = '/api/portal/canvas-workflows/' + encodeURIComponent(wf.id) + '/runs/' + encodeURIComponent(run.id) + '/events';
-  var es = new EventSource(url);
-  _canvasState._runStream = es;
-  es.onmessage = function(msg) {
-    var evt;
-    try { evt = JSON.parse(msg.data); } catch (_) { return; }
-    // Stream every event into the log. Do this BEFORE state mutations
-    // so the log row appears even if a downstream handler throws.
-    if (evt.type && evt.type !== 'done' && evt.type !== 'timeout') {
-      _canvasAppendLogEvent(evt);
-    }
-    var t = evt.type || '';
-    var d = evt.data || {};
-    if (t === 'node_started') {
-      var m = {}; m[d.node_id] = 'running'; _canvasApplyRunState(m);
-    } else if (t === 'node_succeeded') {
-      var m = {}; m[d.node_id] = 'succeeded'; _canvasApplyRunState(m);
-      // Each node completion may have produced new artifacts —
-      // refresh the toolbar pill + list so the user sees them
-      // appear in real time.
-      _canvasRefreshArtifactsList();
-    } else if (t === 'node_failed') {
-      var m = {}; m[d.node_id] = 'failed'; _canvasApplyRunState(m);
-      _toast('节点失败: ' + d.node_id + ' — ' + (d.error || '').slice(0, 80), 'error');
-    } else if (t === 'node_skipped') {
-      var m = {}; m[d.node_id] = 'skipped'; _canvasApplyRunState(m);
-    } else if (t === 'run_succeeded') {
-      _canvasSetRunStatus('succeeded', d);
-      _toast('✓ 运行成功 (' + (d.duration_s || 0).toFixed(1) + 's)', 'success');
-      _canvasStopRunStream();
-    } else if (t === 'run_failed') {
-      _canvasSetRunStatus('failed', d);
-      _toast('✗ 运行失败: ' + (d.error || '(unknown)').slice(0, 100), 'error');
-      _canvasStopRunStream();
-    } else if (t === 'run_aborted') {
-      _canvasSetRunStatus('aborted', d);
-      _toast('◼ 已中止', 'info');
-      _canvasStopRunStream();
-    } else if (t === 'done' || t === 'timeout') {
-      _canvasStopRunStream();
-    }
-  };
-  es.onerror = function() {
-    // EventSource auto-retries by default — only treat as fatal if
-    // the connection was already closed.
-    if (es.readyState === EventSource.CLOSED) {
-      _canvasStopRunStream();
-    }
-  };
+  _canvasAttachRunStream(wf.id, run.id);
 };
 
 
