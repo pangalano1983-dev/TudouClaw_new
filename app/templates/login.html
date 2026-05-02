@@ -4,45 +4,50 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Tudou Claws - Login</title>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=Lora:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/icon?family=Material+Symbols+Outlined" rel="stylesheet">
 <style>
-/* Token values mirrored from portal.html to keep login visually
-   consistent with the main app under both themes. Default is dark. */
+/* Token values mirrored from portal.html (Linear dark + Claude light,
+   2026-05-02). Keep these in sync — the login screen is the user's
+   first impression and must match the main app's chrome. */
 :root {
-  --bg: #0e141b;
-  --bg2: #1a2027;
-  --surface: #161c23;
-  --surface2: #242a32;
-  --surface3: #2f353d;
-  --border: #474651;
-  --text: #dde3ed;
-  --text2: #8b949e;
-  --text3: #6e7681;
-  --primary: #cbc9ff;
-  --primary-container: #acaaff;
-  --primary-text: #0e141b;
+  /* Dark theme — Linear */
+  --bg: #010102;
+  --bg2: #0f1011;
+  --surface: #0f1011;
+  --surface2: #141516;
+  --surface3: #18191a;
+  --border: #23252a;
+  --text: #f7f8f8;
+  --text2: #8a8f98;
+  --text3: #62666d;
+  --primary: #5e6ad2;            /* Linear lavender */
+  --primary-container: #828fff;
+  --primary-text: #ffffff;
   --secondary: #ffb4aa;
   --error: #f85149;
-  --success: #3fb950;
+  --success: #27a644;
   --radius: 12px;
+  --font-display: 'Plus Jakarta Sans', 'Inter', sans-serif;
 }
 [data-theme="light"] {
-  --bg: #fdf8f3;
-  --bg2: #f5ede3;
-  --surface: #ffffff;
-  --surface2: #f0e8dd;
-  --surface3: #ebe3d9;
-  --border: #e0d5c7;
-  --text: #1e1e24;
-  --text2: #4a4a52;
-  --text3: #888888;
-  --primary: #85655a;
-  --primary-container: #6d4c41;
-  --primary-text: #fdf8f3;
-  --secondary: #e29578;
-  --error: #c93838;
-  --success: #2d7a39;
+  /* Light theme — Claude */
+  --bg: #faf9f5;
+  --bg2: #f5f0e8;
+  --surface: #faf9f5;
+  --surface2: #efe9de;
+  --surface3: #e8e0d2;
+  --border: #e6dfd8;
+  --text: #141413;
+  --text2: #6c6a64;
+  --text3: #8e8b82;
+  --primary: #cc785c;            /* Claude coral */
+  --primary-container: #a9583e;
+  --primary-text: #ffffff;
+  --secondary: #5db8a6;           /* accent teal */
+  --error: #c64545;
+  --success: #5db872;
+  --font-display: 'Lora', 'Charter', 'Iowan Old Style', Georgia, serif;
 }
 * { margin:0; padding:0; box-sizing:border-box; }
 body {
