@@ -835,22 +835,33 @@ def _exec_agent(engine: WorkflowEngine, run: WorkflowRun,
     if not prompt or not str(prompt).strip():
         raise ValueError("agent node missing config.prompt")
 
-    # ── success_when: declarative termination by deliverable ──
-    # Optional dict with one or more matchers. When ANY matcher fires
-    # in the shared workspace before the LLM self-reports COMPLETED,
-    # we abort the chat task and mark the node SUCCEEDED. This solves
-    # the "agent finished writing the file 9 seconds after canvas
-    # timeout" race — the file IS the deliverable, no need to wait
-    # for the LLM to also finish narrating about it.
+    # ── deliverable: declarative output of this agent node ──
+    # Optional dict that ties three concerns together:
+    #   1. WHAT this node produces (passed to downstream as
+    #      {{nid.deliverable}})
+    #   2. WHEN to consider the node done (declarative termination —
+    #      file lands → we abort the chat + mark SUCCEEDED, even if
+    #      the LLM is still narrating; solves the "finished 9s after
+    #      timeout" race)
+    #   3. Provenance — _meta.json captures the resolved path.
     #
-    # Supported matchers (MVP):
-    #   file_glob: "report_*.md"   — basename or rel-path matches the
-    #                                 fnmatch glob; only NEW files
-    #                                 (not in pre_snapshot) count.
-    success_when = config.get("success_when") or {}
-    if not isinstance(success_when, dict):
-        success_when = {}
-    success_file_glob = str(success_when.get("file_glob") or "").strip()
+    # Default (no config): deliverable = the entire node subdir.
+    # Narrow shapes:
+    #   deliverable.file_glob: "report_*.md"   → single file (or first
+    #                                           matching new file)
+    # Legacy alias accepted for back-compat:
+    #   success_when.file_glob (committed in d2a14a6, never used in
+    #   prod) maps to deliverable.file_glob.
+    deliverable_cfg = config.get("deliverable") or {}
+    if not isinstance(deliverable_cfg, dict):
+        deliverable_cfg = {}
+    legacy_sw = config.get("success_when") or {}
+    if isinstance(legacy_sw, dict) and not deliverable_cfg.get("file_glob"):
+        legacy_glob = str(legacy_sw.get("file_glob") or "").strip()
+        if legacy_glob:
+            deliverable_cfg = dict(deliverable_cfg)
+            deliverable_cfg["file_glob"] = legacy_glob
+    success_file_glob = str(deliverable_cfg.get("file_glob") or "").strip()
 
     agent = engine.hub.get_agent(agent_id) if hasattr(
         engine.hub, "get_agent") else None
@@ -879,38 +890,67 @@ def _exec_agent(engine: WorkflowEngine, run: WorkflowRun,
         canvas_ctx_id = None  # signal: nothing to restore
 
     # ── Artifact closed-loop setup ──
-    # Pre-scan + redirect agent's working_dir to the shared workspace.
-    # Engine restores the prior working_dir + sandbox in the `finally`
-    # below, no matter how the chat ends.
+    # Each agent node owns a private subdirectory under shared/. Write
+    # isolation: working_dir = shared/<node_id>/ so files this agent
+    # produces can't collide with sibling nodes. Read isolation NOT
+    # enforced: sandbox covers the whole shared/ so downstream nodes
+    # can still reach upstream outputs via {{nid.deliverable}}.
+    # On retry of the same node we wipe the subdir per the "直接覆盖"
+    # decision (2026-05-02) — audit log retains the history.
     from . import canvas_artifacts as _ca
     artifact_store = _ca.get_store()
     pre_snapshot: dict[str, float] = {}
     prior_working_dir = None
     sandbox_extended = False
+    node_id = node.get("id", "")
+    node_dir = None
     if artifact_store is not None:
-        shared_dir = artifact_store.shared_dir(run.id)
-        pre_snapshot = artifact_store.snapshot_dir(run.id)
+        shared_dir_root = artifact_store.shared_dir(run.id)
+        # fresh=True: wipe any leftover from a previous attempt of THIS
+        # same node (retry / resume). Other nodes' subdirs are untouched.
+        node_dir = artifact_store.node_dir(run.id, node_id, fresh=True)
+        # Pre-snapshot: the wiped node dir is empty, so this is just {}.
+        # Keeping the call so the contract stays "diff registers only
+        # what changed since pre" rather than "registers everything".
+        pre_snapshot = artifact_store.snapshot_dir(run.id, subdir=node_id)
         # Set the agent's working_dir for the duration of this turn.
         prior_working_dir = getattr(agent, "working_dir", None)
         try:
-            agent.working_dir = str(shared_dir)
+            agent.working_dir = str(node_dir)
         except Exception:
             prior_working_dir = None   # couldn't set; don't try to restore
-        # Extend sandbox to allow the shared dir as writable.
+        # Extend sandbox to allow the WHOLE shared/ tree (not just the
+        # node subdir) so the agent can READ sibling nodes' deliverables
+        # via {{upstream.deliverable}}. Writes naturally land in
+        # working_dir = node subdir.
         try:
             from . import sandbox as _sb
             pol = _sb.get_current_policy()
-            if pol is not None and str(shared_dir) not in pol.allowed_dirs:
-                pol.allowed_dirs.append(str(shared_dir))
+            if pol is not None and str(shared_dir_root) not in pol.allowed_dirs:
+                pol.allowed_dirs.append(str(shared_dir_root))
                 sandbox_extended = True
         except Exception as _se:
             logger.debug("sandbox extension failed: %s", _se)
+        # Drop _meta.json with the in-flight values (finished_at + etc
+        # filled in after the chat completes below). Lets a debugger
+        # grep `find shared -name _meta.json` and reconstruct the run.
+        try:
+            artifact_store.write_node_meta(run.id, node_id, {
+                "node_id": node_id,
+                "node_label": node.get("label", ""),
+                "agent_id": agent_id,
+                "agent_name": getattr(agent, "name", ""),
+                "started_at": time.time(),
+                "deliverable_cfg": deliverable_cfg,
+            })
+        except Exception:
+            pass
         artifact_store.record_audit(
             run.id,
             actor_agent_id=agent_id,
-            actor_node_id=node.get("id", ""),
+            actor_node_id=node_id,
             action="scan_start",
-            extra={"pre_files": len(pre_snapshot)},
+            extra={"pre_files": len(pre_snapshot), "node_dir": str(node_dir)},
         )
 
     try:
@@ -934,11 +974,16 @@ def _exec_agent(engine: WorkflowEngine, run: WorkflowRun,
                                ChatTaskStatus.FAILED,
                                ChatTaskStatus.ABORTED):
                 break
-            if success_file_glob and artifact_store is not None:
+            if success_file_glob and artifact_store is not None and node_dir is not None:
+                # Scope the marker scan to THIS node's subdir only —
+                # otherwise an unrelated sibling node landing a matching
+                # file would falsely close us. Pre-snapshot is also
+                # subdir-scoped so the rel_path keys line up.
                 marker_file = _scan_for_marker_file(
-                    artifact_store.shared_dir(run.id),
+                    node_dir,
                     success_file_glob,
-                    pre_snapshot,
+                    {k.split("/", 1)[-1] if "/" in k else k: v
+                     for k, v in pre_snapshot.items()},
                 )
                 if marker_file:
                     # Stop the LLM loop ASAP — the deliverable is in.
@@ -981,20 +1026,37 @@ def _exec_agent(engine: WorkflowEngine, run: WorkflowRun,
             "task_id": task.id,
             "duration_s": task.updated_at - task.created_at,
         }
-        if marker_file:
-            outputs["success_marker_file"] = marker_file
+        # ── deliverable variable ──
+        # Default: the whole node subdir is the deliverable (a directory).
+        # If config.deliverable.file_glob narrowed to a specific file,
+        # use that file's absolute path instead. Either way downstream
+        # references {{nid.deliverable}} as a single string.
+        if node_dir is not None:
+            if marker_file:
+                deliverable_abs = str(node_dir / marker_file)
+                outputs["deliverable"] = deliverable_abs
+                outputs["deliverable_type"] = "file"
+                outputs["deliverable_relative"] = f"{node_id}/{marker_file}"
+                outputs["success_marker_file"] = marker_file   # legacy alias
+            else:
+                outputs["deliverable"] = str(node_dir)
+                outputs["deliverable_type"] = "directory"
+                outputs["deliverable_relative"] = f"{node_id}/"
 
         # ── Artifact closed-loop post-scan ──
-        # Diff the shared dir against the pre-snapshot; register every
-        # new/modified file as an artifact + inject vars so downstream
-        # nodes can reference them via {{node_id.file_*}}.
-        if artifact_store is not None:
+        # Diff the node's subdir against the pre-snapshot. Scoping to
+        # the subdir means we don't re-register sibling nodes' files
+        # on every run (since the artifact index is keyed by rel_path
+        # relative to shared/, those sibling files are already there
+        # under their own producer_node_id).
+        if artifact_store is not None and node_dir is not None:
             try:
                 new_artifacts = artifact_store.diff_and_register(
                     run.id,
                     pre_snapshot=pre_snapshot,
-                    producer_node_id=node.get("id", ""),
+                    producer_node_id=node_id,
                     producer_agent_id=agent_id,
+                    subdir=node_id,
                 )
                 for art in new_artifacts:
                     # Absolute path so downstream {{...}} substitution
@@ -1006,20 +1068,38 @@ def _exec_agent(engine: WorkflowEngine, run: WorkflowRun,
                     # return the suffix only.
                     suffix = art.vars_key.split(".", 1)[-1]
                     outputs[suffix] = abs_path
-                # Also a list of artifact ids for programmatic access
                 outputs["artifact_ids"] = [a.id for a in new_artifacts]
                 outputs["artifact_count"] = len(new_artifacts)
                 artifact_store.record_audit(
                     run.id,
                     actor_agent_id=agent_id,
-                    actor_node_id=node.get("id", ""),
+                    actor_node_id=node_id,
                     action="scan_end",
                     extra={"new_artifacts": len(new_artifacts),
                            "artifact_ids": [a.id for a in new_artifacts]},
                 )
+                # Update _meta.json with the resolved deliverable + finished_at
+                try:
+                    artifact_store.write_node_meta(run.id, node_id, {
+                        "node_id": node_id,
+                        "node_label": node.get("label", ""),
+                        "agent_id": agent_id,
+                        "agent_name": getattr(agent, "name", ""),
+                        "task_id": task.id,
+                        "started_at": task.created_at,
+                        "finished_at": time.time(),
+                        "deliverable": {
+                            "type": outputs.get("deliverable_type", "directory"),
+                            "rel_path": outputs.get("deliverable_relative", f"{node_id}/"),
+                            "abs_path": outputs.get("deliverable", str(node_dir)),
+                        },
+                        "artifact_count": len(new_artifacts),
+                    })
+                except Exception:
+                    pass
             except Exception as _pse:
                 logger.warning("artifact post-scan failed for %s/%s: %s",
-                               run.id, node.get("id"), _pse)
+                               run.id, node_id, _pse)
 
         return outputs
     finally:

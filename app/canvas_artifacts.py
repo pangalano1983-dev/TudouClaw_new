@@ -136,6 +136,50 @@ class ArtifactStore:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    @staticmethod
+    def _sanitize_node_id(node_id: str) -> str:
+        """Defensive — node_ids are server-generated hex, but rejecting
+        path separators here makes us robust to ever auto-generating
+        from labels in the future."""
+        s = (node_id or "").replace("/", "_").replace("\\", "_").replace("..", "_")
+        return s or "unknown_node"
+
+    def node_dir(self, run_id: str, node_id: str, *, fresh: bool = False) -> Path:
+        """Return ``shared/<node_id>/`` for this run, creating if absent.
+
+        Each agent node owns a private subdirectory under shared/. Write
+        isolation: the agent's working_dir is set to this path so its
+        produced files can't collide with sibling nodes' files. Read
+        isolation is intentionally NOT enforced — sandbox still allows
+        the whole shared/ tree, so downstream nodes can reach any
+        upstream node's outputs via {{nid.deliverable}}.
+
+        ``fresh=True`` (used on retry per the user's "直接覆盖" choice
+        2026-05-02): rmtree the existing dir first, then recreate empty.
+        Audit log preserves what was lost.
+        """
+        nid = self._sanitize_node_id(node_id)
+        d = self.shared_dir(run_id) / nid
+        if fresh and d.exists():
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def write_node_meta(self, run_id: str, node_id: str, meta: dict) -> None:
+        """Drop _meta.json into the node's subdir. Captures who-produced-
+        what at the filesystem level so a debugger can reconstruct the
+        run by walking the tree. Atomic write via tmp+replace."""
+        d = self.node_dir(run_id, node_id)
+        path = d / "_meta.json"
+        tmp = path.with_suffix(".json.tmp")
+        try:
+            tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2),
+                           encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError as e:
+            logger.warning("write_node_meta failed for %s/%s: %s", run_id, node_id, e)
+
     def _index_path(self, run_id: str) -> Path:
         return self.runs_root / run_id / "artifacts.json"
 
@@ -247,16 +291,26 @@ class ArtifactStore:
 
     # ── Scan + register ──
 
-    def snapshot_dir(self, run_id: str) -> dict[str, float]:
-        """Return {rel_path: mtime_ns} for everything currently in shared/.
+    def snapshot_dir(self, run_id: str, *, subdir: str = "") -> dict[str, float]:
+        """Return {rel_path: mtime_ns} for everything in ``shared/<subdir>/``.
+
+        Empty subdir → snapshots the whole shared tree (legacy behavior).
+        Pass ``subdir=node_id`` to scope the snapshot to a single node's
+        private dir — keeps rel_paths relative to ``shared/`` so the
+        ``<node_id>/`` prefix is preserved in artifact rel_path.
 
         Used as a pre-snapshot before invoking a node; diff against a
         post-snapshot tells the engine which files the node produced.
         """
         d = self.shared_dir(run_id)
+        target = (d / subdir) if subdir else d
         snap: dict[str, float] = {}
-        for root, _dirs, files in os.walk(d):
+        if not target.exists():
+            return snap
+        for root, _dirs, files in os.walk(target):
             for f in files:
+                if f == "_meta.json":
+                    continue   # not a deliverable; skip from snapshots
                 full = Path(root) / f
                 try:
                     rel = str(full.relative_to(d))
@@ -269,22 +323,35 @@ class ArtifactStore:
                           pre_snapshot: dict[str, float],
                           producer_node_id: str,
                           producer_agent_id: str,
+                          subdir: str = "",
                           ) -> list[ArtifactMetadata]:
-        """Compare current state of shared/ to ``pre_snapshot`` and
-        register every NEW or MODIFIED file as an artifact.
+        """Compare current state of ``shared/<subdir>/`` to
+        ``pre_snapshot`` and register every NEW or MODIFIED file as an
+        artifact.
 
         Returns the list of newly-registered artifacts (one per file).
         Idempotent: if a file at the same rel_path already exists in
         the index AND its sha256 matches, no new artifact is created.
+
+        ``subdir=""`` walks the whole shared tree (legacy behavior); pass
+        ``subdir=node_id`` to limit registration to one node's private
+        directory — important now that each node owns a subdir, so
+        diffing the whole tree would re-register sibling nodes' files
+        on every run.
         """
         d = self.shared_dir(run_id)
+        target = (d / subdir) if subdir else d
         new_items: list[ArtifactMetadata] = []
         with self._lock_for(run_id):
             existing = self._load_index(run_id)
             existing_by_rel = {it.rel_path: it for it in existing}
 
-            for root, _dirs, files in os.walk(d):
+            if not target.exists():
+                return new_items
+            for root, _dirs, files in os.walk(target):
                 for f in files:
+                    if f == "_meta.json":
+                        continue
                     full = Path(root) / f
                     try:
                         rel = str(full.relative_to(d))
