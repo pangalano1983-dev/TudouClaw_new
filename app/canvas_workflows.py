@@ -66,7 +66,13 @@ from pathlib import Path
 logger = logging.getLogger("tudou.workflows")
 
 
-VALID_NODE_TYPES = {"start", "agent", "tool", "decision", "parallel", "end"}
+# 2026-05-02: removed "tool" from the type set. The tool node was a
+# deterministic shortcut that bypassed the agent's autonomy — but in
+# practice the agent + its granted skills covers all the same use
+# cases via natural-language prompts ("请用 drawio-skill 把 X 画了").
+# Existing workflows with tool nodes get migrated to agent nodes by
+# ``_migrate_tool_to_agent`` in ``save()`` below.
+VALID_NODE_TYPES = {"start", "agent", "decision", "parallel", "end"}
 
 # A workflow's executable status — drives whether the (future) execution
 # engine will pick it up, and what badge the UI shows on list cards.
@@ -94,6 +100,57 @@ def _safe_id(raw: str) -> str:
     sanitisation prevents path-escape attacks."""
     s = _ID_SAFE_RE.sub("-", raw or "").strip("-")
     return s[:120] or "wf-anonymous"
+
+
+def _migrate_tool_nodes_inplace(nodes: list) -> int:
+    """Convert legacy ``type: tool`` nodes to ``type: agent``.
+
+    Mutates the list in place. Returns the count of migrated nodes.
+
+    Tool nodes were removed 2026-05-02 — the agent + granted-skills
+    paradigm covers the same use case via natural-language prompts
+    ("请用 drawio-skill 把 X 画了"). A tool node's old config (tool_name,
+    args) gets folded into an agent prompt so authors don't lose info.
+    """
+    migrated = 0
+    for n in nodes:
+        if not isinstance(n, dict) or n.get("type") != "tool":
+            continue
+        old_cfg = n.get("config") or {}
+        old_tool = str(old_cfg.get("tool_name") or "").strip()
+        old_args = old_cfg.get("args") or {}
+        # Build a prompt that tells the agent what the tool node would
+        # have done. If old config was empty (just-added node never
+        # configured), leave prompt empty so author can fill in.
+        prompt_parts = []
+        if old_tool:
+            prompt_parts.append(f"请调用 {old_tool} skill 完成本步。")
+        if old_args:
+            try:
+                import json as _json
+                prompt_parts.append(
+                    f"建议参数: {_json.dumps(old_args, ensure_ascii=False)}"
+                )
+            except Exception:
+                pass
+        new_prompt = "\n".join(prompt_parts)
+        n["type"] = "agent"
+        n["config"] = {
+            "agent_id": "",
+            "prompt": new_prompt,
+            "timeout": old_cfg.get("timeout", 300),
+            "retry": old_cfg.get("retry", 0),
+            # Preserve original config under a private key for one
+            # release in case anyone needs to recover. Front-end
+            # ignores unknown keys.
+            "_migrated_from_tool": old_cfg,
+        }
+        # Update the visible label only if it's the default "工具调用"
+        # — preserve any user-customised label.
+        if (n.get("label") or "").strip() in ("", "工具调用", "Tool"):
+            n["label"] = old_tool or "Agent 节点"
+        migrated += 1
+    return migrated
 
 
 @dataclass
@@ -173,7 +230,13 @@ class WorkflowStore:
         if not path.exists():
             return None
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            wf = json.loads(path.read_text(encoding="utf-8"))
+            # Forward-compat: silently migrate legacy "tool" nodes to
+            # "agent" nodes on read, so the front-end never sees a
+            # node type it can't render. Persisted file isn't rewritten
+            # here; the next save() will lock in the migrated form.
+            _migrate_tool_nodes_inplace(wf.get("nodes") or [])
+            return wf
         except Exception as e:
             logger.error("failed to read workflow %s: %s", wf_id, e)
             return None
@@ -220,10 +283,7 @@ class WorkflowStore:
         for n in nodes:
             t = n.get("type")
             cfg = n.get("config") or {}
-            if t == "tool":
-                if not cfg.get("tool_name"):
-                    issues.append(f"tool node '{n.get('label') or n['id']}' missing config.tool_name")
-            elif t == "decision":
+            if t == "decision":
                 if not cfg.get("condition"):
                     issues.append(f"decision node '{n.get('label') or n['id']}' missing config.condition")
             # Non-end nodes need at least one outgoing edge
@@ -309,6 +369,13 @@ class WorkflowStore:
         edges = payload.get("edges") or []
         if not isinstance(nodes, list) or not isinstance(edges, list):
             raise ValueError("nodes/edges must be lists")
+
+        # Forward-compat: migrate legacy "tool" nodes to "agent" nodes
+        # so the post-removal validation below doesn't reject them.
+        # Front-end also runs this migration on load, so by the time a
+        # save reaches us nodes should already be agent-type — this is
+        # belt-and-suspenders for direct API callers.
+        _migrate_tool_nodes_inplace(nodes)
 
         # Validate node basics
         node_ids = set()

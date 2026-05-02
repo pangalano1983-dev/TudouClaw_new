@@ -744,9 +744,13 @@ _NODE_EXECUTORS: dict[str, Callable] = {
     "start":    _exec_start,
     "end":      _exec_end,
     "agent":    _exec_agent,
-    "tool":     _exec_tool,
     "decision": _exec_decision,
     "parallel": _exec_parallel,
+    # Note: "tool" removed 2026-05-02. Use agent + granted skills
+    # instead — see canvas_workflows._migrate_tool_nodes_inplace.
+    # _exec_tool function kept below as dead code in case the
+    # migration needs to be reversed; can be deleted in a follow-up
+    # after the migration has been in production for a release.
 }
 
 

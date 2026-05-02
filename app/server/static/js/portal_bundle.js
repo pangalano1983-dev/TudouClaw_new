@@ -21957,11 +21957,16 @@ var _canvasState = {
   pendingEdge: null,             // {fromNodeId, fromAnchor: 'top'|'right'|'bottom'|'left', svgX, svgY}
 };
 
-// 5 node types — palette source + render style
+// Node types — palette source + render style.
+// "tool" was removed 2026-05-02. The agent + granted-skills paradigm
+// covers the same use case: instead of a tool node hardcoding which
+// skill to call, the agent node's prompt tells the agent ("请用
+// drawio-skill 把 X 画了"), and the agent picks. Existing workflows
+// with tool nodes are auto-migrated to agent nodes by
+// canvas_workflows._migrate_tool_nodes_inplace.
 var _NODE_TYPES = {
   start:    { icon: '▶', label: '开始',     color: '#10b981', shape: 'circle' },
   agent:    { icon: '🤖', label: 'Agent 节点', color: '#3b82f6', shape: 'rect' },
-  tool:     { icon: '🛠', label: '工具调用',  color: '#f97316', shape: 'rect' },
   decision: { icon: '◆', label: '条件分支',  color: '#eab308', shape: 'diamond' },
   parallel: { icon: '⫴', label: '并行执行',  color: '#a855f7', shape: 'rect' },
   end:      { icon: '■', label: '结束',     color: '#6b7280', shape: 'circle' },
@@ -22108,7 +22113,22 @@ window._canvasMarkDisabled = async function() {
 };
 
 window._canvasNewWorkflow = function() {
-  var name = prompt('Workflow 名称?', '未命名流程 ' + new Date().toLocaleString());
+  var raw = prompt('Workflow 名称?', '未命名流程 ' + new Date().toLocaleString());
+  if (raw === null || raw === undefined) return;
+  // Defensive: some Chrome extensions / privacy modes monkey-patch
+  // window.prompt() to return a Promise instead of a string. We can't
+  // synchronously await here, so fall back to a default name and tell
+  // the user. Otherwise the UI displays "[object Promise]" as the
+  // workflow name.
+  var name;
+  if (typeof raw === 'string') {
+    name = raw.trim();
+  } else if (raw && typeof raw.then === 'function') {
+    name = '未命名流程 ' + new Date().toLocaleString();
+    _toast('浏览器拦截了输入框,已用默认名称。可在顶部修改', 'info');
+  } else {
+    name = String(raw || '').trim();
+  }
   if (!name) return;
   _canvasState.current = {
     id: '', name: name, description: '',
@@ -22120,18 +22140,87 @@ window._canvasNewWorkflow = function() {
   };
   _canvasState.selectedNodeId = null;
   _canvasRenderEditor();
+  _canvasPreloadEntityLists();
 };
 
 window._canvasOpenEditor = async function(wfId) {
   try {
     var wf = await api('GET', '/api/portal/canvas-workflows/' + encodeURIComponent(wfId));
+    // Migrate any legacy tool nodes before we hand the workflow to
+    // _canvasState. Toast the user so they know what changed.
+    var migCount = _canvasMigrateToolNodesInPlace(wf.nodes || []);
+    if (migCount > 0) {
+      _toast('已自动迁移 ' + migCount + ' 个 tool 节点为 agent 节点 (tool 类型已废弃)', 'info');
+    }
     _canvasState.current = wf;
     _canvasState.selectedNodeId = null;
     _canvasRenderEditor();
+    _canvasPreloadEntityLists();
   } catch (e) {
     _toast('打开失败: ' + e, 'error');
   }
 };
+
+// ─────────── Entity-list cache for node-config dropdowns ───────────
+// Agent IDs are picked from a dropdown rather than typed freely.
+// Fetched once per editor session and cached on _canvasState.
+// (Skill cache previously lived here too but was removed when the
+// tool node type was deleted on 2026-05-02.)
+
+async function _canvasLoadAgentsList() {
+  if (_canvasState._agentsList) return _canvasState._agentsList;
+  try {
+    var r = await api('GET', '/api/portal/agents');
+    _canvasState._agentsList = (r.agents || []).map(function(a) {
+      return { id: a.id, name: a.name || a.id, role: a.role || '' };
+    });
+  } catch (e) {
+    _canvasState._agentsList = [];
+  }
+  return _canvasState._agentsList;
+}
+
+async function _canvasPreloadEntityLists() {
+  await _canvasLoadAgentsList();
+  // Re-render the open panel so the agent dropdown gets populated now
+  // that the list arrived (vs. the placeholder that rendered before
+  // fetch finished).
+  if (_canvasState.selectedNodeId) _canvasRenderConfigPanel();
+}
+
+// Tool-node migration: legacy workflows with type:tool nodes get
+// silently rewritten to type:agent in memory. Backend does the same on
+// load + save (see canvas_workflows._migrate_tool_nodes_inplace), but
+// running this client-side too means the user sees agent nodes
+// immediately even before the next save round-trips through the backend.
+function _canvasMigrateToolNodesInPlace(nodes) {
+  if (!Array.isArray(nodes)) return 0;
+  var migrated = 0;
+  nodes.forEach(function(n) {
+    if (!n || n.type !== 'tool') return;
+    var oldCfg = n.config || {};
+    var oldTool = String(oldCfg.tool_name || '').trim();
+    var oldArgs = oldCfg.args;
+    var promptParts = [];
+    if (oldTool) promptParts.push('请调用 ' + oldTool + ' skill 完成本步。');
+    if (oldArgs && Object.keys(oldArgs).length) {
+      try { promptParts.push('建议参数: ' + JSON.stringify(oldArgs)); } catch (_) {}
+    }
+    n.type = 'agent';
+    n.config = {
+      agent_id: '',
+      prompt: promptParts.join('\n'),
+      timeout: oldCfg.timeout || 300,
+      retry: oldCfg.retry || 0,
+      _migrated_from_tool: oldCfg,
+    };
+    if (!n.label || n.label === '工具调用' || n.label === 'Tool') {
+      n.label = oldTool || 'Agent 节点';
+    }
+    migrated++;
+  });
+  return migrated;
+}
 
 window._canvasDelete = async function(wfId, name) {
   if (!confirm('删除 "' + name + '"?')) return;
@@ -22451,10 +22540,8 @@ var _CANVAS_NODE_OUTPUT_KEYS = {
   start: ['started_at'],
   end:   ['finished_at'],
   agent: ['output', 'task_id', 'duration_s'],
-  tool:  ['output'],   // skill-specific keys can't be enumerated; agent
-                       // can still type {{node.<custom_key>}} manually
-  decision: [],
-  parallel: [],
+  decision: ['branch', 'raw_result'],
+  parallel: ['fanned_out_at'],
 };
 
 // HANDOFF [H] — collect every node id that can reach `targetId`
@@ -22495,9 +22582,31 @@ function _canvasRenderConfigPanel() {
   var typeFields = '';
   // Type-specific config fields
   if (n.type === 'agent') {
+    // Build agent dropdown from cached list. If cache hasn't arrived
+    // yet, the only option is the current value (so the existing
+    // selection isn't lost) plus a "loading" hint; preload re-renders
+    // the panel once the fetch lands.
+    var agentList = _canvasState._agentsList;
+    var curAgentId = n.config.agent_id || '';
+    var agentOpts = '<option value=""' + (!curAgentId ? ' selected' : '') + '>— 任意空闲 agent —</option>';
+    if (agentList && agentList.length) {
+      agentList.forEach(function(a) {
+        var sel = (a.id === curAgentId) ? ' selected' : '';
+        var label = a.name + (a.role ? ' · ' + a.role : '') + ' [' + a.id.slice(0, 8) + ']';
+        agentOpts += '<option value="' + esc(a.id) + '"' + sel + '>' + esc(label) + '</option>';
+      });
+    } else if (curAgentId) {
+      // Cache empty but value exists — preserve it so a save round-trip
+      // doesn't silently wipe the selection.
+      agentOpts += '<option value="' + esc(curAgentId) + '" selected>(已选: ' + esc(curAgentId) + ' — 列表加载中…)</option>';
+    } else if (!agentList) {
+      agentOpts += '<option value="" disabled>(列表加载中…)</option>';
+    }
     typeFields = ''
-      + '<div style="margin-bottom:8px"><label style="font-size:11px;color:var(--text3)">绑定 Agent ID</label>'
-      + '<input data-cfg="agent_id" value="' + esc(n.config.agent_id || '') + '" placeholder="a16c2710acb6 / 留空 = 任意空闲 agent" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px"></div>'
+      + '<div style="margin-bottom:8px"><label style="font-size:11px;color:var(--text3)">绑定 Agent</label>'
+      + '<select data-cfg="agent_id" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px">'
+      +   agentOpts
+      + '</select></div>'
       + '<div style="margin-bottom:8px"><label style="font-size:11px;color:var(--text3)">提示词 (Prompt)</label>'
       + '<textarea data-cfg="prompt" placeholder="给 agent 的指令" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px;min-height:80px;resize:vertical">' + esc(n.config.prompt || '') + '</textarea></div>'
       + '<div style="display:flex;gap:6px;margin-bottom:8px">'
@@ -22506,12 +22615,6 @@ function _canvasRenderConfigPanel() {
       + '<div style="flex:1"><label style="font-size:11px;color:var(--text3)">重试</label>'
       + '<input data-cfg="retry" type="number" value="' + (n.config.retry || 0) + '" min="0" max="5" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px"></div>'
       + '</div>';
-  } else if (n.type === 'tool') {
-    typeFields = ''
-      + '<div style="margin-bottom:8px"><label style="font-size:11px;color:var(--text3)">工具名 / Skill ID</label>'
-      + '<input data-cfg="tool_name" value="' + esc(n.config.tool_name || '') + '" placeholder="drawio-skill / send_email / ..." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px"></div>'
-      + '<div style="margin-bottom:8px"><label style="font-size:11px;color:var(--text3)">参数 (JSON)</label>'
-      + '<textarea data-cfg="args" placeholder=\'{"path": "..."}\' style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:11px;font-family:monospace;min-height:80px;resize:vertical">' + esc(typeof n.config.args === 'string' ? n.config.args : JSON.stringify(n.config.args || {}, null, 2)) + '</textarea></div>';
   } else if (n.type === 'decision') {
     typeFields = ''
       + '<div style="margin-bottom:8px"><label style="font-size:11px;color:var(--text3)">条件表达式</label>'
