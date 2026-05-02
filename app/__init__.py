@@ -23,6 +23,36 @@ import os as _os
 USER_HOME = _os.path.expanduser("~")
 DEFAULT_DATA_DIR = _os.path.join(USER_HOME, ".tudou_claw")
 
+# ── HuggingFace cache → project data dir, NOT ~/.cache ─────────────────
+# Models like BAAI/bge-m3 are 2-3 GB each. Default HF cache lives in
+# ~/.cache/huggingface/, which (a) pollutes the user's system cache and
+# (b) makes per-deployment cleanup hard ("rm -rf ~/.tudou_claw" should
+# wipe EVERYTHING this app produced). Pin both env vars BEFORE any
+# transformers / sentence-transformers / huggingface-hub import so the
+# library reads our value at first init.
+#
+# Override path via TUDOU_HF_CACHE if you want it on a different volume
+# (large external SSD, shared cache for multiple deployments, etc).
+# Falls back to TUDOU_CLAW_DATA_DIR override if set, else DEFAULT_DATA_DIR.
+_HF_CACHE_DIR = (
+    _os.environ.get("TUDOU_HF_CACHE")
+    or _os.path.join(
+        _os.environ.get("TUDOU_CLAW_DATA_DIR") or DEFAULT_DATA_DIR,
+        "hf_cache",
+    )
+)
+try:
+    _os.makedirs(_HF_CACHE_DIR, exist_ok=True)
+except OSError:
+    pass
+# HF_HOME is the umbrella var (newer); TRANSFORMERS_CACHE/HF_HUB_CACHE
+# are the legacy ones some libs still read. Set all three so the cache
+# location is unambiguous regardless of which entry-point loads first.
+_os.environ.setdefault("HF_HOME", _HF_CACHE_DIR)
+_os.environ.setdefault("HF_HUB_CACHE", _os.path.join(_HF_CACHE_DIR, "hub"))
+_os.environ.setdefault("TRANSFORMERS_CACHE", _os.path.join(_HF_CACHE_DIR, "hub"))
+_os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", _HF_CACHE_DIR)
+
 # ── Suppress tqdm progress bars globally (Nov 2026) ────────────────────
 # chromadb → sentence-transformers → .encode(show_progress_bar=True) by
 # default, which floods logs with
