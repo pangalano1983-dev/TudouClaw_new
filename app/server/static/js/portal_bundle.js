@@ -22265,11 +22265,14 @@ window._canvasNewWorkflow = function() {
 window._canvasOpenEditor = async function(wfId) {
   try {
     var wf = await api('GET', '/api/portal/canvas-workflows/' + encodeURIComponent(wfId));
-    // Migrate any legacy tool nodes before we hand the workflow to
-    // _canvasState. Toast the user so they know what changed.
+    // Belt-and-suspenders: migrate any legacy tool nodes the API
+    // might still return (older backend without the read-side
+    // migration). Silent — the persisted file gets locked into
+    // the migrated form on the next save; toast on every open
+    // would just be noise once the backend catches up.
     var migCount = _canvasMigrateToolNodesInPlace(wf.nodes || []);
     if (migCount > 0) {
-      _toast('已自动迁移 ' + migCount + ' 个 tool 节点为 agent 节点 (tool 类型已废弃)', 'info');
+      console.info('[canvas] silently migrated ' + migCount + ' tool node(s) to agent for ' + wfId);
     }
     _canvasState.current = wf;
     _canvasState.selectedNodeId = null;
