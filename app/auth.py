@@ -1753,27 +1753,26 @@ class AuthManager:
         self.audit_log: list[AuditEntry] = []
         self._rate_buckets: dict[str, _RateBucket] = {}
         self._shared_secret: str = ""
-        # Default data_dir: user home ~/.tudou_claw (or $TUDOU_CLAW_HOME
-        # override). Fallback to the source tree ONLY if the user-home
-        # path can't be determined — previously the fallback was the
-        # default, which caused tool_denylist.json (and other config)
-        # to be read from app/ instead of ~/.tudou_claw/, silently
-        # dropping user-configured denies whenever init_auth wasn't
-        # called first (ordering bug bites tests + early-init code).
+        # Default data_dir: ~/.tudou_claw (or $TUDOU_CLAW_DATA_DIR /
+        # $TUDOU_CLAW_HOME override — see app.paths.data_dir() for the
+        # full resolution rules). Fallback to the source tree ONLY if
+        # the user-home path can't be determined — previously the
+        # fallback was the default, which caused tool_denylist.json
+        # (and other config) to be read from app/ instead of
+        # ~/.tudou_claw/, silently dropping user-configured denies
+        # whenever init_auth wasn't called first (ordering bug bites
+        # tests + early-init code).
         if data_dir:
             self._data_dir = data_dir
         else:
-            _home = os.environ.get("TUDOU_CLAW_HOME", "").strip()
-            if _home:
-                self._data_dir = str(Path(_home).expanduser().resolve())
-            else:
-                _user = Path.home() / ".tudou_claw"
-                try:
-                    _user.mkdir(parents=True, exist_ok=True)
-                    self._data_dir = str(_user)
-                except Exception:
-                    # Last-resort fallback (unusual FS permissions).
-                    self._data_dir = str(Path(__file__).parent)
+            from .paths import data_dir as _resolve_data_dir
+            _user = _resolve_data_dir()
+            try:
+                _user.mkdir(parents=True, exist_ok=True)
+                self._data_dir = str(_user)
+            except Exception:
+                # Last-resort fallback (unusual FS permissions).
+                self._data_dir = str(Path(__file__).parent)
         self._audit_file: str = os.path.join(self._data_dir, "audit.log")
         self.tool_policy: ToolPolicy = ToolPolicy()
         # Bind tool_policy's session-approvals persistence now so the

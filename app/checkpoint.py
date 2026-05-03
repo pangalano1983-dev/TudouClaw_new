@@ -400,9 +400,8 @@ _STORE_LOCK = threading.Lock()
 
 
 def _default_db_path() -> str:
-    base = (os.environ.get("TUDOU_CLAW_DATA_DIR")
-            or os.path.expanduser("~/.tudou_claw"))
-    return os.path.join(base, "checkpoints.db")
+    from .paths import data_dir
+    return str(data_dir() / "checkpoints.db")
 
 
 def get_store(db_path: Optional[str] = None) -> CheckpointStore:

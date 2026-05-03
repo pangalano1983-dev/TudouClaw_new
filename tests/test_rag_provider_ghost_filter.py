@@ -24,11 +24,16 @@ from app.rag_provider import RAGProviderEntry, RAGProviderRegistry
 
 @pytest.fixture
 def isolated_registry(tmp_path, monkeypatch):
-    """Point the registry module's _PROVIDERS_FILE at tmp and return a
-    fresh registry instance. Real file is never touched."""
+    """Point the registry's data dir at tmp and return a fresh registry
+    instance. Real file is never touched.
+
+    Production code resolves the providers file via app.paths.data_dir()
+    at call time, so setting TUDOU_CLAW_DATA_DIR is enough — no need to
+    monkeypatch module constants any more (kept here as a tripwire in
+    case someone re-introduces import-time path caching)."""
+    monkeypatch.setenv("TUDOU_CLAW_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("TUDOU_CLAW_HOME", raising=False)
     fake_file = tmp_path / "rag_providers.json"
-    monkeypatch.setattr(rag_provider, "_PROVIDERS_FILE", fake_file)
-    monkeypatch.setattr(rag_provider, "_DATA_DIR", tmp_path)
     reg = RAGProviderRegistry()
     # Return both so tests can also inspect the backing file.
     return reg, fake_file

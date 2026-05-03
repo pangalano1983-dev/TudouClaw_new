@@ -268,14 +268,12 @@ class ExperienceLibrary:
 
     def __init__(self, data_dir: str = ""):
         if not data_dir:
-            # Runtime state lives under user home, NOT inside the code tree.
-            # Respect TUDOU_CLAW_HOME override if set.
-            import os as _os
-            _home = _os.environ.get("TUDOU_CLAW_HOME", "").strip()
-            if _home:
-                base = Path(_home).expanduser().resolve()
-            else:
-                base = Path.home() / ".tudou_claw"
+            # Runtime state lives under the configured data root, NOT
+            # inside the code tree. Resolution honours TUDOU_CLAW_DATA_DIR
+            # (canonical) and TUDOU_CLAW_HOME (legacy alias) — see
+            # app.paths.data_dir() for the rules.
+            from .paths import data_dir as _resolve_data_dir
+            base = _resolve_data_dir()
             data_dir = str(base / "experience")
             # Migrate legacy in-code path if present and target is empty
             try:

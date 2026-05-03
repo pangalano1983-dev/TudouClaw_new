@@ -35,9 +35,39 @@ from typing import Any, Optional
 
 logger = logging.getLogger("tudou.rag")
 
-_DATA_DIR = Path.home() / ".tudou_claw"
-_PROVIDERS_FILE = _DATA_DIR / "rag_providers.json"
-_DOMAIN_KB_FILE = _DATA_DIR / "domain_knowledge_bases.json"
+def _data_dir() -> Path:
+    """Resolved at call time so env-var changes are respected.
+
+    Centralised in ``app.paths.data_dir()`` — see
+    ``docs/data-dir-config.md``.
+    """
+    from .paths import data_dir
+    return data_dir()
+
+
+def _providers_file() -> Path:
+    return _data_dir() / "rag_providers.json"
+
+
+def _domain_kb_file() -> Path:
+    return _data_dir() / "domain_knowledge_bases.json"
+
+
+# ── Legacy module-attribute compat ─────────────────────────────────────────
+# Older tests patch the constants directly via
+# ``monkeypatch.setattr(rag_provider, "_PROVIDERS_FILE", ...)``.
+# pytest's setattr requires the attribute to exist beforehand, so we
+# expose lazy getters here. Production code uses the functions above
+# (env-var aware at call time); the constants are kept solely for
+# back-compat with the test patch sites.
+def __getattr__(name):
+    if name == "_DATA_DIR":
+        return _data_dir()
+    if name == "_PROVIDERS_FILE":
+        return _providers_file()
+    if name == "_DOMAIN_KB_FILE":
+        return _domain_kb_file()
+    raise AttributeError(f"module 'app.rag_provider' has no attribute {name!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +204,7 @@ class DomainKBStore:
     """Persistent store for standalone domain knowledge bases."""
 
     def __init__(self, path: Path | str | None = None):
-        self._path = Path(path) if path else _DOMAIN_KB_FILE
+        self._path = Path(path) if path else _domain_kb_file()
         self._kbs: dict[str, DomainKnowledgeBase] = {}
         self._load()
 
@@ -297,10 +327,11 @@ class RAGProviderRegistry:
         if self._loaded:
             return
         self._loaded = True
-        _DATA_DIR.mkdir(parents=True, exist_ok=True)
-        if _PROVIDERS_FILE.exists():
+        providers_file = _providers_file()
+        providers_file.parent.mkdir(parents=True, exist_ok=True)
+        if providers_file.exists():
             try:
-                with open(_PROVIDERS_FILE, "r", encoding="utf-8") as f:
+                with open(providers_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 ghosts_skipped = 0
                 for d in data:
@@ -321,9 +352,10 @@ class RAGProviderRegistry:
                 logger.error("Failed to load RAG providers: %s", e)
 
     def _save(self):
-        _DATA_DIR.mkdir(parents=True, exist_ok=True)
+        providers_file = _providers_file()
+        providers_file.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with open(_PROVIDERS_FILE, "w", encoding="utf-8") as f:
+            with open(providers_file, "w", encoding="utf-8") as f:
                 json.dump([p.to_dict() for p in self._providers.values()],
                           f, ensure_ascii=False, indent=2)
         except Exception as e:

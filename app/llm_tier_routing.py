@@ -241,9 +241,11 @@ class LLMTierRouter:
     def __init__(self, persist_path: str = ""):
         self._map: dict[str, LLMTierEntry] = {}
         self._lock = Lock()
-        self._persist_path = persist_path or os.path.join(
-            os.path.expanduser("~"), ".tudou_claw", "llm_tiers.json"
-        )
+        if persist_path:
+            self._persist_path = persist_path
+        else:
+            from .paths import data_dir
+            self._persist_path = str(data_dir() / "llm_tiers.json")
 
     # ── 基础 CRUD ──────────────────────────────────────────────────────
     def set(self, tier: str, entry: LLMTierEntry) -> None:

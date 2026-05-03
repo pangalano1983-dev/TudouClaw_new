@@ -173,8 +173,8 @@ def get_registry() -> RolePresetRegistry:
         # 默认扫描目录（相对于 cwd / 项目根）
         _registry.add_scan_dir(Path.cwd() / "data" / "roles")
         # 也支持用户目录（和 skills 一致的约定）
-        import os as _os
-        user_dir = Path(_os.path.expanduser("~")) / ".tudou_claw" / "roles"
+        from .paths import data_dir
+        user_dir = data_dir() / "roles"
         if user_dir.is_dir():
             _registry.add_scan_dir(user_dir)
     return _registry

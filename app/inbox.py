@@ -382,9 +382,8 @@ def get_store(db_path: Optional[str] = None) -> InboxStore:
         if _store is not None and db_path is None:
             return _store
         if db_path is None:
-            base = os.environ.get("TUDOU_CLAW_DATA_DIR") \
-                or os.path.expanduser("~/.tudou_claw")
-            db_path = os.path.join(base, "inbox.db")
+            from .paths import data_dir
+            db_path = str(data_dir() / "inbox.db")
         if _store is not None:
             try:
                 _store.close()
