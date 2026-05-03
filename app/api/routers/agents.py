@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Body, Request
 
 from ..deps.hub import get_hub
 from ..deps.auth import CurrentUser, get_current_user
+from ..deps.dual_auth import get_user_or_hub_proxy
 
 
 # ── Prompt Pack catalog helpers ──────────────────────────────────────
@@ -966,9 +967,12 @@ async def send_chat(
     agent_id: str,
     body: dict = Body(...),
     hub=Depends(get_hub),
-    user: CurrentUser = Depends(get_current_user),
+    user: CurrentUser = Depends(get_user_or_hub_proxy),
 ):
-    """Submit a chat message — returns task_id for SSE streaming."""
+    """Submit a chat message — returns task_id for SSE streaming.
+
+    Auth: JWT user OR X-Hub-Secret. The latter is used when this is
+    a worker receiving a chat call proxied from master."""
     import base64 as _b64
     import os as _os
     import time as _time
@@ -2469,13 +2473,23 @@ async def think_now(
 async def create_agent(
     body: dict = Body(...),
     hub=Depends(get_hub),
-    user: CurrentUser = Depends(get_current_user),
+    user: CurrentUser = Depends(get_user_or_hub_proxy),
 ):
     """Create a new agent.
 
     Name is required and must be specific. "Claw" / "" / "Agent" /
     "New Agent" are rejected because those are the default placeholders
     that a runaway client loop produces — they don't identify anything.
+
+    Multi-node: when ``node_id`` in the body points at a remote worker,
+    this endpoint forwards the create call to that worker via
+    ``hub.proxy_create_agent``. The agent then lives on that worker
+    only; master tracks it through ``remote_nodes[node_id].agents``
+    via heartbeat sync. Default ``node_id`` is empty/local — the
+    single-master path is unchanged.
+
+    Auth: JWT user OR X-Hub-Secret (the latter is only used when this
+    handler is the proxy target on a worker).
     """
     # Permission gate: anyone with CREATE_AGENT (superAdmin / admin /
     # user) may create. The resulting agent is owned by the caller
@@ -2489,6 +2503,36 @@ async def create_agent(
     if name.lower() in ("claw", "new agent", "agent"):
         raise HTTPException(400,
             "name is too generic — pick something meaningful")
+
+    # ── Multi-node proxy: if target node is a remote worker, forward.
+    # "local" / "" / hub.node_id all go down the local path below.
+    target_node = (body.get("node_id") or "").strip()
+    is_remote = (
+        target_node
+        and target_node != "local"
+        and target_node != getattr(hub, "node_id", "local")
+    )
+    if is_remote:
+        if not hasattr(hub, "remote_nodes") or target_node not in hub.remote_nodes:
+            raise HTTPException(
+                404,
+                f"Unknown node '{target_node}'. Use /api/portal/nodes "
+                f"to list registered workers.",
+            )
+        if not hasattr(hub, "proxy_create_agent"):
+            raise HTTPException(
+                500,
+                "hub.proxy_create_agent not wired — multi-node create "
+                "needs server upgrade.",
+            )
+        try:
+            return hub.proxy_create_agent(target_node, body)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("proxy_create_agent failed")
+            raise HTTPException(502, f"Worker create failed: {e}")
+
     try:
         agent = hub.create_agent(
             name=name,

@@ -117,7 +117,7 @@ class NodeManager(ManagerBase):
         try:
             headers = {}
             if node.secret:
-                headers["X-Claw-Secret"] = node.secret
+                headers["X-Hub-Secret"] = node.secret
             url = f"{node.url}/api/hub/agents"
             logger.debug("HUB refresh_node: GET %s", url)
             resp = http_requests.get(url, headers=headers, timeout=10)
@@ -150,7 +150,7 @@ class NodeManager(ManagerBase):
         try:
             headers = {}
             if node.secret:
-                headers["X-Claw-Secret"] = node.secret
+                headers["X-Hub-Secret"] = node.secret
             url = f"{node.url}/api/portal/agent/{agent_id}{sub_path}"
             logger.debug("PROXY GET %s", url)
             resp = http_requests.get(url, headers=headers, timeout=10)
@@ -170,7 +170,7 @@ class NodeManager(ManagerBase):
         try:
             headers = {"Content-Type": "application/json"}
             if node.secret:
-                headers["X-Claw-Secret"] = node.secret
+                headers["X-Hub-Secret"] = node.secret
             url = f"{node.url}/api/portal/agent/{agent_id}{sub_path}"
             logger.debug("PROXY POST %s", url)
             resp = http_requests.post(url, headers=headers, json=body, timeout=15)
@@ -273,7 +273,7 @@ class NodeManager(ManagerBase):
             try:
                 headers = {"Content-Type": "application/json"}
                 if node.secret:
-                    headers["X-Claw-Secret"] = node.secret
+                    headers["X-Hub-Secret"] = node.secret
                 logger.info("HUB dispatch_config -> POST %s", target_url)
                 resp = http_requests.post(
                     target_url,
@@ -376,9 +376,9 @@ class NodeManager(ManagerBase):
         try:
             headers = {"Content-Type": "application/json"}
             if node.secret:
-                headers["X-Claw-Secret"] = node.secret
+                headers["X-Hub-Secret"] = node.secret
             resp = http_requests.post(
-                f"{node.url}/api/agent/chat",
+                f"{node.url}/api/portal/agent/{agent_id}/chat",
                 headers=headers,
                 json={"message": message},
                 stream=True,
@@ -395,9 +395,9 @@ class NodeManager(ManagerBase):
         try:
             headers = {"Content-Type": "application/json"}
             if node.secret:
-                headers["X-Claw-Secret"] = node.secret
+                headers["X-Hub-Secret"] = node.secret
             resp = http_requests.post(
-                f"{node.url}/api/agent/chat",
+                f"{node.url}/api/portal/agent/{agent_id}/chat",
                 headers=headers,
                 json={"message": message},
                 stream=True,
@@ -432,7 +432,7 @@ class NodeManager(ManagerBase):
         try:
             headers = {}
             if node.secret:
-                headers["X-Claw-Secret"] = node.secret
+                headers["X-Hub-Secret"] = node.secret
             http_requests.post(
                 f"{node.url}/api/agent/clear",
                 headers=headers, timeout=10,
@@ -448,7 +448,7 @@ class NodeManager(ManagerBase):
         try:
             headers = {}
             if node.secret:
-                headers["X-Claw-Secret"] = node.secret
+                headers["X-Hub-Secret"] = node.secret
             resp = http_requests.get(
                 f"{node.url}/api/agent/events",
                 headers=headers, timeout=10,
@@ -466,7 +466,7 @@ class NodeManager(ManagerBase):
         try:
             headers = {}
             if node.secret:
-                headers["X-Claw-Secret"] = node.secret
+                headers["X-Hub-Secret"] = node.secret
             resp = http_requests.get(
                 f"{node.url}/api/agent/approvals",
                 headers=headers, timeout=10,
@@ -485,7 +485,7 @@ class NodeManager(ManagerBase):
         try:
             headers = {"Content-Type": "application/json"}
             if node.secret:
-                headers["X-Claw-Secret"] = node.secret
+                headers["X-Hub-Secret"] = node.secret
             resp = http_requests.post(
                 f"{node.url}/api/agent/approve",
                 headers=headers,
@@ -504,7 +504,7 @@ class NodeManager(ManagerBase):
         try:
             headers = {"Content-Type": "application/json"}
             if node.secret:
-                headers["X-Claw-Secret"] = node.secret
+                headers["X-Hub-Secret"] = node.secret
             resp = http_requests.post(
                 f"{node.url}/api/agent/model",
                 headers=headers,

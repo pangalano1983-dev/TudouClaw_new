@@ -5,6 +5,23 @@
 
 ---
 
+## 架构边界（数据所有权）
+
+| 类别 | 存储位置 | 备注 |
+|---|---|---|
+| Agent profile / config / LLM provider keys | **Master** | Worker 收到后只放内存，不落盘 |
+| MCP server 配置 / Skills / Role presets | **Master** | 同上 |
+| Conversations / messages / events / cost | **Master** | Worker 跑完一轮 push 回 master |
+| Experience library（向量库 + L3 facts） | **Master** | Worker 通过 RPC 查询 |
+| **Agent 工作目录文件（产物）** | **Worker 本地** | `${TUDOU_CLAW_DATA_DIR}/workspaces/agents/{agent_id}/`。未来上 NAS 后变共享。 |
+| Skills 安装目录 / HF cache | Worker 本地 | 同上 |
+
+> Master = 控制面 + 数据库 + 也能跑 agent（保持单机不变）
+> Worker = 纯执行集群，挂了不丢数据，重启后 master 重新派单
+> Worker 不需要 web UI（纯后台 API 服务）
+
+---
+
 ## TL;DR
 
 ```bash
@@ -332,15 +349,49 @@ done
 
 ---
 
-## 11. 当前限制（需要时再做）
+## 11. 当前能力 vs 限制
+
+### ✅ 已经能做（2026-05-03）
+
+| 能力 | 怎么用 |
+|---|---|
+| Worker 启动主动 register | 设 `TUDOU_UPSTREAM_HUB` + `TUDOU_UPSTREAM_SECRET` 即可 |
+| Heartbeat 自动恢复 | Master 重启后忘了，下次 heartbeat 会自动 upsert |
+| **Master UI 创建 worker 上的 agent** | POST `/api/portal/agent/create` 带 `node_id: "worker-xx"` |
+| Cross-node chat（基础 RPC） | `hub.proxy_chat(agent_id, msg)` — 但 SSE 流式透传未做 |
+| X-Hub-Secret 认证 | `/api/hub/register` `/heartbeat` `/api/portal/agent/create` `/api/portal/agent/{id}/chat` 都接受 |
+| Worker 上 superAdmin → admin 自动降级 | 默认行为，无需配置 |
+
+### 🟡 待做
 
 | 限制 | 现状 | TODO |
 |---|---|---|
-| HTTPS / TLS | 没强制，明文 secret | 加 reverse proxy（caddy / nginx）做 TLS termination |
-| Secret 轮换 | 重启所有 node | 设计两 secret 并存 + 平滑过渡 |
-| 多 master HA | 单 master | 远期 — 需要分布式 state（Redis / etcd） |
-| 节点 health UI | portal 看 last_seen 时间 | 加可视化 traffic light |
-| Worker 自我修复 | 仅 boot-time + heartbeat 兜底 | exponential backoff retry |
+| **跨 node SSE 流式透传** | proxy_chat 能拿到 stream，但 master `/agent/{id}/chat` 端点没串通到 UI 流 | 1–2 天工作 |
+| **Worker → Master 状态回写** | Worker 上 agent message/event 还没 push 回 master | Phase 3 任务 |
+| **Worker 重启拉所有应跑 agent** | Worker 启动只 register 自己，不知道"该跑哪些" | Phase 5 任务 |
+| **Worker 故障 → master 自动 fallback** | 没有 failover 逻辑 | Phase 6 任务 |
+| **UI 加 node 选择器** | 创建 agent 时还没下拉选择 node | 前端工作 |
+| **Worker 节点 health UI** | portal 看 last_seen 时间 | 加可视化 traffic light |
+| **HTTPS / TLS** | 没强制，明文 secret | 加 reverse proxy（caddy / nginx）做 TLS termination |
+| **Secret 轮换** | 重启所有 node | 设计两 secret 并存 + 平滑过渡 |
+| **多 master HA** | 单 master | 远期 — 需要分布式 state（Redis / etcd） |
+
+### 当前可用工作流（手动）
+
+```bash
+# 1. Master 创建 agent on worker（用 curl 因为 UI 还没下拉）
+curl -X POST http://master:9090/api/portal/agent/create \
+     -H "Authorization: Bearer $JWT_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"node_id": "worker-01", "name": "scout-1", "role": "researcher"}'
+# → master proxy 到 worker，agent 在 worker 上创建
+
+# 2. 等 ~15s 让 heartbeat sync agent list 回 master
+# 3. Master UI 看到这个 agent（在 worker 节点下）
+# 4. UI 上跟它聊（chat 走 master 端点 → 但 SSE 透传未做，只能回到本地路径）
+```
+
+> 提示：**目前推荐**先在 master 上创建 + 测试 agent，跑稳了再设 `node_id` 调度到 worker。SSE 透传完成后才能在 master UI 上无差别使用 worker agent。
 
 ---
 

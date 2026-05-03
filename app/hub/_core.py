@@ -1481,7 +1481,7 @@ class Hub:
         try:
             headers = {"Content-Type": "application/json"}
             if self.upstream_hub_secret:
-                headers["X-Claw-Secret"] = self.upstream_hub_secret
+                headers["X-Hub-Secret"] = self.upstream_hub_secret
             payload = {
                 "node_id": node_id,
                 "items": {k: v.to_dict(mask=False) for k, v in nc.items.items()},
@@ -1573,7 +1573,7 @@ class Hub:
         try:
             headers = {"Content-Type": "application/json"}
             if node.secret:
-                headers["X-Claw-Secret"] = node.secret
+                headers["X-Hub-Secret"] = node.secret
             payload = {
                 "node_id": node_id,
                 "items": {k: v.to_dict(mask=False) for k, v in nc.items.items()},
@@ -2366,7 +2366,7 @@ class Hub:
             try:
                 headers = {}
                 if node.secret:
-                    headers["X-Claw-Secret"] = node.secret
+                    headers["X-Hub-Secret"] = node.secret
                 url = f"{node.url}/api/portal/agent/{agent_id}"
                 resp = http_requests.delete(url, headers=headers, timeout=10)
                 ok = resp.status_code == 200
@@ -2419,7 +2419,7 @@ class Hub:
         try:
             headers = {}
             if node.secret:
-                headers["X-Claw-Secret"] = node.secret
+                headers["X-Hub-Secret"] = node.secret
             url = f"{node.url}/api/portal/agent/{agent_id}{sub_path}"
             logger.debug("PROXY GET %s", url)
             resp = http_requests.get(url, headers=headers, timeout=10)
@@ -2439,7 +2439,7 @@ class Hub:
         try:
             headers = {"Content-Type": "application/json"}
             if node.secret:
-                headers["X-Claw-Secret"] = node.secret
+                headers["X-Hub-Secret"] = node.secret
             url = f"{node.url}/api/portal/agent/{agent_id}{sub_path}"
             logger.debug("PROXY POST %s", url)
             resp = http_requests.post(url, headers=headers, json=body, timeout=15)
@@ -2521,7 +2521,7 @@ class Hub:
         try:
             headers = {}
             if node.secret:
-                headers["X-Claw-Secret"] = node.secret
+                headers["X-Hub-Secret"] = node.secret
             url = f"{node.url}/api/hub/agents"
             logger.debug("HUB refresh_node: GET %s", url)
             resp = http_requests.get(url, headers=headers, timeout=10)
@@ -2630,7 +2630,7 @@ class Hub:
             try:
                 headers = {"Content-Type": "application/json"}
                 if node.secret:
-                    headers["X-Claw-Secret"] = node.secret
+                    headers["X-Hub-Secret"] = node.secret
                 logger.info("HUB dispatch_config -> POST %s", target_url)
                 resp = http_requests.post(
                     target_url,
@@ -2730,10 +2730,11 @@ class Hub:
             return None
         try:
             headers = {"Content-Type": "application/json"}
-            if node.secret:
-                headers["X-Claw-Secret"] = node.secret
+            secret = self._get_cluster_secret()
+            if secret:
+                headers["X-Hub-Secret"] = secret
             resp = http_requests.post(
-                f"{node.url}/api/agent/chat",
+                f"{node.url}/api/portal/agent/{agent_id}/chat",
                 headers=headers,
                 json={"message": message},
                 stream=True,
@@ -2749,10 +2750,11 @@ class Hub:
         """同步调用远程 agent，收集完整文本结果（用于 workflow）。"""
         try:
             headers = {"Content-Type": "application/json"}
-            if node.secret:
-                headers["X-Claw-Secret"] = node.secret
+            secret = self._get_cluster_secret()
+            if secret:
+                headers["X-Hub-Secret"] = secret
             resp = http_requests.post(
-                f"{node.url}/api/agent/chat",
+                f"{node.url}/api/portal/agent/{agent_id}/chat",
                 headers=headers,
                 json={"message": message},
                 stream=True,
@@ -2787,7 +2789,7 @@ class Hub:
         try:
             headers = {}
             if node.secret:
-                headers["X-Claw-Secret"] = node.secret
+                headers["X-Hub-Secret"] = node.secret
             http_requests.post(
                 f"{node.url}/api/agent/clear",
                 headers=headers, timeout=10,
@@ -2803,7 +2805,7 @@ class Hub:
         try:
             headers = {}
             if node.secret:
-                headers["X-Claw-Secret"] = node.secret
+                headers["X-Hub-Secret"] = node.secret
             resp = http_requests.get(
                 f"{node.url}/api/agent/events",
                 headers=headers, timeout=10,
@@ -2821,7 +2823,7 @@ class Hub:
         try:
             headers = {}
             if node.secret:
-                headers["X-Claw-Secret"] = node.secret
+                headers["X-Hub-Secret"] = node.secret
             resp = http_requests.get(
                 f"{node.url}/api/agent/approvals",
                 headers=headers, timeout=10,
@@ -2840,7 +2842,7 @@ class Hub:
         try:
             headers = {"Content-Type": "application/json"}
             if node.secret:
-                headers["X-Claw-Secret"] = node.secret
+                headers["X-Hub-Secret"] = node.secret
             resp = http_requests.post(
                 f"{node.url}/api/agent/approve",
                 headers=headers,
@@ -2859,7 +2861,7 @@ class Hub:
         try:
             headers = {"Content-Type": "application/json"}
             if node.secret:
-                headers["X-Claw-Secret"] = node.secret
+                headers["X-Hub-Secret"] = node.secret
             resp = http_requests.post(
                 f"{node.url}/api/agent/model",
                 headers=headers,
@@ -2869,6 +2871,91 @@ class Hub:
             return resp.json().get("ok", False)
         except Exception:
             return False
+
+    # ── Multi-node create / chat proxies (X-Hub-Secret auth) ────────────
+
+    def _get_cluster_secret(self) -> str:
+        """Resolve the cluster's shared secret for outgoing inter-node calls.
+
+        Priority:
+          1. self.upstream_hub_secret (set on workers — they call up)
+          2. TUDOU_SECRET env (set on master — it calls down)
+          3. auth._shared_secret (whatever was passed to init_auth)
+
+        Returns "" when nothing is configured (dev-mode fallback —
+        receivers will accept unauthenticated calls + log a warning).
+        """
+        if self.upstream_hub_secret:
+            return self.upstream_hub_secret
+        env_secret = os.environ.get("TUDOU_SECRET", "")
+        if env_secret:
+            return env_secret
+        try:
+            from ..auth import get_auth
+            return (get_auth()._shared_secret or "")
+        except Exception:
+            return ""
+
+    def proxy_create_agent(self, node_id: str, body: dict) -> dict:
+        """Forward an agent-creation request to a registered worker.
+
+        Master calls this when ``/api/portal/agent/create`` arrives
+        with a ``node_id`` pointing at a worker. The worker's own
+        ``/api/portal/agent/create`` handler runs the local create
+        path (its hub.create_agent stamps ``node_id = worker.node_id``)
+        and returns the new agent dict, which we forward to the UI.
+
+        After this returns, the worker's heartbeat will sync its agent
+        list back to ``self.remote_nodes[node_id].agents`` within the
+        next interval — so master's UI will see the new agent on its
+        next refresh.
+
+        Auth: uses ``X-Hub-Secret`` (this hub's shared secret) so the
+        worker can verify the call without a JWT.
+        """
+        node = self.remote_nodes.get(node_id) if hasattr(self, "remote_nodes") else None
+        if not node or not node.url:
+            from fastapi import HTTPException
+            raise HTTPException(
+                404, f"Node '{node_id}' not registered or has no callback URL"
+            )
+        secret = self._get_cluster_secret()
+        headers = {"Content-Type": "application/json"}
+        if secret:
+            headers["X-Hub-Secret"] = secret
+        # Strip node_id from body before forwarding so the worker
+        # doesn't recursively try to proxy back. Worker treats absent
+        # node_id as "create here".
+        worker_body = {k: v for k, v in body.items() if k != "node_id"}
+        try:
+            resp = http_requests.post(
+                f"{node.url}/api/portal/agent/create",
+                headers=headers, json=worker_body, timeout=30,
+            )
+        except Exception as e:
+            from fastapi import HTTPException
+            raise HTTPException(502, f"Worker {node_id} unreachable: {e}")
+        if resp.status_code >= 400:
+            from fastapi import HTTPException
+            raise HTTPException(
+                resp.status_code,
+                f"Worker {node_id} rejected create: {resp.text[:200]}",
+            )
+        try:
+            result = resp.json()
+        except Exception:
+            result = {"ok": True, "raw": resp.text[:500]}
+        # Hint the watchdog to refresh sooner — UI feels snappier.
+        try:
+            if hasattr(self, "refresh_node"):
+                self.refresh_node(node_id)
+        except Exception:
+            pass
+        logger.info(
+            "proxy_create_agent: node=%s name=%s -> ok",
+            node_id, body.get("name", ""),
+        )
+        return result
 
     # ---- Inter-agent messaging ----
 
@@ -3040,7 +3127,7 @@ class Hub:
         try:
             headers = {"Content-Type": "application/json"}
             if node.secret:
-                headers["X-Claw-Secret"] = node.secret
+                headers["X-Hub-Secret"] = node.secret
             http_requests.post(
                 f"{node.url}/api/hub/deliver",
                 headers=headers,
