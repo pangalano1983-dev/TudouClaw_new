@@ -7467,19 +7467,43 @@ Write only the summary body. Do not include any preamble or prefix."""
             # --- Template Library: auto-match and inject templates ---
             try:
                 tpl_lib = get_template_library()
-                matched_templates = tpl_lib.match_templates(
+
+                # Bound templates (explicitly selected in agent edit UI).
+                # Always rendered first; auto-match fills remaining budget.
+                bound_ids = list(getattr(self.profile, "knowledge_templates", []) or [])
+                bound_templates = []
+                for tid in bound_ids:
+                    t = tpl_lib.get_template(tid)
+                    if t is not None and getattr(t, "enabled", True):
+                        bound_templates.append(t)
+
+                # Auto-match: existing keyword/role behavior, but
+                # dedup against bound (don't render same template twice).
+                auto_matched = tpl_lib.match_templates(
                     _user_text, role=self.role, limit=2)
-                if matched_templates:
+
+                seen_ids = {getattr(t, "id", None) for t in bound_templates}
+                final_templates = list(bound_templates)
+                for t in auto_matched:
+                    tid = getattr(t, "id", None)
+                    if tid in seen_ids:
+                        continue
+                    seen_ids.add(tid)
+                    final_templates.append(t)
+
+                if final_templates:
                     tpl_context = tpl_lib.render_for_agent(
-                        matched_templates, max_chars=4000)
+                        final_templates, max_chars=4000)
                     if tpl_context:
                         self.messages.append({
                             "role": "system",
                             "content": tpl_context,
                         })
-                        tpl_names = [t.name for t in matched_templates]
+                        tpl_names = [t.name for t in final_templates]
                         self._log("template_match", {
                             "templates": tpl_names,
+                            "bound_count": len(bound_templates),
+                            "auto_count": len(final_templates) - len(bound_templates),
                             "chars": len(tpl_context),
                         })
             except Exception:
