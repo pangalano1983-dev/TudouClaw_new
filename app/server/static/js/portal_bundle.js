@@ -14287,6 +14287,10 @@ async function saveAgentProfile() {
         });
       }
     } catch(err) { console.error('save preprocessor error:', err); }
+    // Success feedback — without this the user sees only "modal disappears"
+    // and can't tell whether the save actually went through. (Reported
+    // 2026-05-03 as "桌面悬浮打开不好使 / 无任何反应".)
+    if (typeof _toast === 'function') _toast('已保存', 'success');
     hideModal('edit-agent');
     refresh();
   } catch(e) {
