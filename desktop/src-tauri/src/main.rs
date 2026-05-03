@@ -101,8 +101,8 @@ fn spawn_agent_window(handle: &AppHandle, agent_id: &str, index: usize) {
     let offset = (index as f64) * 30.0;
     let result = WebviewWindowBuilder::new(handle, &label, WebviewUrl::App(url.into()))
         .title(format!("TudouClaw {}", &agent_id[..agent_id.len().min(6)]))
-        .inner_size(140.0, 140.0)
-        .min_inner_size(120.0, 120.0)
+        .inner_size(220.0, 220.0)
+        .min_inner_size(140.0, 140.0)
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
