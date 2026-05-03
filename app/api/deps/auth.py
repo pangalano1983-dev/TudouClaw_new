@@ -115,6 +115,32 @@ def _fetch_delegation(user_id: str) -> tuple[list[str], list[str]]:
         return [], []
 
 
+def _cap_role_for_worker_node(role: str) -> str:
+    """Worker nodes never grant superAdmin.
+
+    The master owns the canonical admin store; superAdmin operations
+    (managing other admins, cluster-wide policy) are meaningless on a
+    downstream worker. If a token issued by the master arrives with
+    role=superAdmin, downgrade it to admin so the request is still
+    authorised for normal operations but blocked from superAdmin-only
+    surfaces.
+
+    Safe on the master too — ``is_worker_node`` is False there.
+    """
+    if role != "superAdmin":
+        return role
+    try:
+        from .hub import get_hub
+        hub = get_hub()
+        if getattr(hub, "is_worker_node", False):
+            return "admin"
+    except Exception:
+        # Hub not initialised yet (early request during startup)
+        # — be conservative, leave role alone.
+        pass
+    return role
+
+
 async def get_current_user(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
@@ -124,13 +150,18 @@ async def get_current_user(
     Priority:
       1. Authorization: Bearer <jwt>
       2. Cookie: td_sess=<session_id>  (legacy bridge to old auth system)
+
+    Worker-node side note: when the local hub has ``TUDOU_UPSTREAM_HUB``
+    set (i.e. ``hub.is_worker_node``), an incoming role of
+    ``superAdmin`` is downgraded to ``admin``. See
+    ``_cap_role_for_worker_node``.
     """
     # --- Try JWT Bearer first ---
     if credentials and credentials.credentials:
         try:
             payload = decode_token(credentials.credentials)
             uid = payload.get("sub", "")
-            role = payload.get("role", "admin")
+            role = _cap_role_for_worker_node(payload.get("role", "admin"))
             # Look up the admin record to populate delegation lists.
             # Non-admin users (role="user") won't be in admin_mgr — that's
             # fine, empty delegation lists are correct for them.
@@ -180,7 +211,7 @@ async def get_current_user(
                 deleg_agents, deleg_nodes = _fetch_delegation(bridged_uid)
                 return CurrentUser(
                     user_id=bridged_uid,
-                    role=effective_role,
+                    role=_cap_role_for_worker_node(effective_role),
                     claims={"session": True, "session_id": session_id},
                     delegated_agent_ids=deleg_agents,
                     delegated_node_ids=deleg_nodes,
@@ -195,7 +226,10 @@ async def get_current_user(
             from ...auth import get_auth
             auth = get_auth()
             if auth.validate_token(api_token):
-                return CurrentUser(user_id="token_user", role="admin")
+                return CurrentUser(
+                    user_id="token_user",
+                    role=_cap_role_for_worker_node("admin"),
+                )
         except Exception as e:
             logger.debug("API token validation failed: %s", e)
 

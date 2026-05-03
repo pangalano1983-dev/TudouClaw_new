@@ -72,6 +72,13 @@ class Hub:
         # config changes back here so the admin hub stays in sync.
         self.upstream_hub_url: str = os.environ.get("TUDOU_UPSTREAM_HUB", "").rstrip("/")
         self.upstream_hub_secret: str = os.environ.get("TUDOU_UPSTREAM_SECRET", "")
+        # Public URL the master should use to reach this node back.
+        # Defaults to socket-detected IP at registration time, but ops
+        # can override (e.g. if the node sits behind a reverse proxy
+        # or a port-forwarded NAT). Read from env at registration so
+        # ``cargo run``-style local restarts pick up changes without
+        # editing code.
+        self.self_url: str = os.environ.get("TUDOU_NODE_URL", "").rstrip("/")
         self._agents_file = os.path.join(self._data_dir, "agents.json")
         self._nodes_file = os.path.join(self._data_dir, "nodes.json")
         # SQLite database (primary store)
@@ -392,6 +399,23 @@ class Hub:
                         self._heartbeat_interval, self._heartbeat_timeout)
         except Exception as _he:
             logger.warning("Failed to start heartbeat loop: %s", _he)
+
+        # ── Boot-time upstream register (worker-node mode) ──
+        # When TUDOU_UPSTREAM_HUB is set, this hub is a worker reporting
+        # to a master. Heartbeat alone is not enough — the master needs
+        # an explicit register call so it can build the remote_nodes
+        # entry with our URL (for back-callbacks like config dispatch).
+        # Run in a background thread so a slow/down master doesn't
+        # block our own boot.
+        if self.upstream_hub_url:
+            try:
+                threading.Thread(
+                    target=self._register_with_upstream,
+                    name="hub-upstream-register",
+                    daemon=True,
+                ).start()
+            except Exception as _re:
+                logger.warning("Failed to schedule upstream register: %s", _re)
 
         # ── Memory dream daemon (P0) ──────────────────────────────────
         # Daily memory maintenance at 03:00 local time. Keeps L3 facts
@@ -1348,6 +1372,104 @@ class Hub:
         # Push upstream if configured (remote-node mode)
         self._push_node_config_upstream(node_id)
         return item
+
+    # ── Worker-node identity & registration ──────────────────────────────
+
+    @property
+    def is_worker_node(self) -> bool:
+        """True iff this hub is acting as a downstream worker.
+
+        Determined by the presence of ``TUDOU_UPSTREAM_HUB`` (read at
+        ``__init__``). Used by the auth layer to cap effective role at
+        ``admin`` — superAdmin is meaningful only on the master that
+        owns the canonical user/admin store.
+        """
+        return bool(self.upstream_hub_url)
+
+    def _resolve_self_url(self) -> str:
+        """Return the URL the master should call back on.
+
+        Resolution order:
+          1. ``TUDOU_NODE_URL`` env var (set in __init__ as ``self.self_url``)
+          2. socket-detected outbound IP + ``TUDOU_PORT`` env (or 9090)
+          3. fallback to ``http://<hostname>:<port>``
+
+        Empty string means "the master can't reach us back" — register
+        will still proceed, but config dispatch / message delivery will
+        fail. Logged as a warning so ops can see it.
+        """
+        if self.self_url:
+            return self.self_url
+        port = os.environ.get("TUDOU_PORT", "9090")
+        # Try the outbound-socket trick first (works when the node has
+        # internet). It returns the IP the OS would use to reach the
+        # master, which is usually exactly the IP the master should
+        # reach us back on.
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.settimeout(2.0)
+                # Connect to a UDP target — no packets actually sent.
+                s.connect(("8.8.8.8", 80))
+                ip = s.getsockname()[0]
+                if ip and ip not in ("0.0.0.0", "127.0.0.1"):
+                    return f"http://{ip}:{port}"
+        except Exception:
+            pass
+        # Last resort: hostname (only useful inside resolved DNS networks).
+        try:
+            return f"http://{socket.gethostname()}:{port}"
+        except Exception:
+            return ""
+
+    def _register_with_upstream(self) -> bool:
+        """One-shot boot-time registration with the master.
+
+        Called from a daemon thread spawned in __init__ when
+        TUDOU_UPSTREAM_HUB is set. Heartbeat will subsequently keep
+        the registration alive (and re-create it if the master forgot
+        us, e.g. after a restart with stale state).
+
+        Returns True on success, False otherwise. Failure is non-fatal
+        — heartbeat fallback path will retry every interval.
+        """
+        if not self.upstream_hub_url:
+            return False
+        my_url = self._resolve_self_url()
+        if not my_url:
+            logger.warning(
+                "upstream register: cannot resolve our own URL "
+                "(TUDOU_NODE_URL unset and socket detection failed). "
+                "Master callbacks will not work."
+            )
+        payload = {
+            "node_id": self.node_id,
+            "name": self.node_name,
+            "endpoint": my_url,
+            "url": my_url,
+            "agents": [a.to_dict() for a in self.agents.values()],
+        }
+        headers = {"Content-Type": "application/json"}
+        if self.upstream_hub_secret:
+            headers["X-Hub-Secret"] = self.upstream_hub_secret
+        try:
+            resp = http_requests.post(
+                f"{self.upstream_hub_url}/api/hub/register",
+                json=payload, headers=headers, timeout=10,
+            )
+            if resp.status_code >= 400:
+                logger.warning(
+                    "upstream register HTTP %s: %s — heartbeat will retry",
+                    resp.status_code, resp.text[:200],
+                )
+                return False
+            logger.info("Registered with upstream master at %s as node %s (%s)",
+                        self.upstream_hub_url, self.node_id, my_url or "<no callback URL>")
+            return True
+        except Exception as e:
+            logger.warning(
+                "upstream register failed (will retry via heartbeat): %s", e
+            )
+            return False
 
     def _push_node_config_upstream(self, node_id: str) -> None:
         """If an upstream hub is configured, push this node's config to it."""

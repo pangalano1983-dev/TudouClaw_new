@@ -85,6 +85,7 @@ ${TUDOU_CLAW_DATA_DIR}/
 | `TUDOU_UPSTREAM_HUB` | Node 模式下指向上游 Hub | 无 | 仅 node 模式 |
 | `TUDOU_UPSTREAM_SECRET` | 上游 Hub 的认证密钥 | 无 | 仅 node 模式 |
 | `TUDOU_NODE_ID` | 当前 node 标识（默认用 hostname） | `$HOSTNAME` | 建议显式设 |
+| `TUDOU_NODE_URL` | Master 回调本 worker 的公开 URL | socket-探测 IP | 走反向代理时**必填** |
 | `TUDOU_ADMIN_SECRET` | 首次启动的超管 token | 随机生成 | 受控环境可固定 |
 
 ### 老变量名 `TUDOU_CLAW_HOME` 的坑
@@ -186,8 +187,75 @@ env | grep -E "^TUDOU_"
 
 ---
 
-## 6. 历史 / 决策日志
+## 6. Multi-Node 注册流程（Master ↔ Worker）
+
+### 启动 Master
+
+```bash
+# Master：什么都不用变，照常启动 portal
+export TUDOU_SECRET=cluster-shared-secret-xyz   # 与下游 worker 必须一致
+uvicorn app.api.main:app --host 0.0.0.0 --port 9090
+```
+
+### 启动 Worker Node
+
+```bash
+# Worker：3 个 env var 决定行为
+export TUDOU_UPSTREAM_HUB=http://master.example.com:9090
+export TUDOU_UPSTREAM_SECRET=cluster-shared-secret-xyz   # 同 master TUDOU_SECRET
+export TUDOU_NODE_ID=node-shanghai-01                    # 不设默认 hostname
+export TUDOU_NODE_URL=http://shanghai.example.com:9090   # 走代理时必填，否则自动探测内网 IP
+uvicorn app.api.main:app --host 0.0.0.0 --port 9090
+```
+
+### Worker 启动后自动发生的事
+
+1. **Boot-time register** — `app/hub/_core.py:_register_with_upstream()` 在后台线程跑一次，
+   POST `http://master/api/hub/register` 带 `X-Hub-Secret: cluster-shared-secret-xyz`，body 含 node_id / name / endpoint / agents。
+   失败 → 不阻塞启动，Heartbeat 兜底。
+2. **Heartbeat loop** — 每 `TUDOU_HEARTBEAT_INTERVAL`（默认 15s）POST `/api/hub/heartbeat`，
+   bumps master 端 `last_seen`。
+3. **Heartbeat 自动恢复** — Master 重启后丢失内存态？下一次 heartbeat 命中
+   "node 不在 remote_nodes" 路径，触发自动 register（用 heartbeat body 里的 url/name 重建条目）。
+
+### 权限边界（重要）
+
+Worker Node **不能授予 superAdmin 权限**：
+
+- `Hub.is_worker_node = bool(TUDOU_UPSTREAM_HUB)` 是判定信号
+- `app/api/deps/auth.py:_cap_role_for_worker_node()` 在所有 JWT/session/token 路径上把 `superAdmin → admin`
+- 设计理由：superAdmin 操作（管理其他 admin / 集群级策略）只在拥有 canonical store 的 master 上有意义。Worker 上的 superAdmin token 即使签发了也会被静默降级。
+
+允许的角色：`admin` / `user`。
+
+### 认证
+
+| 路由 | 认证方式 | 用谁 |
+|---|---|---|
+| `/api/hub/register` | `X-Hub-Secret` header | worker 启动 |
+| `/api/hub/heartbeat` | `X-Hub-Secret` header | worker 心跳 |
+| `/api/hub/sync` | JWT user | UI 触发 sync |
+| `/api/hub/orchestrate` | JWT user | UI 触发 cross-node 任务 |
+| `/api/portal/*` | JWT user | UI / 用户脚本 |
+
+`X-Hub-Secret` 与 `TUDOU_SECRET` 比对（master 侧），用 `hmac.compare_digest`。
+**Dev 模式**：master 没设 `TUDOU_SECRET` → `/register`、`/heartbeat` 不验签直接放行（但记 warning）。
+单机本地开发不需要任何 setup。
+
+### 故障排查
+
+| 现象 | 检查 |
+|---|---|
+| Worker 启动后 master 看不到 | `TUDOU_UPSTREAM_HUB` 是否设了？master 那台 9090 是否可达？看 worker 日志 `upstream register failed` 提示。 |
+| Master 看到 node 但无法回调 | worker 的 `TUDOU_NODE_URL` 没设、socket 探测拿到 127.0.0.1 / 内网 IP。在反向代理后**必须**显式设 `TUDOU_NODE_URL`。 |
+| Heartbeat 401 | master/worker 的密钥不一致。Master 看 `TUDOU_SECRET`，worker 看 `TUDOU_UPSTREAM_SECRET`，必须相同。 |
+| Worker UI 显示 superAdmin 功能 | 这是 UI 层 bug — JWT 已被降级，但 UI 可能用了缓存 role。强刷或重新 login。 |
+
+---
+
+## 7. 历史 / 决策日志
 
 - **2026-05-03** 文档创建。源头是发现 9090 backend 重启后 `to_dict` 漏字段导致的 Desktop Floater 持久化 bug，顺便审计数据目录配置。发现 §3 表格列出的硬编码问题。
 - 旧变量名 `TUDOU_CLAW_HOME` 早期版本遗留，新代码统一用 `TUDOU_CLAW_DATA_DIR`，但还有两处没迁移完。
 - 单一部署模型（"一个 TudouClaw 安装 = 一个公司"）是设计前提，所以原本不强求 multi-node。NAS 切换是新需求。
+- **2026-05-03 (晚)** 加 multi-node MVP：worker 启动时 boot-time register + heartbeat 自动 upsert 兜底 + `X-Hub-Secret` 认证 + worker 上 superAdmin 角色降级 admin。`TUDOU_NODE_URL` 是新 env var，给 master 回调用。详见 §6。

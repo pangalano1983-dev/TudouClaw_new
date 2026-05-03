@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Body
 
 from ..deps.hub import get_hub
 from ..deps.auth import CurrentUser, get_current_user
+from ..deps.hub_auth import verify_hub_secret
 
 logger = logging.getLogger("tudouclaw.api.hub_sync")
 
@@ -71,23 +73,54 @@ async def unregister_node(
 async def register_remote_node(
     body: dict = Body(...),
     hub=Depends(get_hub),
-    user: CurrentUser = Depends(get_current_user),
+    auth_tag: str = Depends(verify_hub_secret),
 ):
-    """Register a remote node for synchronization."""
+    """Register a remote node for synchronization.
+
+    Authentication: ``X-Hub-Secret`` header (shared secret). NOT
+    JWT — workers are processes, not users. The secret is configured
+    via ``TUDOU_SECRET`` on the master and ``TUDOU_UPSTREAM_SECRET``
+    on each worker.
+    """
     try:
         node_id = body.get("node_id", "")
-        endpoint = body.get("endpoint", "")
-        if not node_id or not endpoint:
-            raise HTTPException(400, "Missing node_id or endpoint")
+        # New flow uses 'endpoint'; old single-agent path used 'url'.
+        endpoint = body.get("endpoint", "") or body.get("url", "")
+        if not node_id:
+            raise HTTPException(400, "Missing node_id")
+        if not endpoint:
+            logger.warning(
+                "Node %s registered without callback URL — config "
+                "dispatch and inter-node messages will fail",
+                node_id,
+            )
 
+        name = body.get("name", "") or node_id
+        agents = body.get("agents") or []
+        # Direct path: use the public node_manager API (idempotent
+        # register that overwrites existing entry).
+        if hasattr(hub, "register_node"):
+            hub.register_node(
+                node_id=node_id,
+                name=name,
+                url=endpoint,
+                agents=agents,
+                secret="",  # never echo back the master's secret
+            )
+            logger.info(
+                "Hub register: node=%s name=%s url=%s agents=%d auth=%s",
+                node_id, name, endpoint, len(agents), auth_tag,
+            )
+            return {"ok": True, "node_id": node_id}
+        # Older signature
         if hasattr(hub, "register_remote_node"):
             result = hub.register_remote_node(node_id, endpoint, body)
             return {"ok": True, "result": result}
-
         return {"ok": True}
     except HTTPException:
         raise
     except Exception as e:
+        logger.exception("register_remote_node failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -125,20 +158,68 @@ async def sync_agents(
 async def send_heartbeat(
     body: dict = Body(default={}),
     hub=Depends(get_hub),
-    user: CurrentUser = Depends(get_current_user),
+    auth_tag: str = Depends(verify_hub_secret),
 ):
-    """Send keepalive heartbeat to hub and remote nodes."""
+    """Receive keepalive heartbeat from a downstream node.
+
+    Authentication: ``X-Hub-Secret`` header — same as ``/register``.
+
+    Side effects:
+      - bump ``last_seen`` on the existing remote_nodes entry
+      - if the node isn't registered yet (master restarted, or first
+        heartbeat raced ahead of register), auto-upsert with whatever
+        identity fields the body carries. Heartbeat thus serves as a
+        recovery path for missed registrations.
+    """
     try:
         node_id = body.get("node_id", "")
+        if not node_id:
+            raise HTTPException(400, "Missing node_id")
 
+        existing = None
+        if hasattr(hub, "remote_nodes"):
+            existing = hub.remote_nodes.get(node_id)
+
+        if existing is not None:
+            # Bump last_seen — keeps the watchdog from flagging stale.
+            try:
+                existing.last_seen = time.time()
+                if body.get("name"):
+                    existing.name = body["name"]
+                # Note: we deliberately don't update agents from heartbeat
+                # — that's what /api/hub/sync is for. Heartbeat stays cheap.
+            except Exception as e:
+                logger.debug("heartbeat last_seen update failed: %s", e)
+        else:
+            # Auto-recover: master forgot us (restart with stale data?)
+            # or our first register call lost. Re-create from heartbeat
+            # body. URL may be empty, which is OK for a recovery path
+            # — caller can issue a full /register later.
+            if hasattr(hub, "register_node"):
+                hub.register_node(
+                    node_id=node_id,
+                    name=body.get("name", "") or node_id,
+                    url=body.get("url", "") or body.get("endpoint", ""),
+                    agents=body.get("agents") or [],
+                    secret="",
+                )
+                logger.info(
+                    "Heartbeat from unknown node %s — auto-registered (auth=%s)",
+                    node_id, auth_tag,
+                )
+
+        # Optional hub-level bookkeeping (some hubs track aggregate stats).
         if hasattr(hub, "send_heartbeat"):
-            result = hub.send_heartbeat(node_id, body)
-            return {"ok": True, "result": result}
+            try:
+                hub.send_heartbeat(node_id, body)
+            except Exception as e:
+                logger.debug("hub.send_heartbeat hook failed: %s", e)
 
-        return {"ok": True}
+        return {"ok": True, "node_id": node_id}
     except HTTPException:
         raise
     except Exception as e:
+        logger.exception("send_heartbeat failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 
