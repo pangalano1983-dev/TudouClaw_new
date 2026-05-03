@@ -189,6 +189,8 @@ env | grep -E "^TUDOU_"
 
 ## 6. Multi-Node 注册流程（Master ↔ Worker）
 
+> 📖 **完整部署手册：[`docs/multi-node-deployment.md`](multi-node-deployment.md)** — 含 master/worker 启动命令、env var 速查、验证步骤、TLS、升级、故障排查全套。下面是浓缩版。
+
 ### 启动 Master
 
 ```bash
