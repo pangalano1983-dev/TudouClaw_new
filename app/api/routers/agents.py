@@ -104,6 +104,46 @@ def _get_agent_or_404(hub, agent_id: str):
     return agent
 
 
+def _proxy_chat_to_worker(hub, node, agent_id: str, body: dict) -> dict:
+    """Forward a chat POST to a worker, wrap returned task_id.
+
+    Master receives ``POST /agent/{remote_id}/chat`` for an agent that
+    lives on a worker. We forward the raw body via X-Hub-Secret and
+    return the worker's response with the ``task_id`` prefixed by
+    ``n:<node_id>:`` so the SSE endpoint on master can detect it
+    and proxy the stream from the same worker.
+
+    UI sees ``task_id`` as an opaque string and uses it unchanged in
+    the GET ``/chat-task/{id}/stream`` call — the prefix is just our
+    routing breadcrumb.
+    """
+    import requests as _requests
+    secret = hub._get_cluster_secret() if hasattr(hub, "_get_cluster_secret") else ""
+    headers = {"Content-Type": "application/json"}
+    if secret:
+        headers["X-Hub-Secret"] = secret
+    try:
+        resp = _requests.post(
+            f"{node.url}/api/portal/agent/{agent_id}/chat",
+            headers=headers, json=body, timeout=30,
+        )
+    except Exception as e:
+        raise HTTPException(502, f"Worker {node.node_id} unreachable: {e}")
+    if resp.status_code >= 400:
+        # Pass through worker's status + body so user sees real reason
+        try:
+            detail = resp.json()
+        except Exception:
+            detail = resp.text[:500]
+        raise HTTPException(resp.status_code, detail)
+    data = resp.json()
+    raw_id = data.get("task_id", "")
+    if raw_id:
+        data["task_id"] = f"n:{node.node_id}:{raw_id}"
+        data["node_id"] = node.node_id
+    return data
+
+
 def _local_or_proxy_post(hub, agent_id: str, sub_path: str, body: dict):
     """Multi-node helper for POST endpoints.
 
@@ -972,10 +1012,28 @@ async def send_chat(
     """Submit a chat message — returns task_id for SSE streaming.
 
     Auth: JWT user OR X-Hub-Secret. The latter is used when this is
-    a worker receiving a chat call proxied from master."""
+    a worker receiving a chat call proxied from master.
+
+    Multi-node: if the agent isn't local but lives on a registered
+    worker, forward this POST to that worker, wrap the returned
+    task_id with an ``n:<node_id>:`` prefix so the SSE endpoint can
+    route the stream back through master. The UI never sees the
+    distinction — task_id is opaque from its perspective.
+    """
     import base64 as _b64
     import os as _os
     import time as _time
+
+    # ── Multi-node proxy ────────────────────────────────────────────────
+    # If the agent doesn't live on this hub but is known via a remote
+    # node, forward the chat call to that worker. Worker creates its
+    # own ChatTask; we wrap its task_id so the SSE endpoint on master
+    # can proxy the stream back. Local agent path below is unchanged.
+    local_agent = hub.get_agent(agent_id) if hasattr(hub, "get_agent") else None
+    if local_agent is None and hasattr(hub, "find_agent_node"):
+        remote_node = hub.find_agent_node(agent_id)
+        if remote_node and remote_node.url:
+            return _proxy_chat_to_worker(hub, remote_node, agent_id, body)
 
     agent = _get_agent_or_404(hub, agent_id)
     from ...permissions import require, Permission

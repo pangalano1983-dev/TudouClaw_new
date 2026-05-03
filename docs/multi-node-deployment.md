@@ -358,28 +358,28 @@ done
 | Worker 启动主动 register | 设 `TUDOU_UPSTREAM_HUB` + `TUDOU_UPSTREAM_SECRET` 即可 |
 | Heartbeat 自动恢复 | Master 重启后忘了，下次 heartbeat 会自动 upsert |
 | **Master UI 创建 worker 上的 agent** | POST `/api/portal/agent/create` 带 `node_id: "worker-xx"` |
-| Cross-node chat（基础 RPC） | `hub.proxy_chat(agent_id, msg)` — 但 SSE 流式透传未做 |
-| X-Hub-Secret 认证 | `/api/hub/register` `/heartbeat` `/api/portal/agent/create` `/api/portal/agent/{id}/chat` 都接受 |
+| **Master UI 跟 worker agent 聊天（含 SSE 实时流）** | POST `/agent/{remote_id}/chat` 自动 proxy；返回的 `task_id` 带 `n:<node_id>:` 前缀；GET `/chat-task/{id}/stream` 自动透传 worker SSE 到 UI |
+| X-Hub-Secret 认证 | `/api/hub/register` `/heartbeat` `/api/portal/agent/create` `/api/portal/agent/{id}/chat` `/api/portal/chat-task/{id}/stream` 都接受 |
 | Worker 上 superAdmin → admin 自动降级 | 默认行为，无需配置 |
 
 ### 🟡 待做
 
 | 限制 | 现状 | TODO |
 |---|---|---|
-| **跨 node SSE 流式透传** | proxy_chat 能拿到 stream，但 master `/agent/{id}/chat` 端点没串通到 UI 流 | 1–2 天工作 |
-| **Worker → Master 状态回写** | Worker 上 agent message/event 还没 push 回 master | Phase 3 任务 |
 | **Worker 重启拉所有应跑 agent** | Worker 启动只 register 自己，不知道"该跑哪些" | Phase 5 任务 |
 | **Worker 故障 → master 自动 fallback** | 没有 failover 逻辑 | Phase 6 任务 |
-| **UI 加 node 选择器** | 创建 agent 时还没下拉选择 node | 前端工作 |
+| **UI 加 node 选择器** | 创建 agent 时还没下拉选择 node；UI 创建仍然只能在 master 本地 | 前端工作 |
 | **Worker 节点 health UI** | portal 看 last_seen 时间 | 加可视化 traffic light |
+| **其他 proxy_* endpoint 切到双 auth** | events / clear / approvals 等 cross-node 端点尚未升级 | 一致性整理 |
+| **Master DB 持久化 worker agent message** | 目前 message 留在 worker 本地（与 deliverables 一样），master 通过 GET proxy 实时拉。NAS 模式下会改 | 跟 NAS 一起规划 |
 | **HTTPS / TLS** | 没强制，明文 secret | 加 reverse proxy（caddy / nginx）做 TLS termination |
 | **Secret 轮换** | 重启所有 node | 设计两 secret 并存 + 平滑过渡 |
 | **多 master HA** | 单 master | 远期 — 需要分布式 state（Redis / etcd） |
 
-### 当前可用工作流（手动）
+### 当前可用工作流
 
 ```bash
-# 1. Master 创建 agent on worker（用 curl 因为 UI 还没下拉）
+# 1. Master 创建 agent on worker（用 curl，UI 选择器尚未做）
 curl -X POST http://master:9090/api/portal/agent/create \
      -H "Authorization: Bearer $JWT_TOKEN" \
      -H "Content-Type: application/json" \
@@ -387,11 +387,14 @@ curl -X POST http://master:9090/api/portal/agent/create \
 # → master proxy 到 worker，agent 在 worker 上创建
 
 # 2. 等 ~15s 让 heartbeat sync agent list 回 master
-# 3. Master UI 看到这个 agent（在 worker 节点下）
-# 4. UI 上跟它聊（chat 走 master 端点 → 但 SSE 透传未做，只能回到本地路径）
+# 3. Master UI 看到这个 agent（在 worker 节点下，agent.node_id == "worker-01"）
+# 4. UI 上跟它聊 — POST /agent/{remote_id}/chat 自动 proxy 到 worker
+#    返回 task_id 带前缀 n:worker-01:xxx
+# 5. UI 开 GET /chat-task/{task_id}/stream — master 自动 proxy worker SSE，
+#    token 实时流式回到 UI
 ```
 
-> 提示：**目前推荐**先在 master 上创建 + 测试 agent，跑稳了再设 `node_id` 调度到 worker。SSE 透传完成后才能在 master UI 上无差别使用 worker agent。
+**关键**：UI 看 task_id 是 opaque 字符串，无需改任何前端代码。Master 自动识别前缀路由 SSE。
 
 ---
 
