@@ -8,7 +8,35 @@
 
 # ── Core (required) ──────────────────────────────────────────
 requests>=2.31,<3.0          # HTTP client for LLM API calls, inter-node communication
+httpx>=0.27                   # Async HTTP client (FastAPI test client + agent SSE/streaming)
 PyYAML>=6.0                   # YAML parsing (task templates, tool-parser config)
+jsonschema>=4.20              # JSON Schema validation (tool I/O contracts, MCP)
+packaging>=23                 # Version parsing/compare (used by registry & gate checks)
+tqdm>=4.66                    # Progress bars — globally suppressed unless TUDOU_TQDM=1
+
+# ── RAG / embeddings (required for agent memory + experience library) ────
+# chromadb is the default vector store; sentence-transformers loads bge-m3
+# for embedding and bge-reranker-v2-m3 for re-ranking. Pulls torch +
+# transformers + numpy transitively (~3 GB download, models cached at
+# ${TUDOU_HF_CACHE}, see docs/data-dir-config.md).
+chromadb>=0.5,<2.0
+sentence-transformers>=2.7,<6.0
+tiktoken>=0.7                 # Token counting (litellm fallback + budget tracking)
+
+# ── Auth / crypto ────────────────────────────────────────────
+# python-jose handles JWT for our own portal sessions; PyJWT is also
+# imported by some MCP transports and certain LLM SDKs — keep both
+# installed since they provide non-overlapping algorithm surfaces.
+PyJWT>=2.8                    # JWT — secondary path (some MCP transports)
+cryptography>=42              # Direct dep (token signing), and python-jose extra
+
+# ── LLM SDKs (direct imports, in addition to litellm) ────────
+# Some code paths still call openai SDK directly (legacy fast paths +
+# specific helpers like openai.AsyncOpenAI streaming). Kept for parity.
+openai>=1.40                  # OpenAI Python SDK (direct calls in some agent paths)
+
+# ── Imaging ──────────────────────────────────────────────────
+Pillow>=10.0                  # Image processing — agent multimodal input + screenshot tools
 
 # ── V2 LLM adapter layer ─────────────────────────────────────
 # litellm: unified client across 100+ providers (optional but recommended
@@ -25,13 +53,16 @@ json-repair>=0.25,<1.0
 # ── Optional: Enhanced capabilities ──────────────────────────
 # Uncomment the lines you need:
 
-# Pillow>=10.0                # Image processing (resize, crop, format conversion)
 pymupdf>=1.23                 # PDF text extraction and manipulation
-# openpyxl>=3.1               # Excel (.xlsx) read/write
+# openpyxl>=3.1               # Excel (.xlsx) read/write — uncomment if create_xlsx tool used
 python-docx>=1.0              # Word (.docx) read/write
+python-pptx>=0.6              # PowerPoint (.pptx) generation (create_pptx tool)
 pdfplumber>=0.10              # PDF table extraction (alternative to pymupdf)
 beautifulsoup4>=4.12          # Better HTML parsing for web_fetch
 lxml>=5.0                     # Fast XML/HTML parser (used by beautifulsoup4)
+# moviepy>=2.0                # Video editing (create_video tool) — uncomment if used
+# mss>=9.0                    # Mac/Linux screen capture (desktop_screenshot tool, gated)
+# agentmail>=0.4              # Email integration — uncomment if email features enabled
 
 # ── Optional: Database drivers ───────────────────────────────
 # Uncomment if agents need direct database access:
