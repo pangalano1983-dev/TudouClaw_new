@@ -2519,6 +2519,8 @@ class Agent:
             "department": self.department,
             "owner_id": self.owner_id,
             "robot_avatar": self.robot_avatar,
+            "desktop_enabled": bool(self.desktop_enabled),
+            "desktop_lottie_url": self.desktop_lottie_url,
             "created_at": self.created_at,
             "message_count": len(self.messages),
             "event_count": len(self.events),
