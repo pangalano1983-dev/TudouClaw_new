@@ -8,7 +8,10 @@
 // generated yet.)
 var _ROBOT_PNG_IDS = new Set([
   'ceo','cto','coder','reviewer','researcher','architect','devops',
-  'general','marketing','media','meeting','specialist','product_architect'
+  'general','marketing','media','meeting','specialist','product_architect',
+  'pm','designer','tester','data',
+  // Reserved — image to be added next:
+  'tech_expert',
 ]);
 
 // Accepts: 'robot_general' / 'general' / 'robot_general.png' / undefined.
