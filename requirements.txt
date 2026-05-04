@@ -60,6 +60,10 @@ python-pptx>=0.6              # PowerPoint (.pptx) generation (create_pptx tool)
 pdfplumber>=0.10              # PDF table extraction (alternative to pymupdf)
 beautifulsoup4>=4.12          # Better HTML parsing for web_fetch
 lxml>=5.0                     # Fast XML/HTML parser (used by beautifulsoup4)
+rapidocr-onnxruntime>=1.3     # OCR for image ingest (jpg/png/...) into RAG KBs
+                              #   — pure Python, ~100 MB models, lazy-init
+                              #   — leave commented if RAG won't ingest images:
+                              # rapidocr-onnxruntime>=1.3
 # moviepy>=2.0                # Video editing (create_video tool) — uncomment if used
 # mss>=9.0                    # Mac/Linux screen capture (desktop_screenshot tool, gated)
 # agentmail>=0.4              # Email integration — uncomment if email features enabled

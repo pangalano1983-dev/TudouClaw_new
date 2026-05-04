@@ -706,7 +706,14 @@ class RAGProviderRegistry:
                 }
                 # v1-C fields — only write non-empty/non-default values
                 # to keep ChromaDB payloads small.
-                for k in ("content_hash", "heading_path", "source_file"):
+                for k in ("content_hash", "heading_path", "source_file",
+                          # Image-source chunks (added 2026-05-04 with
+                          # OCR ingest). image_url is the URL the chat
+                          # UI uses to fetch the original image; the
+                          # mime_hint helps it set the right content-
+                          # type when rendering. Plain text chunks
+                          # don't carry these fields.
+                          "image_url", "mime_hint"):
                     v = doc.get(k)
                     if v:
                         metadata[k] = str(v)
@@ -718,6 +725,9 @@ class RAGProviderRegistry:
                                            else int(v))
                         except Exception:
                             pass
+                # Boolean flag — ChromaDB accepts bool natively.
+                if doc.get("is_image"):
+                    metadata["is_image"] = True
                 coll.upsert(ids=[doc_id], documents=[text],
                             metadatas=[metadata])
                 if content_hash:

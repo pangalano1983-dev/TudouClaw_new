@@ -808,10 +808,26 @@ def _knowledge_lookup_impl(query: str = "", entry_id: str = "",
                     trimmed = raw_content[:_MAX_CHUNK_CHARS_PER_HIT]
                     tags_raw = meta.get("tags", "")
                     tags_list = tags_raw.split(",") if isinstance(tags_raw, str) and tags_raw else []
+
+                    # Image-source chunks: prepend a markdown image
+                    # reference into ``content`` so the LLM sees the
+                    # image URL and tends to cite it back; the UI
+                    # renders ![](...) inline. Keep the structured
+                    # fields too in case downstream wants to format
+                    # differently.
+                    image_url = meta.get("image_url", "")
+                    is_image = bool(meta.get("is_image"))
+                    display_content = trimmed
+                    if image_url and is_image:
+                        display_content = (
+                            f"![{meta.get('source_file', 'image')}]({image_url})\n\n"
+                            + trimmed
+                        )
+
                     rag_hits.append({
                         "id": r.get("id", ""),
                         "title": r.get("title", ""),
-                        "content": trimmed,
+                        "content": display_content,
                         "content_truncated": len(raw_content) > _MAX_CHUNK_CHARS_PER_HIT,
                         # ── citation fields (v1-C metadata persisted these) ──
                         "source_file": meta.get("source_file", ""),
@@ -819,6 +835,10 @@ def _knowledge_lookup_impl(query: str = "", entry_id: str = "",
                         "chunk_index": meta.get("chunk_index"),
                         "tags": tags_list,
                         "source": "private_rag",
+                        # ── image attachment (when ingested from .jpg/.png/...) ──
+                        "image_url": image_url,
+                        "is_image": is_image,
+                        "mime": meta.get("mime_hint", ""),
                     })
             except Exception as e:
                 logger.warning("RAG provider search failed: %s", e)

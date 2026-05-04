@@ -21748,6 +21748,10 @@ var _KM_FOLDER_DEFAULT_EXTS = [
   'csv','tsv','json','yaml','yml',
   'html','htm','pdf','docx',
   'py','js','ts','go','rs','java','c','cpp','h',
+  // Images: OCR'd server-side via RapidOCR, original kept on disk
+  // for in-chat display. ~100 MB OCR model loaded lazily on first
+  // image upload — first one is slow, subsequent fast.
+  'jpg','jpeg','png','webp','bmp','gif','tif','tiff',
 ];
 
 // Global buffer of picked files (FileList → Array<File>).

@@ -725,6 +725,63 @@ async def search_domain_knowledge_base(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/domain-kb/{kb_id}/image/{filename}")
+async def get_domain_kb_image(
+    kb_id: str,
+    filename: str,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Serve an original image stored alongside its OCR text.
+
+    Path is referenced from chunk metadata (``image_url``) — RAG
+    retrieval surfaces this URL so chat / UI can render the image
+    inline (markdown ``![](...)``) right next to the OCR'd text.
+
+    Auth: JWT — same as other portal endpoints. We don't expose
+    raw bytes via ``X-Hub-Secret`` because images may contain
+    sensitive content (screenshots of dashboards, scanned docs).
+
+    Path traversal: ``filename`` is constrained — must match the
+    ``base_id.ext`` shape stamped at ingest time, and we resolve
+    against the kb's directory only. Anything else 404.
+    """
+    import re as _re
+    import os as _os
+    from fastapi.responses import FileResponse
+
+    # Sanitise — only allow our own filename pattern (alnum + dot + underscore).
+    if not _re.fullmatch(r"[A-Za-z0-9._-]+", filename):
+        raise HTTPException(400, "invalid filename")
+    # KB id similarly safe.
+    if not _re.fullmatch(r"[A-Za-z0-9_.-]+", kb_id):
+        raise HTTPException(400, "invalid kb_id")
+
+    from ...paths import data_dir as _resolve_data_dir
+    img_path = _resolve_data_dir() / "kb_images" / kb_id / filename
+    img_path = img_path.resolve()
+    # Defense-in-depth: confirm the resolved path stays under kb_images.
+    expected_root = (_resolve_data_dir() / "kb_images" / kb_id).resolve()
+    try:
+        img_path.relative_to(expected_root)
+    except ValueError:
+        raise HTTPException(404, "not found")
+    if not img_path.is_file():
+        raise HTTPException(404, "not found")
+
+    # MIME hint from extension.
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    mime_map = {
+        "jpg": "image/jpeg", "jpeg": "image/jpeg",
+        "png": "image/png", "webp": "image/webp",
+        "gif": "image/gif", "bmp": "image/bmp",
+        "tif": "image/tiff", "tiff": "image/tiff",
+    }
+    return FileResponse(
+        path=str(img_path),
+        media_type=mime_map.get(ext, "application/octet-stream"),
+    )
+
+
 @router.post("/domain-kb/update")
 async def update_domain_knowledge_base(
     body: dict = Body(...),
@@ -819,7 +876,52 @@ _KNOWN_KB_EXTENSIONS: tuple[str, ...] = (
     "html", "htm",
     "pdf", "docx",
     "py", "js", "ts", "go", "rs", "java", "c", "cpp", "h",
+    # Images — OCR'd via rapidocr-onnxruntime (lazy-loaded, ~100 MB
+    # models on first use). Text-in-image only; pure visual content
+    # — diagrams, charts, screenshots — gets whatever caption text
+    # the OCR can pick up. For semantic image search use a multimodal
+    # embedder instead (planned, not built yet).
+    "jpg", "jpeg", "png", "webp", "bmp", "tif", "tiff", "gif",
 )
+
+
+# Lazy-init OCR engine. Module-level cache avoids re-loading the
+# 100 MB ONNX model on every image. Init triggers download to
+# ${TUDOU_HF_CACHE} on first run.
+_ocr_engine = None
+_ocr_init_lock = None
+
+
+def _get_ocr_engine():
+    """Return a lazily-initialised RapidOCR instance, or None when
+    the dep isn't installed (returns None silently — caller should
+    skip image files with a clear error)."""
+    global _ocr_engine, _ocr_init_lock
+    if _ocr_engine is not None:
+        return _ocr_engine
+    if _ocr_init_lock is None:
+        import threading
+        _ocr_init_lock = threading.Lock()
+    with _ocr_init_lock:
+        if _ocr_engine is not None:
+            return _ocr_engine
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+        except ImportError:
+            logger.warning(
+                "RapidOCR not installed — image files cannot be ingested. "
+                "Install via `pip install rapidocr-onnxruntime` to enable.",
+            )
+            _ocr_engine = False  # negative cache; falsy
+            return None
+        try:
+            _ocr_engine = RapidOCR()
+            logger.info("RapidOCR engine initialised")
+        except Exception as e:
+            logger.error("RapidOCR init failed: %s", e)
+            _ocr_engine = False
+            return None
+        return _ocr_engine
 
 
 def _parse_file_bytes_to_text(raw: bytes, file_name: str) -> tuple[str, str]:
@@ -879,6 +981,40 @@ def _parse_file_bytes_to_text(raw: bytes, file_name: str) -> tuple[str, str]:
                            "",
                            raw.decode("utf-8", errors="replace"))
             method = "regex_strip"
+    elif ext in ("jpg", "jpeg", "png", "webp", "bmp", "tif", "tiff", "gif"):
+        # Image OCR via RapidOCR. The engine returns line-level boxes
+        # with text + confidence; we join lines into a flat string so
+        # the existing chunker / embedder treats it like any text doc.
+        engine = _get_ocr_engine()
+        if engine is None:
+            logger.warning(
+                "Skipping image %s: OCR engine not available", file_name,
+            )
+            text = ""
+            method = "ocr_unavailable"
+        else:
+            try:
+                # RapidOCR accepts bytes / numpy / path. Bytes is the
+                # simplest path here (we already have raw).
+                result, _elapsed = engine(raw)
+                lines: list[str] = []
+                if result:
+                    for entry in result:
+                        # entry = [box_pts, text, confidence] in v1+
+                        if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                            line_text = str(entry[1] or "").strip()
+                            if line_text:
+                                lines.append(line_text)
+                text = "\n".join(lines)
+                method = "rapidocr"
+                if not text:
+                    method = "rapidocr_empty"
+            except Exception as e:
+                logger.warning(
+                    "OCR failed on %s: %s — skipping", file_name, e,
+                )
+                text = ""
+                method = f"ocr_error:{type(e).__name__}"
     else:
         for enc in ("utf-8", "gbk", "gb2312", "latin-1"):
             try:
@@ -1234,6 +1370,29 @@ async def import_files_into_domain_kb(
             import hashlib as _hl
             base_id = (f"dkb_{kb.id}_u"
                        + _hl.md5(name.encode()).hexdigest()[:10])
+
+            # ── Image preservation (for in-chat display) ────────────
+            # When the source is an image, save the original bytes to
+            # disk and stamp ``image_url`` onto every chunk's metadata
+            # so retrieval downstream can render the image alongside
+            # the OCR text in chat / UI.
+            ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+            image_url = ""
+            if ext in ("jpg", "jpeg", "png", "webp", "bmp", "tif", "tiff", "gif"):
+                try:
+                    from ...paths import data_dir as _resolve_data_dir
+                    img_dir = _resolve_data_dir() / "kb_images" / kb.id
+                    img_dir.mkdir(parents=True, exist_ok=True)
+                    safe_ext = ext if ext != "jpeg" else "jpg"
+                    img_filename = f"{base_id}.{safe_ext}"
+                    img_path = img_dir / img_filename
+                    img_path.write_bytes(raw)
+                    image_url = f"/api/portal/domain-kb/{kb.id}/image/{img_filename}"
+                    logger.debug("Saved KB image: %s (%d bytes)", img_path, len(raw))
+                except Exception as _ie:
+                    logger.warning("Failed to save image bytes for %s: %s",
+                                   name, _ie)
+
             chunks = _chunk_text_for_rag(
                 text, base_id=base_id, base_title=name,
                 tags=tags, chunk_size=chunk_size,
@@ -1243,6 +1402,17 @@ async def import_files_into_domain_kb(
             if not chunks:
                 skipped.append({"name": name, "reason": "no_chunks"})
                 continue
+            # Stamp image_url onto every chunk produced from this image.
+            # Stored at TOP-LEVEL of the chunk dict (not in a metadata
+            # sub-dict) because the ingest layer (rag_provider._ingest_local)
+            # promotes specific top-level keys into ChromaDB metadata. A
+            # nested ``metadata`` would be silently dropped.
+            if image_url:
+                mime = f"image/{ext if ext != 'jpg' else 'jpeg'}"
+                for c in chunks:
+                    c["image_url"] = image_url
+                    c["is_image"] = True
+                    c["mime_hint"] = mime
             all_chunks.extend(chunks)
             files_imported += 1
             by_file.append({
