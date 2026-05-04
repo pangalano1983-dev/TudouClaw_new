@@ -18,9 +18,15 @@ logger = logging.getLogger(__name__)
 
 
 # knowledge_lookup: max results per RAG tier before merging.
-# v2 (Pack): raised 5 → 8. Aggregate-style queries ("how many?",
-# "list all…") need more chunks to synthesize from.
-_RAG_TOP_K = 8
+# v2 (Pack): raised 5 → 8 → 15.
+# Real usage on a 7000-chunk multi-document KB (Huawei Cloud Stack
+# acceptance docs, 2026-05-04) showed top-8 only surfaced ~4-5
+# unique source files even when the user wanted a roll-up across
+# 7+ docs. Aggregate-style queries ("how many?", "list all…")
+# benefit hugely from a wider net before reranking. Top-15 keeps
+# the LLM context manageable (15 × 1500 char cap = ~22 KB) while
+# letting the cross-encoder rerank correctly resort by relevance.
+_RAG_TOP_K = 15
 
 # v2 (Pack): cap each RAG chunk's content at this many chars when
 # packing into tool_result. Protects LLM context from anomalous
