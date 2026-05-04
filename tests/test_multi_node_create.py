@@ -200,17 +200,25 @@ def test_dual_auth_jwt_path_unchanged(monkeypatch):
 
 
 def test_dual_auth_hub_secret_path_returns_proxy_user(monkeypatch):
-    """No JWT, valid X-Hub-Secret → returns synthetic hub_proxy user."""
+    """No UI auth, valid X-Hub-Secret → synthetic hub_proxy user."""
     import asyncio
     from app.api.deps.dual_auth import get_user_or_hub_proxy
+    from fastapi import HTTPException
 
     fake_request = MagicMock()
     fake_request.headers = {"X-Hub-Secret": "cluster-secret"}
+
+    # All UI auth paths fail (no JWT, no cookie, no X-API-Token)
+    async def fake_get_current_user(request, credentials):
+        raise HTTPException(401, "Not authenticated")
 
     async def fake_verify(request):
         return "hub_node"
 
     with patch(
+        "app.api.deps.dual_auth.get_current_user",
+        side_effect=fake_get_current_user,
+    ), patch(
         "app.api.deps.dual_auth.verify_hub_secret",
         side_effect=fake_verify,
     ):
@@ -221,15 +229,44 @@ def test_dual_auth_hub_secret_path_returns_proxy_user(monkeypatch):
     assert result.claims.get("hub_proxy") is True
 
 
+def test_dual_auth_cookie_session_works():
+    """get_current_user resolves a cookie session → dual_auth returns it."""
+    import asyncio
+    from app.api.deps.dual_auth import get_user_or_hub_proxy
+    from app.api.deps.auth import CurrentUser
+
+    fake_request = MagicMock()
+    fake_request.headers = {}  # no Bearer, no X-Hub-Secret
+    cookie_user = CurrentUser(user_id="cookie_user", role="admin")
+
+    async def fake_get_current_user(request, credentials):
+        return cookie_user  # resolved via cookie internally
+
+    with patch(
+        "app.api.deps.dual_auth.get_current_user",
+        side_effect=fake_get_current_user,
+    ):
+        result = asyncio.run(get_user_or_hub_proxy(fake_request, None))
+
+    assert result is cookie_user
+
+
 def test_dual_auth_no_creds_no_secret_raises_401():
-    """No JWT, no X-Hub-Secret → 401."""
+    """No UI auth, no X-Hub-Secret → 401."""
     import asyncio
     from app.api.deps.dual_auth import get_user_or_hub_proxy
     from fastapi import HTTPException
 
     fake_request = MagicMock()
-    fake_request.headers = {}  # no X-Hub-Secret
+    fake_request.headers = {}
 
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(get_user_or_hub_proxy(fake_request, None))
+    async def fake_fail(request, credentials):
+        raise HTTPException(401, "Not authenticated")
+
+    with patch(
+        "app.api.deps.dual_auth.get_current_user",
+        side_effect=fake_fail,
+    ):
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(get_user_or_hub_proxy(fake_request, None))
     assert exc.value.status_code == 401

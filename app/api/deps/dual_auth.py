@@ -40,22 +40,34 @@ async def get_user_or_hub_proxy(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
 ) -> CurrentUser:
-    """Resolve to a CurrentUser via JWT, falling back to X-Hub-Secret.
+    """Resolve to a CurrentUser via UI auth (JWT/cookie/token) or X-Hub-Secret.
 
     Order:
-      1. If Authorization: Bearer <jwt> present → delegate to
-         get_current_user (existing behaviour, no surprises for UI).
-      2. Else if X-Hub-Secret matches the master's TUDOU_SECRET →
-         return synthetic ``hub_proxy`` user with role=admin.
-      3. Else → 401 (same as get_current_user would do).
-    """
-    # JWT path takes priority — no behaviour change for existing
-    # authenticated UI calls.
-    if credentials and credentials.credentials:
-        return await get_current_user(request, credentials)
+      1. Try ``get_current_user`` first — it knows about three UI paths
+         (Bearer JWT, ``td_sess`` cookie, ``X-API-Token``). If any of
+         those resolve, return that user (UI behaviour unchanged).
+      2. Only when all UI paths fail AND ``X-Hub-Secret`` is present,
+         validate the secret and return a synthetic ``hub_proxy``
+         user with role=admin (never superAdmin).
+      3. Else → 401.
 
-    # No bearer token — try hub secret. verify_hub_secret raises 401
-    # itself when the header is wrong; we let that propagate.
+    The earlier version of this dep only checked the Authorization
+    bearer header, so portal users who relied on the legacy cookie
+    session got 401 here even though their session was valid.
+    """
+    # Try UI paths first — get_current_user does Bearer / cookie / token
+    # internally and raises 401 when none work. We swallow that to fall
+    # through to the hub-secret branch (and ultimately a 401 of our own
+    # with a clearer detail message).
+    try:
+        return await get_current_user(request, credentials)
+    except HTTPException as ui_exc:
+        # Re-raise non-401 (e.g. expired token has the right error
+        # already; a generic 500 from upstream we shouldn't mask).
+        if ui_exc.status_code != status.HTTP_401_UNAUTHORIZED:
+            raise
+
+    # No UI auth — try inter-node hub secret.
     if request.headers.get("X-Hub-Secret"):
         await verify_hub_secret(request)
         return CurrentUser(
@@ -64,10 +76,11 @@ async def get_user_or_hub_proxy(
             claims={"hub_proxy": True},
         )
 
-    # Neither — fall through to the standard 401.
+    # Nothing worked.
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Not authenticated (no Bearer token, no X-Hub-Secret)",
+        detail="Not authenticated (need Bearer JWT, td_sess cookie, "
+               "X-API-Token, or X-Hub-Secret)",
         headers={"WWW-Authenticate": "Bearer"},
     )
 
