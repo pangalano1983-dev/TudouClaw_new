@@ -21891,10 +21891,34 @@ async function _kmDoDomainImport(kbId) {
     if (progEl) progEl.style.display = '';
     if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = '上传中...'; }
 
-    var BATCH = 10;    // files per HTTP request — balances latency vs body size
+    // Smaller batch → finer progress granularity. Each batch is one
+    // HTTP round-trip; first batch may stall while bge-m3 loads
+    // (5-30s the first time after server restart). We show an
+    // elapsed-time heartbeat so the UI doesn't look frozen.
+    var BATCH = 3;
     var totalImported = 0, totalChunks = 0, totalScanned = 0, totalDeduped = 0;
     var totalSkipped = skippedClient.slice();
     var allByFile = [];
+
+    // Heartbeat ticker — shows seconds elapsed inside each batch so the
+    // user sees the UI is alive even when ingestion takes 30+s.
+    var batchStartedAt = 0;
+    var heartbeatTimer = null;
+    var heartbeatBase = '';
+    function _startHeartbeat(label) {
+      heartbeatBase = label;
+      batchStartedAt = Date.now();
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      heartbeatTimer = setInterval(function() {
+        if (!progMsg) return;
+        var sec = Math.floor((Date.now() - batchStartedAt) / 1000);
+        var hint = sec > 30 ? ' (服务端 embedding 中，首次较慢)' : '';
+        progMsg.textContent = heartbeatBase + ' · ' + sec + 's' + hint;
+      }, 1000);
+    }
+    function _stopHeartbeat() {
+      if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+    }
 
     try {
       for (var i = 0; i < accepted.length; i += BATCH) {
@@ -21907,27 +21931,38 @@ async function _kmDoDomainImport(kbId) {
             data_base64: b64,
           };
         }));
-        if (progMsg) progMsg.textContent =
-          '上传 batch ' + (Math.floor(i / BATCH) + 1) +
+        var batchLabel = '上传 batch ' + (Math.floor(i / BATCH) + 1) +
           '/' + Math.ceil(accepted.length / BATCH) +
-          ' (' + Math.min(i + BATCH, accepted.length) + '/' + accepted.length + ' files)';
+          ' (' + Math.min(i + BATCH, accepted.length) + '/' + accepted.length + ' 文件)';
         if (progBar) progBar.style.width = Math.round((i / accepted.length) * 100) + '%';
-        var res = await api('POST', '/api/portal/domain-kb/import-files', {
-          kb_id: kbId,
-          files: payload,
-          tags: tags,
-          chunk_size: chunk,
-          max_file_size_mb: maxSizeMb,
-        });
-        if (res) {
-          totalScanned += (res.files_scanned || 0);
-          totalImported += (res.files_imported || 0);
-          totalChunks += (res.chunks_total || 0);
-          totalDeduped += (res.chunks_deduped || 0);
-          if (res.skipped) totalSkipped = totalSkipped.concat(res.skipped);
-          if (res.by_file) allByFile = allByFile.concat(res.by_file);
+        _startHeartbeat(batchLabel);
+        try {
+          var res = await api('POST', '/api/portal/domain-kb/import-files', {
+            kb_id: kbId,
+            files: payload,
+            tags: tags,
+            chunk_size: chunk,
+            max_file_size_mb: maxSizeMb,
+          });
+          _stopHeartbeat();
+          if (res) {
+            totalScanned += (res.files_scanned || 0);
+            totalImported += (res.files_imported || 0);
+            totalChunks += (res.chunks_total || 0);
+            totalDeduped += (res.chunks_deduped || 0);
+            if (res.skipped) totalSkipped = totalSkipped.concat(res.skipped);
+            if (res.by_file) allByFile = allByFile.concat(res.by_file);
+          }
+        } catch (be) {
+          _stopHeartbeat();
+          // Per-batch error: show which batch + reason, then re-raise
+          // so the outer catch shows a definitive stop (vs silently
+          // skipping batches and leaving the user wondering).
+          var bn = (Math.floor(i / BATCH) + 1);
+          throw new Error('Batch ' + bn + ' 失败: ' + (be && be.message || be));
         }
       }
+      _stopHeartbeat();
       if (progBar) progBar.style.width = '100%';
       var msg = '📁 文件夹导入完成\n'
               + '  已选: ' + accepted.length + ' / 总计 ' + files.length + ' 个文件\n'
@@ -21945,7 +21980,18 @@ async function _kmDoDomainImport(kbId) {
       var m = document.getElementById('km-import-modal'); if (m) m.remove();
       _renderKmPrivate();
     } catch (e) {
-      alert('文件夹导入失败: ' + (e.message || e));
+      _stopHeartbeat();
+      // Specific guidance for the most common failure modes.
+      var msg = e.message || String(e);
+      var hint = '';
+      if (/Failed to fetch|NetworkError|ECONNREFUSED|connect/i.test(msg)) {
+        hint = '\n\n💡 看起来 backend 不可达。检查 master 是否在跑：\n  lsof -iTCP:9090 -sTCP:LISTEN';
+      } else if (/timeout|timed out/i.test(msg)) {
+        hint = '\n\n💡 服务端处理超时（可能首次加载 bge-m3 模型）。等 30s 重试一次。';
+      } else if (/HTTP 5\d\d|Internal Server Error/i.test(msg)) {
+        hint = '\n\n💡 服务端报错。看 master 进程的日志找具体原因。';
+      }
+      alert('文件夹导入失败:\n' + msg + hint);
       if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = '导入文件夹'; }
       if (progEl) progEl.style.display = 'none';
     }
