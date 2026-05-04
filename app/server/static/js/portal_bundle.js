@@ -1,3 +1,30 @@
+// ============ Robot avatar helper ============
+// Centralised resolver — every place that builds a /static/robots/...
+// URL goes through this so PNG-vs-SVG dispatch is consistent.
+//
+// Mapping mirrors robots.json on the server. When a new icon is added
+// in PNG format, append its role id here. Other ids fall back to .svg.
+// (.svg fallbacks are kept for: designer, pm, tester, data — no PNG
+// generated yet.)
+var _ROBOT_PNG_IDS = new Set([
+  'ceo','cto','coder','reviewer','researcher','architect','devops',
+  'general','marketing','media','meeting','specialist','product_architect'
+]);
+
+// Accepts: 'robot_general' / 'general' / 'robot_general.png' / undefined.
+// Returns: '/static/robots/robot_<id>.<ext>'.
+function _robotIconUrl(ref) {
+  if (!ref) return '/static/robots/robot_general.png';
+  // Already a complete filename with extension — pass through.
+  if (/\.(png|svg|webp|jpg|jpeg)$/i.test(ref)) {
+    return '/static/robots/' + ref;
+  }
+  // Strip "robot_" prefix to extract the role id.
+  var role = String(ref).replace(/^robot_/, '');
+  var ext = _ROBOT_PNG_IDS.has(role) ? 'png' : 'svg';
+  return '/static/robots/robot_' + role + '.' + ext;
+}
+
 // ============ State ============
 let agents = [], nodes = [], messages = [], approvals = [], auditLog = [], tokens = [], providers = [], projects = [];
 let currentView = 'dashboard';
@@ -2805,10 +2832,11 @@ function renderDashboard() {
     return 'Offline';
   };
 
-  // Build robot avatar helper
+  // Build robot avatar helper (delegates to global _robotIconUrl
+  // so PNG / SVG dispatch is consistent everywhere).
   var robotSrc = function(a) {
     var rid = a.robot_avatar || ('robot_' + (a.role || 'general'));
-    return '/static/robots/' + rid + '.svg';
+    return _robotIconUrl(rid);
   };
 
   c.innerHTML = `
@@ -3248,7 +3276,7 @@ function renderAgentChat(agentId) {
     '<div style="flex:1;display:flex;flex-direction:column;min-width:0">' +
       '<div style="padding:10px 20px;border-bottom:1px solid var(--overlay-5);display:flex;justify-content:space-between;align-items:center;background:var(--bg2);backdrop-filter:blur(16px)">' +
         '<div style="display:flex;align-items:center;gap:10px">' +
-          '<img src="' + (ag.robot_avatar ? '/static/robots/'+ag.robot_avatar+'.svg' : '/static/robots/robot_'+agRole+'.svg') + '" style="width:28px;height:28px" onerror="this.outerHTML=\'<span class=material-symbols-outlined style=color:var(--primary);font-size:20px>smart_toy</span>\'">' +
+          '<img src="' + _robotIconUrl(ag.robot_avatar || ('robot_' + agRole)) + '" style="width:28px;height:28px" onerror="this.outerHTML=\'<span class=material-symbols-outlined style=color:var(--primary);font-size:20px>smart_toy</span>\'">' +
           '<span style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:14px;font-weight:600">' + agDisplayName + '</span>' +
           // The legacy V1/V2 capability badge ("基础" → "状态机") was
           // removed 2026-04-27 — every agent is V2 by default now, so
@@ -6337,9 +6365,9 @@ function _getAgentRobotSrc(agentId) {
   // Find agent in cached state to get robot avatar
   var agents = window._cachedAgents || [];
   var a = agents.find(function(x){ return x.id === agentId; });
-  if (a && a.robot_avatar) return '/static/robots/' + a.robot_avatar + '.svg';
-  if (a) return '/static/robots/robot_' + (a.role || 'general') + '.svg';
-  return '/static/robots/robot_general.svg';
+  if (a && a.robot_avatar) return _robotIconUrl(a.robot_avatar);
+  if (a) return _robotIconUrl('robot_' + (a.role || 'general'));
+  return _robotIconUrl('robot_general');
 }
 
 function _createProgressBar(agentId) {
@@ -12910,7 +12938,7 @@ function _renderAvatarGrid(containerId, selectedVar, clickFunc) {
     var id = 'robot_' + r;
     var sel = (window[selectedVar] === id) ? 'border:2px solid var(--primary);box-shadow:0 0 6px var(--primary)' : 'border:2px solid transparent';
     return '<div onclick="'+clickFunc+'(\''+id+'\')" style="cursor:pointer;border-radius:8px;padding:4px;text-align:center;'+sel+';transition:all .15s">'
-      + '<img src="/static/robots/'+id+'.svg" style="width:40px;height:40px" onerror="this.outerHTML=\'<span class=material-symbols-outlined style=font-size:36px;color:var(--text3)>smart_toy</span>\'">'
+      + '<img src="' + _robotIconUrl(id) + '" style="width:40px;height:40px" onerror="this.outerHTML=\'<span class=material-symbols-outlined style=font-size:36px;color:var(--text3)>smart_toy</span>\'">'
       + '<div style="font-size:10px;color:var(--text2);margin-top:2px">'+r+'</div></div>';
   }).join('');
 }
@@ -13739,7 +13767,7 @@ async function showSoulEditor(agentId) {
   _robotList.forEach(function(r) {
     var selected = (robotAvatar === r.id) ? 'border:2px solid var(--primary);box-shadow:0 0 8px var(--primary)' : 'border:2px solid transparent';
     grid.innerHTML += '<div class="soul-robot-option" data-robot="'+r.id+'" onclick="_selectRobot(this,\''+r.id+'\')" style="cursor:pointer;padding:8px;border-radius:10px;'+selected+';background:var(--surface);display:flex;flex-direction:column;align-items:center;gap:4px;transition:all 0.2s">' +
-      '<img src="/static/robots/'+r.id+'.svg" style="width:40px;height:40px">' +
+      '<img src="' + _robotIconUrl(r.id) + '" style="width:40px;height:40px">' +
       '<span style="font-size:9px;color:var(--text3);font-weight:600">'+r.label+'</span>' +
     '</div>';
   });
