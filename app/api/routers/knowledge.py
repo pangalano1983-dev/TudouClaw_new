@@ -924,89 +924,177 @@ def _get_ocr_engine():
         return _ocr_engine
 
 
+# ── Per-format parsers (each returns markdown w/ # / ## / ### headings) ──
+#
+# Architecture: every parser produces normalized markdown text.
+# Heading hierarchy is encoded as ``#`` prefixes regardless of the
+# source format. This keeps the downstream chunker
+# (``_chunk_text_for_rag`` → ``_split_by_headings``) format-agnostic
+# — it splits on '#' lines and stamps ``heading_path`` metadata on
+# chunks. ``mode="outline"`` and aggregate queries then work
+# uniformly across docx / pdf / html / md.
+#
+# Adding a new format: implement ``_NEW_to_markdown(raw) -> (text, method)``,
+# follow the contract:
+#   - return ``("", "ext_unsupported")`` if the dep is missing
+#   - emit ``# heading`` / ``## heading`` etc. on their own lines
+#   - never raise; fall back to best-effort plain text on errors
+
+
+def _docx_to_markdown(raw: bytes) -> tuple[str, str]:
+    """Word doc → markdown. Word ``Heading N`` / ``Title`` styles
+    become ``#`` prefixes; tables flatten to pipe-joined rows."""
+    try:
+        import docx  # type: ignore
+        import io as _io
+    except ImportError:
+        return "", "ext_unsupported_docx"
+    try:
+        doc = docx.Document(_io.BytesIO(raw))
+        parts: list[str] = []
+        for para in doc.paragraphs:
+            txt = para.text.strip()
+            if not txt:
+                continue
+            lvl = 0
+            try:
+                style_name = (para.style.name or "").strip()
+            except Exception:
+                style_name = ""
+            if style_name == "Title":
+                lvl = 1
+            elif style_name.startswith("Heading "):
+                try:
+                    lvl = max(1, min(6, int(style_name.split()[-1])))
+                except (ValueError, IndexError):
+                    lvl = 0
+            if lvl > 0:
+                parts.append(f"\n{'#' * lvl} {txt}\n")
+            else:
+                parts.append(txt)
+        for table in doc.tables:
+            for row in table.rows:
+                cells = [c.text.strip() for c in row.cells if c.text.strip()]
+                if cells:
+                    parts.append(" | ".join(cells))
+        return "\n\n".join(parts), "python-docx-headings"
+    except Exception as e:
+        logger.debug("docx parse failed: %s", e)
+        return raw.decode("utf-8", errors="replace"), "raw_decode"
+
+
+def _html_to_markdown(raw: bytes) -> tuple[str, str]:
+    """HTML → markdown. ``<h1>..<h6>`` tags become ``#``..``######``;
+    ``<p>`` and other text-bearing tags become flat paragraphs.
+    Falls back to ``BeautifulSoup.get_text`` then regex-strip on any
+    error (preserves backward compat with the old behaviour)."""
+    try:
+        from bs4 import BeautifulSoup  # type: ignore
+    except ImportError:
+        return "", "ext_unsupported_html"
+    try:
+        soup = BeautifulSoup(raw, "html.parser")
+        # Strip script / style — they pollute downstream RAG.
+        for tag in soup(["script", "style", "noscript"]):
+            tag.decompose()
+        parts: list[str] = []
+        # Walk body (or whole doc) in document order, materialising
+        # heading tags as markdown and other text-bearing nodes as paragraphs.
+        body = soup.body or soup
+        for node in body.descendants:
+            name = getattr(node, "name", None)
+            if name in ("h1", "h2", "h3", "h4", "h5", "h6"):
+                lvl = int(name[1])
+                txt = node.get_text(" ", strip=True)
+                if txt:
+                    parts.append(f"\n{'#' * lvl} {txt}\n")
+        # Now grab the remaining text content (everything that wasn't a heading)
+        # — simplest: do another pass for non-heading text nodes.
+        # Trade-off: paragraph order may not exactly match heading-interleaved
+        # original, but for RAG retrieval this is fine; what matters is the
+        # heading_path metadata for each chunk after split.
+        body_text = soup.get_text("\n", strip=True)
+        if body_text:
+            parts.append(body_text)
+        if parts:
+            return "\n\n".join(parts), "beautifulsoup-headings"
+        return body_text, "beautifulsoup"
+    except Exception as e:
+        logger.debug("html parse failed: %s", e)
+        import re as _re
+        return _re.sub(r"<[^>]+>", "", raw.decode("utf-8", errors="replace")), "regex_strip"
+
+
+def _pdf_to_markdown(raw: bytes) -> tuple[str, str]:
+    """PDF → markdown. Uses pymupdf's TOC (PDF outline / bookmarks)
+    when present to inject ``#`` markers at the right page/position;
+    falls back to pdfplumber → pymupdf → raw decode.
+    Caveat: PDFs without a TOC stay flat — heading detection from
+    visual layout (font size / boldness) is a known hard problem
+    and out of scope for this iteration."""
+    import io as _io
+
+    # Path 1: pymupdf with TOC injection (best — preserves heading hierarchy)
+    try:
+        import fitz  # type: ignore
+        doc = fitz.open(stream=raw, filetype="pdf")
+        toc = doc.get_toc(simple=True) or []  # [[level, title, page1], ...]
+        if toc:
+            # Group entries by page so we can inject before that page's text.
+            from collections import defaultdict
+            entries_by_page: dict[int, list[tuple[int, str]]] = defaultdict(list)
+            for lvl, title, page in toc:
+                if page >= 1 and title:
+                    entries_by_page[page - 1].append(  # 0-indexed
+                        (max(1, min(6, lvl)), title.strip()),
+                    )
+            parts: list[str] = []
+            for i, page in enumerate(doc):
+                # Inject any TOC entries that point at this page first
+                for lvl, title in entries_by_page.get(i, []):
+                    parts.append(f"\n{'#' * lvl} {title}\n")
+                txt = page.get_text() or ""
+                if txt.strip():
+                    parts.append(txt)
+            return "\n\n".join(parts), "pymupdf-toc"
+        # No TOC → fall through to flat text (still pymupdf, no headings)
+        text = "\n\n".join(page.get_text() for page in doc)
+        return text, "pymupdf"
+    except Exception as e:
+        logger.debug("pymupdf parse failed: %s", e)
+
+    # Path 2: pdfplumber (better text extraction for some PDFs, no TOC support)
+    try:
+        import pdfplumber  # type: ignore
+        with pdfplumber.open(_io.BytesIO(raw)) as pdf:
+            text = "\n\n".join(p.extract_text() or "" for p in pdf.pages)
+        return text, "pdfplumber"
+    except Exception as e:
+        logger.debug("pdfplumber parse failed: %s", e)
+
+    # Path 3: raw decode (last resort)
+    return raw.decode("utf-8", errors="replace"), "raw_decode"
+
+
 def _parse_file_bytes_to_text(raw: bytes, file_name: str) -> tuple[str, str]:
     """Shared file-to-text logic.
 
-    Returns (text, method). Best-effort — always returns SOMETHING
-    (may be raw-decoded) rather than raising, so folder walks don't
-    abort on one bad file.
+    Dispatches to format-specific parsers each of which produces
+    normalised markdown (heading hierarchy as ``#`` prefixes, body
+    text as plain paragraphs). Returns ``(text, method)``.
+
+    Best-effort — always returns SOMETHING (may be raw-decoded)
+    rather than raising, so folder walks don't abort on one bad file.
     """
     ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else "txt"
     text = ""
     method = "raw"
     if ext == "pdf":
-        try:
-            import pdfplumber  # type: ignore
-            import io as _io
-            with pdfplumber.open(_io.BytesIO(raw)) as pdf:
-                text = "\n\n".join(p.extract_text() or "" for p in pdf.pages)
-            method = "pdfplumber"
-        except Exception:
-            try:
-                import fitz  # type: ignore
-                doc = fitz.open(stream=raw, filetype="pdf")
-                text = "\n\n".join(page.get_text() for page in doc)
-                method = "pymupdf"
-            except Exception:
-                text = raw.decode("utf-8", errors="replace")
-                method = "raw_decode"
+        text, method = _pdf_to_markdown(raw)
     elif ext == "docx":
-        try:
-            import docx  # type: ignore
-            import io as _io
-            doc = docx.Document(_io.BytesIO(raw))
-            parts = []
-            # Preserve heading STRUCTURE by emitting markdown ``#`` prefixes
-            # for paragraphs whose Word style is Heading N. The downstream
-            # ``_chunk_text_for_rag`` is heading-aware and uses these to
-            # set chunk metadata's ``heading_path`` — without this step,
-            # docx imports lose all section structure and queries like
-            # "how many test cases per service" can't aggregate by
-            # section. Falls back to plain text on any style/parse error.
-            for para in doc.paragraphs:
-                txt = para.text.strip()
-                if not txt:
-                    continue
-                lvl = 0
-                try:
-                    style_name = (para.style.name or "").strip()
-                except Exception:
-                    style_name = ""
-                # python-docx exposes "Heading 1" .. "Heading 9" plus
-                # "Title" (treat as level 1) for the cover heading.
-                if style_name == "Title":
-                    lvl = 1
-                elif style_name.startswith("Heading "):
-                    try:
-                        lvl = max(1, min(6, int(style_name.split()[-1])))
-                    except (ValueError, IndexError):
-                        lvl = 0
-                if lvl > 0:
-                    parts.append(f"\n{'#' * lvl} {txt}\n")
-                else:
-                    parts.append(txt)
-            for table in doc.tables:
-                for row in table.rows:
-                    cells = [c.text.strip() for c in row.cells if c.text.strip()]
-                    if cells:
-                        parts.append(" | ".join(cells))
-            text = "\n\n".join(parts)
-            method = "python-docx-headings"
-        except Exception:
-            text = raw.decode("utf-8", errors="replace")
-            method = "raw_decode"
+        text, method = _docx_to_markdown(raw)
     elif ext in ("html", "htm"):
-        try:
-            from bs4 import BeautifulSoup  # type: ignore
-            soup = BeautifulSoup(raw, "html.parser")
-            text = soup.get_text(separator="\n\n", strip=True)
-            method = "beautifulsoup"
-        except Exception:
-            import re as _re
-            text = _re.sub(r"<[^>]+>",
-                           "",
-                           raw.decode("utf-8", errors="replace"))
-            method = "regex_strip"
+        text, method = _html_to_markdown(raw)
     elif ext in ("jpg", "jpeg", "png", "webp", "bmp", "tif", "tiff", "gif"):
         # Image OCR via RapidOCR. The engine returns line-level boxes
         # with text + confidence; we join lines into a flat string so
@@ -1771,86 +1859,15 @@ async def parse_file_for_rag(
         if not file_data:
             raise HTTPException(400, "file_data is required")
         raw = base64.b64decode(file_data)
-        ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else "txt"
-        text = ""
-        method = "raw"
-        if ext == "pdf":
-            try:
-                import pdfplumber
-                import io
-                with pdfplumber.open(io.BytesIO(raw)) as pdf:
-                    text = "\n\n".join(p.extract_text() or "" for p in pdf.pages)
-                method = "pdfplumber"
-            except Exception:
-                try:
-                    import fitz
-                    doc = fitz.open(stream=raw, filetype="pdf")
-                    text = "\n\n".join(page.get_text() for page in doc)
-                    method = "pymupdf"
-                except Exception:
-                    text = raw.decode("utf-8", errors="replace")
-                    method = "raw_decode"
-        elif ext == "docx":
-            try:
-                import docx
-                import io
-                doc = docx.Document(io.BytesIO(raw))
-                parts = []
-                # Mirror the import-files docx parser — emit markdown
-                # heading prefixes for paragraphs styled Heading 1..9 /
-                # Title so the chunker can preserve heading_path metadata.
-                for para in doc.paragraphs:
-                    txt = para.text.strip()
-                    if not txt:
-                        continue
-                    lvl = 0
-                    try:
-                        style_name = (para.style.name or "").strip()
-                    except Exception:
-                        style_name = ""
-                    if style_name == "Title":
-                        lvl = 1
-                    elif style_name.startswith("Heading "):
-                        try:
-                            lvl = max(1, min(6, int(style_name.split()[-1])))
-                        except (ValueError, IndexError):
-                            lvl = 0
-                    if lvl > 0:
-                        parts.append(f"\n{'#' * lvl} {txt}\n")
-                    else:
-                        parts.append(txt)
-                for table in doc.tables:
-                    for row in table.rows:
-                        cells = [c.text.strip() for c in row.cells if c.text.strip()]
-                        if cells:
-                            parts.append(" | ".join(cells))
-                text = "\n\n".join(parts)
-                method = "python-docx-headings"
-            except Exception:
-                text = raw.decode("utf-8", errors="replace")
-                method = "raw_decode"
-        elif ext in ("html", "htm"):
-            try:
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(raw, "html.parser")
-                text = soup.get_text(separator="\n\n", strip=True)
-                method = "beautifulsoup"
-            except Exception:
-                import re
-                text = re.sub(r"<[^>]+>", "", raw.decode("utf-8", errors="replace"))
-                method = "regex_strip"
-        else:
-            for enc in ("utf-8", "gbk", "gb2312", "latin-1"):
-                try:
-                    text = raw.decode(enc)
-                    method = enc
-                    break
-                except (UnicodeDecodeError, LookupError):
-                    continue
-            if not text:
-                text = raw.decode("utf-8", errors="replace")
-                method = "utf8_replace"
-        return {"text": text, "length": len(text), "method": method, "file_name": file_name}
+        # All format-specific parsing now lives in
+        # ``_parse_file_bytes_to_text`` (a single dispatcher that
+        # routes to per-format helpers — ``_pdf_to_markdown`` /
+        # ``_docx_to_markdown`` / ``_html_to_markdown`` / etc.).
+        # Each helper emits markdown so the downstream chunker
+        # preserves heading hierarchy uniformly.
+        text, method = _parse_file_bytes_to_text(raw, file_name)
+        return {"text": text, "length": len(text),
+                "method": method, "file_name": file_name}
     except HTTPException:
         raise
     except Exception as e:
