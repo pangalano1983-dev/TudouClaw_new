@@ -8371,6 +8371,7 @@ var _officeCurrentNode = 'all';
 
 // 像素机器人颜色方案
 var _robotColors = {
+  // — original (used by the office-canvas pixel renderer)
   coder:    {body:'#4CAF50', eye:'#fff', accent:'#81C784'},
   pm:       {body:'#FF9800', eye:'#fff', accent:'#FFB74D'},
   architect:{body:'#2196F3', eye:'#fff', accent:'#64B5F6'},
@@ -8384,6 +8385,18 @@ var _robotColors = {
   marketing:{body:'#FF5722', eye:'#fff', accent:'#FF8A65'},
   data_analyst:{body:'#3F51B5', eye:'#fff', accent:'#7986CB'},
   support:  {body:'#009688', eye:'#fff', accent:'#4DB6AC'},
+  // — new roles surfaced by robots.json (need entries here so
+  // _resolveRobotRole stops falling back to "general" for them)
+  ceo:      {body:'#FFD700', eye:'#fff', accent:'#FFE57F'},
+  cto:      {body:'#4169E1', eye:'#fff', accent:'#7C9CF7'},
+  reviewer: {body:'#9370DB', eye:'#fff', accent:'#B399E2'},
+  researcher:{body:'#20B2AA', eye:'#fff', accent:'#5FCBC4'},
+  data:     {body:'#00CED1', eye:'#fff', accent:'#5FE0E2'},
+  meeting:  {body:'#5F9EA0', eye:'#fff', accent:'#8FB9BA'},
+  media:    {body:'#FF4500', eye:'#fff', accent:'#FF7847'},
+  specialist:{body:'#9ACD32', eye:'#fff', accent:'#B9DD63'},
+  product_architect:{body:'#7B68EE', eye:'#fff', accent:'#9F8FF3'},
+  tech_expert:{body:'#1E90FF', eye:'#fff', accent:'#5BAEFF'},
 };
 
 function _getRobotColor(role) {
@@ -13707,16 +13720,24 @@ async function deleteTask(agentId, taskId) {
 }
 
 // ── SOUL.md Editor + Robot Avatar Picker ──
+// Mirrors robots.json. Order matches _AVATAR_ROLES so the soul-tab
+// picker reads top-down the same as the create-agent picker.
 var _robotList = [
   {id:'robot_ceo',label:'CEO',color:'#FFD700'},
   {id:'robot_cto',label:'CTO',color:'#4A90D9'},
   {id:'robot_coder',label:'Coder',color:'#4CAF50'},
+  {id:'robot_tech_expert',label:'Tech Expert',color:'#1E90FF'},
   {id:'robot_reviewer',label:'Reviewer',color:'#9C27B0'},
   {id:'robot_researcher',label:'Researcher',color:'#009688'},
   {id:'robot_architect',label:'Architect',color:'#FF9800'},
   {id:'robot_devops',label:'DevOps',color:'#F44336'},
-  {id:'robot_designer',label:'Designer',color:'#E91E63'},
+  {id:'robot_product_architect',label:'Product Architect',color:'#7B68EE'},
+  {id:'robot_marketing',label:'Marketing',color:'#FF6347'},
+  {id:'robot_media',label:'Media',color:'#FF4500'},
+  {id:'robot_meeting',label:'Meeting',color:'#5F9EA0'},
+  {id:'robot_specialist',label:'Specialist',color:'#9ACD32'},
   {id:'robot_pm',label:'PM',color:'#1A237E'},
+  {id:'robot_designer',label:'Designer',color:'#E91E63'},
   {id:'robot_tester',label:'Tester',color:'#8BC34A'},
   {id:'robot_data',label:'Data',color:'#00BCD4'},
   {id:'robot_general',label:'General',color:'#78909C'}
@@ -14940,27 +14961,36 @@ async function renderProjectDetail(projId) {
     // Populate members — 有 workflow 时紧凑文字，无 workflow 时机器人头像
     var membersEl = document.getElementById('project-members-'+projId);
     if (membersEl) {
+      // Member avatar source: prefer the agent's robot_avatar field
+      // (which the operator actually picked in the create / edit
+      // modal). _robotIconUrl handles the PNG-vs-SVG dispatch and
+      // strips the "robot_" prefix as needed. Falls back to the
+      // canvas-drawn _miniRobotDataURL only when the agent is not
+      // in the cache (e.g. remote node not yet synced).
+      var _memberAvatar = function(ag, role) {
+        if (ag && ag.robot_avatar) return _robotIconUrl(ag.robot_avatar);
+        if (ag) return _robotIconUrl('robot_' + (ag.role || 'general'));
+        return _miniRobotDataURL(role || 'general');
+      };
       if (proj.workflow_binding) {
-        // 紧凑标签式 + 像素机器人头像
         membersEl.innerHTML = proj.members.map(function(m) {
           var ag = agents.find(function(a){ return a.id === m.agent_id; });
           var name = ag ? ag.name : m.agent_id;
           var role = ag ? _resolveRobotRole(ag) : 'general';
-          var avatarSrc = _miniRobotDataURL(role);
+          var avatarSrc = _memberAvatar(ag, role);
           return '<span style="display:inline-flex;align-items:center;gap:5px;background:var(--surface);border-radius:12px;padding:3px 10px 3px 4px;border:1px solid var(--overlay-8);font-size:11px;color:var(--text)">' +
-            '<img src="'+avatarSrc+'" style="width:20px;height:22px;image-rendering:pixelated" />' +
+            '<img src="'+avatarSrc+'" style="width:22px;height:22px;border-radius:6px;object-fit:cover" />' +
             esc(name) +
           '</span>';
         }).join('');
       } else {
-        // 原始机器人头像卡片
         membersEl.innerHTML = proj.members.map(function(m) {
           var ag = agents.find(function(a){ return a.id === m.agent_id; });
           var name = ag ? (ag.role+'-'+ag.name) : m.agent_id;
           var role = ag ? _resolveRobotRole(ag) : 'general';
-          var avatarSrc = _miniRobotDataURL(role);
+          var avatarSrc = _memberAvatar(ag, role);
           return '<div style="display:flex;align-items:center;gap:8px;background:var(--surface);border-radius:8px;padding:8px 10px;border:1px solid var(--overlay-5);font-size:12px">' +
-            '<img src="'+avatarSrc+'" style="width:32px;height:36px;flex-shrink:0;image-rendering:pixelated" />' +
+            '<img src="'+avatarSrc+'" style="width:36px;height:36px;flex-shrink:0;border-radius:8px;object-fit:cover;background:var(--surface3)" />' +
             '<div style="min-width:0">' +
               '<div style="font-weight:700;color:var(--text)">'+esc(name)+'</div>' +
               '<div style="color:var(--text3);font-size:10px;margin-top:2px">'+esc(m.responsibility||'Member')+'</div>' +
