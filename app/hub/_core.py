@@ -2540,6 +2540,29 @@ class Hub:
     def unregister_node(self, node_id: str):
         with self._lock:
             self.remote_nodes.pop(node_id, None)
+            # Drop node-scoped configs too (NodeConfig items + MCP
+            # configs). Without this cascade, MCP env values that the
+            # dead node had encrypted with ITS OWN fernet key stay on
+            # disk forever — master can't decrypt them and spams
+            # "MCP secret decrypt failed" every startup.
+            self.node_configs.pop(node_id, None)
+        try:
+            self._save_node_configs()
+        except Exception:
+            pass
+        # Cascade into mcp_manager's per-node config table too.
+        try:
+            from ..mcp.manager import get_mcp_manager
+            mcp_mgr = get_mcp_manager()
+            if mcp_mgr is not None and hasattr(mcp_mgr, "node_configs"):
+                if node_id in mcp_mgr.node_configs:
+                    mcp_mgr.node_configs.pop(node_id, None)
+                    if hasattr(mcp_mgr, "save"):
+                        mcp_mgr.save()
+                    elif hasattr(mcp_mgr, "_save"):
+                        mcp_mgr._save()
+        except Exception as _e:
+            logger.debug("unregister_node: mcp cascade failed: %s", _e)
         self._save_remote_nodes()
 
     def update_node_agents(self, node_id: str, agents: list[dict]):
