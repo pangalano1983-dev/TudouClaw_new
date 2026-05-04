@@ -21501,25 +21501,28 @@ function _kmShowCreateDomainKb() {
     + '<div class="form-group"><label>描述</label><input id="km-dkb-desc" placeholder="e.g. 包含劳动法、合同法等法律文档"></div>'
     + '<div class="form-group"><label>标签 (逗号分隔)</label><input id="km-dkb-tags" placeholder="法律,劳动法,合同法"></div>'
     + '<div class="form-group"><label>存储提供方</label><select id="km-dkb-provider"><option value="">本地 ChromaDB (默认)</option></select></div>'
-    // Embedding model picker — locked at creation time. Switching it
-    // later would invalidate the existing collection (dim mismatch).
+    // ── Embedding source: 2-way choice (local OR LLM provider) ──
+    // Radio-based — only ONE of the two sub-sections is visible at
+    // a time so the operator never wonders which one applies.
     + '<div class="form-group">'
-    +   '<label>Embedding 模型 <span style="font-size:11px;color:var(--text3);font-weight:400">（创建后不可改）</span></label>'
-    +   '<select id="km-dkb-embed-model"><option value="">加载中…</option></select>'
-    +   '<div id="km-dkb-embed-note" style="font-size:11px;color:var(--text3);margin-top:4px;line-height:1.4"></div>'
-    + '</div>'
-    // ── LLM Provider Embedding bridge (optional) ────────────────
-    // When set, the KB calls THIS provider's /v1/embeddings endpoint
-    // instead of running local sentence-transformers. Useful for
-    // ollama-style local LLM, openai, 智谱, deepseek 等 — anything
-    // that speaks OpenAI-compatible /v1/embeddings.
-    + '<div class="form-group" style="border-top:1px dashed var(--border);padding-top:10px;margin-top:10px">'
-    +   '<label style="display:flex;align-items:center;gap:6px">'
-    +     '<input type="checkbox" id="km-dkb-use-llm-embed" onchange="_kmToggleLlmEmbedSection(this)" style="margin:0">'
-    +     '<span>用 LLM Provider 的 embedding</span>'
-    +     '<span style="font-size:11px;color:var(--text3);font-weight:400">（可选；勾上后覆盖上面的本地模型）</span>'
-    +   '</label>'
-    +   '<div id="km-dkb-llm-embed-section" style="display:none;margin-top:8px;padding:10px;background:var(--surface2);border-radius:6px">'
+    +   '<label>Embedding 来源 <span style="font-size:11px;color:var(--text3);font-weight:400">（创建后不可改）</span></label>'
+    +   '<div style="display:flex;gap:18px;margin:6px 0 8px 0;font-size:13px">'
+    +     '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">'
+    +       '<input type="radio" name="km-dkb-embed-source" value="local" checked'
+    +         ' onchange="_kmSwitchEmbedSource(\'local\')"> 本地模型'
+    +     '</label>'
+    +     '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">'
+    +       '<input type="radio" name="km-dkb-embed-source" value="llm"'
+    +         ' onchange="_kmSwitchEmbedSource(\'llm\')"> 远程 LLM Provider'
+    +     '</label>'
+    +   '</div>'
+    // — Local sub-section (shown by default)
+    +   '<div id="km-dkb-embed-local-section">'
+    +     '<select id="km-dkb-embed-model"><option value="">加载中…</option></select>'
+    +     '<div id="km-dkb-embed-note" style="font-size:11px;color:var(--text3);margin-top:4px;line-height:1.4"></div>'
+    +   '</div>'
+    // — LLM provider sub-section (shown when "远程" is picked)
+    +   '<div id="km-dkb-llm-embed-section" style="display:none">'
     +     '<div class="form-group" style="margin-bottom:8px">'
     +       '<label style="font-size:12px">LLM Provider</label>'
     +       '<select id="km-dkb-llm-embed-provider"><option value="">加载中…</option></select>'
@@ -21528,8 +21531,7 @@ function _kmShowCreateDomainKb() {
     +       '<label style="font-size:12px">Embedding Model 名称 <span style="font-size:11px;color:var(--text3)">(该 provider 的模型 ID)</span></label>'
     +       '<input id="km-dkb-llm-embed-model" placeholder="例如 nomic-embed-text / text-embedding-3-small / embedding-2">'
     +       '<div style="font-size:11px;color:var(--text3);margin-top:4px;line-height:1.4">'
-    +         '此模型必须是该 LLM Provider <code style="font-size:11px">/v1/embeddings</code> 端点支持的 ID。'
-    +         '不知道填什么？看该 provider 的官方文档。'
+    +         '此模型必须是该 LLM Provider <code style="font-size:11px">/v1/embeddings</code> 端点支持的 ID。看该 provider 的官方文档。'
     +       '</div>'
     +     '</div>'
     +   '</div>'
@@ -21664,21 +21666,18 @@ function _kmShowCreateDomainKb() {
   });
 }
 
-// Toggle the LLM-embedding section in the KB create modal. Called
-// from the checkbox onchange. When enabled, fetches the LLM provider
-// list (once) and disables the local-embedding dropdown so the user
-// sees clearly which path will be used.
-function _kmToggleLlmEmbedSection(checkbox) {
-  var sec = document.getElementById('km-dkb-llm-embed-section');
-  var localEmbedSel = document.getElementById('km-dkb-embed-model');
-  if (!sec) return;
-  if (checkbox.checked) {
-    sec.style.display = '';
-    if (localEmbedSel) {
-      localEmbedSel.disabled = true;
-      localEmbedSel.style.opacity = '0.5';
-    }
-    // Lazy-load LLM provider list (idempotent — only first call hits net).
+// Switch the embedding-source radio in the KB create modal.
+// Source is "local" (default) or "llm". Only one sub-section is
+// visible at a time so the operator can't accidentally fill both.
+function _kmSwitchEmbedSource(source) {
+  var localSec = document.getElementById('km-dkb-embed-local-section');
+  var llmSec = document.getElementById('km-dkb-llm-embed-section');
+  if (!localSec || !llmSec) return;
+  if (source === 'llm') {
+    localSec.style.display = 'none';
+    llmSec.style.display = '';
+    // Lazy-load LLM provider list on first switch — keeps the dialog
+    // snappy when the operator stays on local.
     var sel = document.getElementById('km-dkb-llm-embed-provider');
     if (sel && sel.options.length <= 1) {
       api('GET', '/api/portal/providers').then(function(data) {
@@ -21694,11 +21693,8 @@ function _kmToggleLlmEmbedSection(checkbox) {
       });
     }
   } else {
-    sec.style.display = 'none';
-    if (localEmbedSel) {
-      localEmbedSel.disabled = false;
-      localEmbedSel.style.opacity = '';
-    }
+    localSec.style.display = '';
+    llmSec.style.display = 'none';
   }
 }
 
@@ -21710,14 +21706,17 @@ async function _kmSaveDomainKb() {
   var embedModel = (document.getElementById('km-dkb-embed-model')||{}).value||'';
   var rerankerModel = (document.getElementById('km-dkb-rerank-model')||{}).value||'';
   // LLM-provider-as-embedding-source bridge (optional).
-  var useLlmEmbed = !!(document.getElementById('km-dkb-use-llm-embed') || {}).checked;
+  // Read from the radio-group; the "llm" branch fills in
+  // embedding_provider_id + overrides embed_model with the
+  // remote model id.
+  var checkedRadio = document.querySelector('input[name="km-dkb-embed-source"]:checked');
+  var useLlmEmbed = checkedRadio && checkedRadio.value === 'llm';
   var llmEmbedProvider = '';
   if (useLlmEmbed) {
     llmEmbedProvider = (document.getElementById('km-dkb-llm-embed-provider')||{}).value || '';
     var llmEmbedModel = ((document.getElementById('km-dkb-llm-embed-model')||{}).value || '').trim();
     if (!llmEmbedProvider) { alert('请选择 LLM Provider'); return; }
     if (!llmEmbedModel)    { alert('请填写 Embedding Model 名称（该 provider 的模型 ID）'); return; }
-    // When LLM-embedding is on, override embed_model with the provider's model id.
     embedModel = llmEmbedModel;
   }
   if (!name.trim()) { alert('名称不能为空'); return; }
@@ -22082,34 +22081,48 @@ async function _kmDoDomainImport(kbId) {
       }
       _stopHeartbeat();
       if (progBar) progBar.style.width = '100%';
-      var msg = '📁 文件夹导入完成\n'
-              + '  已选: ' + accepted.length + ' / 总计 ' + files.length + ' 个文件\n'
-              + '  已扫描: ' + totalScanned + '，导入: ' + totalImported + ' 个\n'
-              + '  分块: ' + totalChunks + (totalDeduped ? ' (去重 ' + totalDeduped + ' 个重复分块)' : '') + '\n'
-              + '  跳过: ' + totalSkipped.length + ' 个';
-      if (totalSkipped.length) {
-        msg += '\n\n跳过原因 (前 5 条):';
-        totalSkipped.slice(0, 5).forEach(function(s) {
-          var shortName = (s.name || s.path || '').split('/').pop();
-          msg += '\n  - ' + shortName + ': ' + s.reason;
-        });
+      // Compact one-line success → toast.
+      // Detail (skipped reasons, by-file table) → console for power-users.
+      var summary = '📁 已导入 ' + totalImported + ' / ' + accepted.length
+                  + ' 个文件，' + totalChunks + ' chunks'
+                  + (totalDeduped ? ' (去重 ' + totalDeduped + ')' : '')
+                  + (totalSkipped.length ? ' · 跳过 ' + totalSkipped.length : '');
+      if (typeof window._toast === 'function') {
+        window._toast(summary, 'success');
+      } else {
+        // Fallback only when toast helper not initialised yet.
+        alert(summary);
       }
-      alert(msg);
+      // Detail dump for diagnostic — non-blocking, doesn't pop UI.
+      try {
+        console.info('[KB import] detail:', {
+          imported: totalImported, scanned: totalScanned,
+          chunks: totalChunks, deduped: totalDeduped,
+          skipped: totalSkipped, by_file: allByFile,
+        });
+      } catch (_) {}
       var m = document.getElementById('km-import-modal'); if (m) m.remove();
       _renderKmPrivate();
     } catch (e) {
       _stopHeartbeat();
-      // Specific guidance for the most common failure modes.
       var msg = e.message || String(e);
-      var hint = '';
+      // Compact one-line for toast; details live in console.
+      var short = msg;
       if (/Failed to fetch|NetworkError|ECONNREFUSED|connect/i.test(msg)) {
-        hint = '\n\n💡 看起来 backend 不可达。检查 master 是否在跑：\n  lsof -iTCP:9090 -sTCP:LISTEN';
+        short = '导入失败 — backend 不可达 (检查 master 9090)';
       } else if (/timeout|timed out/i.test(msg)) {
-        hint = '\n\n💡 服务端处理超时（可能首次加载 bge-m3 模型）。等 30s 重试一次。';
+        short = '导入超时 — 可能首次加载 embedding 模型，30s 后重试';
       } else if (/HTTP 5\d\d|Internal Server Error/i.test(msg)) {
-        hint = '\n\n💡 服务端报错。看 master 进程的日志找具体原因。';
+        short = '导入失败 — 服务端报错 (看 master 日志)';
+      } else {
+        short = '导入失败: ' + msg.slice(0, 120);
       }
-      alert('文件夹导入失败:\n' + msg + hint);
+      if (typeof window._toast === 'function') {
+        window._toast(short, 'error');
+      } else {
+        alert(short);
+      }
+      try { console.error('[KB import] error:', e); } catch(_) {}
       if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = '导入文件夹'; }
       if (progEl) progEl.style.display = 'none';
     }
