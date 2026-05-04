@@ -2234,8 +2234,15 @@ function _renderAgentCard(a) {
   // by default now (hub backfills shadows on startup). Kept as empty
   // string so callers concatenating it still work.
   var v2Badge = '';
+  // Agent-card avatar: prefer the operator-picked robot_avatar PNG.
+  // Falls back to material-symbols ``smart_toy`` only if image fails
+  // to load (e.g. file missing) — the onerror swap matches what the
+  // chat / sidebar paths do, so we degrade consistently.
+  var _avatarUrl = _robotIconUrl(a.robot_avatar || ('robot_' + (a.role || 'general')));
   return '<div onclick="showAgentView(\''+a.id+'\')" style="background:var(--surface);border-radius:12px;padding:14px 16px;border:1px solid var(--border-light);cursor:pointer;transition:all 0.15s;display:flex;align-items:center;gap:14px" onmouseenter="this.style.borderColor=\'var(--primary)\';this.style.transform=\'translateY(-1px)\'" onmouseleave="this.style.borderColor=\'var(--border-light)\';this.style.transform=\'none\'">' +
-    '<div style="width:40px;height:40px;border-radius:10px;background:var(--surface3);display:flex;align-items:center;justify-content:center;flex-shrink:0"><span class="material-symbols-outlined" style="font-size:22px;color:var(--primary)">smart_toy</span></div>' +
+    '<div style="width:40px;height:40px;border-radius:10px;background:var(--surface3);display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden">' +
+      '<img src="'+_avatarUrl+'" alt="" style="width:40px;height:40px;object-fit:cover" onerror="this.outerHTML=\'<span class=material-symbols-outlined style=&quot;font-size:22px;color:var(--primary)&quot;>smart_toy</span>\'">' +
+    '</div>' +
     '<div style="flex:1;min-width:0">' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px;flex-wrap:wrap">' +
         '<span style="font-size:13px;font-weight:700;color:var(--text);font-family:\'Plus Jakarta Sans\',sans-serif">'+esc(a.name)+'</span>' +
