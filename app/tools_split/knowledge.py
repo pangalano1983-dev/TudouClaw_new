@@ -870,16 +870,78 @@ def _knowledge_lookup_impl(query: str = "", entry_id: str = "",
         # The Shared-pool legacy "partial/match-by-title" flow is kept for
         # shared entries only.
         if rag_hits:
+            # ── Coverage sidecar (added 2026-05-04 — root-cause fix for
+            # "RAG 没有之前效果好" complaint) ──────────────────────────
+            # Aggregate the retrieved chunks by source_file so the LLM
+            # can answer "how many / list all / per-document" questions
+            # WITHOUT issuing a second knowledge_lookup call. Many real
+            # queries are aggregate-style ("each cloud service has how
+            # many test cases?") and the previous response forced the
+            # agent to either (a) infer aggregates from a top-k sample
+            # — wrong — or (b) suggest the user re-issue with mode=count
+            # — bad UX. Now top-k AND a coverage breakdown ride together.
+            # Plus we always include a KB-wide chunk total so "this top-k
+            # is N out of M total" is explicit.
+            coverage_groups: dict[str, dict] = {}
+            for h in rag_hits:
+                sf = h.get("source_file") or "(unknown)"
+                g = coverage_groups.setdefault(sf, {
+                    "source_file": sf, "chunks_in_topk": 0,
+                    "headings_seen": [],
+                })
+                g["chunks_in_topk"] += 1
+                hp = h.get("heading_path") or ""
+                if hp and hp not in g["headings_seen"] \
+                        and len(g["headings_seen"]) < 3:
+                    g["headings_seen"].append(hp[:120])
+            coverage = sorted(coverage_groups.values(),
+                              key=lambda x: -x["chunks_in_topk"])
+
+            # Optional: cheap KB-wide totals so the LLM knows top-k size
+            # vs total. Falls back gracefully when stats not available
+            # (different provider type, etc.).
+            kb_total_chunks = None
+            kb_total_files = None
+            try:
+                from ..rag_provider import get_rag_registry, get_domain_kb_store
+                _reg = get_rag_registry()
+                _store = get_domain_kb_store()
+                _coll_ids = getattr(agent_profile, "rag_collection_ids", []) or []
+                _t_chunks = 0
+                _t_files = 0
+                for _kb_id in _coll_ids:
+                    _kb = _store.get(_kb_id)
+                    if not _kb:
+                        continue
+                    _stat = _reg.kb_statistics(_kb.provider_id, _kb.collection)
+                    _t_chunks += _stat.get("total_chunks", 0)
+                    _t_files += _stat.get("unique_source_files", 0)
+                kb_total_chunks = _t_chunks
+                kb_total_files = _t_files
+            except Exception as _ce:
+                logger.debug("coverage stats failed: %s", _ce)
+
             return json.dumps({
                 "status": "success",
                 "entries": rag_hits,
+                "coverage": {
+                    "topk_size": len(rag_hits),
+                    "topk_distinct_files": len(coverage),
+                    "by_source_file": coverage,
+                    "kb_total_chunks": kb_total_chunks,
+                    "kb_total_files": kb_total_files,
+                },
                 "usage_guidance": (
-                    "These are retrieved chunks from the expert knowledge base. "
-                    "When answering: (1) cite source as [source_file §heading_path] "
-                    "or [title #chunk_index]; (2) reason only from the content "
-                    "provided — do NOT extrapolate or invent; (3) if the chunks "
-                    "do not contain enough information to answer, say '知识库中未找到直接答案' "
-                    "and propose what extra material would be needed."
+                    "RAG content for answering. "
+                    "(1) cite as [source_file §heading_path] or [title #chunk_index]; "
+                    "(2) reason only from `entries` content — never extrapolate; "
+                    "(3) `coverage` shows how the top-k was distributed across "
+                    "files AND the KB-wide totals; for aggregate questions "
+                    "(\"how many / list all / per-document\") prefer the coverage "
+                    "numbers OVER counting entries by hand. "
+                    "(4) If `topk_size < kb_total_chunks` and the user asked "
+                    "for a roll-up, recall this tool with `mode=\"count\"` for "
+                    "an exact KB-wide breakdown — it's free and one extra call."
                 ),
             }, ensure_ascii=False, indent=2)
 
