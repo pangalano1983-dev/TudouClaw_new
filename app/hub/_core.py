@@ -66,8 +66,25 @@ class Hub:
         self.messages: list[AgentMessage] = []
         self.config_deployments: dict[str, ConfigDeployment] = {}
         self._lock = threading.Lock()
-        from .. import DEFAULT_DATA_DIR
-        self._data_dir = data_dir or DEFAULT_DATA_DIR
+        # Resolve data_dir at construction time. Priority:
+        #   1. caller-supplied ``data_dir`` argument (tests / explicit ops)
+        #   2. ``app.paths.data_dir()`` — reads TUDOU_CLAW_DATA_DIR /
+        #      TUDOU_CLAW_HOME env vars (the canonical resolver, used by
+        #      every other module after the 2026-05-03 paths refactor).
+        # The previous fallback used ``app.DEFAULT_DATA_DIR`` which is
+        # hardcoded to ~/.tudou_claw at import — env-var changes were
+        # ignored, so multi-node workers all mounted the master's
+        # ~/.tudou_claw and ate each other's agents.json. This was the
+        # root cause of the "worker shows master's 9 agents" bug.
+        if data_dir:
+            self._data_dir = data_dir
+        else:
+            try:
+                from ..paths import data_dir as _resolve_data_dir
+                self._data_dir = str(_resolve_data_dir())
+            except Exception:
+                from .. import DEFAULT_DATA_DIR
+                self._data_dir = DEFAULT_DATA_DIR
         # Upstream hub (only set on remote-node portals): node will push
         # config changes back here so the admin hub stays in sync.
         self.upstream_hub_url: str = os.environ.get("TUDOU_UPSTREAM_HUB", "").rstrip("/")

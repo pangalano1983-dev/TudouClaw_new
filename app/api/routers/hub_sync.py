@@ -23,16 +23,42 @@ router = APIRouter(prefix="/api/hub", tags=["hub"])
 @router.get("/agents")
 async def get_local_agents_for_sync(
     hub=Depends(get_hub),
-    user: CurrentUser = Depends(get_current_user),
+    auth_tag: str = Depends(verify_hub_secret),
 ):
-    """Get local agents for inter-node synchronization."""
+    """Return THIS hub's local agents for inter-node sync.
+
+    Used by master's ``refresh_node`` to pull a worker's current
+    agent list. Critical for cross-node chat: master's
+    ``find_agent_node`` walks ``remote_nodes[*].agents`` looking
+    for an agent_id, and that data only stays fresh thanks to this
+    endpoint being polled.
+
+    Auth: ``X-Hub-Secret`` (this is an inter-node call, not a UI
+    request — JWT would require the master to log into every
+    worker, which doesn't make sense).
+    """
     try:
-        agents = hub.get_local_agents_for_sync() if hasattr(hub, "get_local_agents_for_sync") else []
-        agents_list = [a.to_dict() if hasattr(a, "to_dict") else a for a in agents]
-        return {"agents": agents_list}
+        # Walk hub.agents directly. The previous implementation
+        # called ``hub.get_local_agents_for_sync()`` which never
+        # existed on the Hub class — every request silently returned
+        # an empty list, breaking master's view of remote agent lists
+        # and making cross-node chat 404 on every send.
+        agents = list(getattr(hub, "agents", {}).values()) or []
+        out: list[dict] = []
+        for a in agents:
+            try:
+                d = a.to_dict() if hasattr(a, "to_dict") else dict(a)
+                # Mark the canonical node so master's UI labels it.
+                d.setdefault("node_id", getattr(hub, "node_id", "local"))
+                d["location"] = "local"
+                out.append(d)
+            except Exception:
+                continue
+        return {"agents": out}
     except HTTPException:
         raise
     except Exception as e:
+        logger.exception("get_local_agents_for_sync failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 
