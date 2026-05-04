@@ -626,14 +626,23 @@ def _kb_aggregate(mode: str, query: str, rag_mode: str,
             "grand_filter_matched": grand_filter_matched,
             "per_kb": per_kb,
             "usage_guidance": (
-                "These counts come from a direct scan of the KB's "
-                "metadata (not a top-k sample). Use them verbatim for "
-                "aggregate answers like '有多少', '总数'. The "
-                "`by_source_file` breakdown lets you report per-document "
-                "counts. If `filter` was given, `filter_matched` is the "
-                "number of chunks whose title/heading/source/content "
-                "contained the filter — that is typically the number "
-                "the user asked about."
+                "Direct metadata scan, NOT a top-k sample. Use verbatim "
+                "for aggregate answers ('有多少', '总数', 'list each'). "
+                "Each per_kb row has TWO breakdowns: \n"
+                "  • by_source_file       — per-file counts WITH filter\n"
+                "                            applied (use for matched\n"
+                "                            count when filter hit)\n"
+                "  • by_source_file_full  — per-file counts of the WHOLE\n"
+                "                            KB (always present even if\n"
+                "                            the filter zero-matched —\n"
+                "                            common with cross-language\n"
+                "                            queries like 中文 → English\n"
+                "                            content). Use this to see\n"
+                "                            what's actually in the KB.\n"
+                "If filter_matched=0 but by_source_file_full has files, "
+                "the keyword you tried doesn't substring-match — try a "
+                "different / English form, OR use mode='search' (vector "
+                "embedding handles cross-language)."
             ),
         }, ensure_ascii=False, indent=2)
 

@@ -1014,7 +1014,17 @@ class RAGProviderRegistry:
         q = (query or "").strip().lower()
 
         # Group by source_file (fall back to "unknown" bucket).
-        groups: dict[str, dict] = {}
+        # Two passes when a filter is set:
+        #   • all_groups       — ENTIRE collection breakdown (so the
+        #                        caller always sees KB structure, even
+        #                        when the filter's keywords don't match
+        #                        — common with cross-language queries
+        #                        like "验收用例" against English docs)
+        #   • matched_groups   — only chunks where the filter substring
+        #                        appears (the original behaviour)
+        # When no filter, both reduce to the same set.
+        all_groups: dict[str, dict] = {}
+        matched_groups: dict[str, dict] = {}
         filter_matched = 0
         for i, _id in enumerate(ids):
             meta = metas[i] if i < len(metas) else {}
@@ -1023,35 +1033,55 @@ class RAGProviderRegistry:
             title = str(meta.get("title") or "")
             heading = str(meta.get("heading_path") or "")
             doc_body = str(docs[i]) if i < len(docs) else ""
-            # Filter match: substring in title / heading_path / source_file
-            # / doc body (body search catches chunks where source metadata
-            # is thin but content has the term).
-            matched = True
-            if q:
-                hay = (title + " " + heading + " " + src + " " +
-                       doc_body).lower()
-                matched = q in hay
-                if matched:
-                    filter_matched += 1
-            if not matched:
-                continue
-            g = groups.setdefault(src, {
+
+            # Always tally into all_groups
+            ag = all_groups.setdefault(src, {
                 "source_file": src, "chunk_count": 0,
                 "first_heading": "", "titles_sample": [],
             })
-            g["chunk_count"] += 1
-            if not g["first_heading"] and heading:
-                g["first_heading"] = heading[:120]
-            if title and title not in g["titles_sample"] and \
-                    len(g["titles_sample"]) < 5:
-                g["titles_sample"].append(title[:120])
+            ag["chunk_count"] += 1
+            if not ag["first_heading"] and heading:
+                ag["first_heading"] = heading[:120]
+            if title and title not in ag["titles_sample"] \
+                    and len(ag["titles_sample"]) < 5:
+                ag["titles_sample"].append(title[:120])
 
-        by_source = sorted(groups.values(),
-                           key=lambda x: -x["chunk_count"])
+            # Filter check — only affects matched_groups
+            matched = True
+            if q:
+                hay = (title + " " + heading + " " + src + " "
+                       + doc_body).lower()
+                matched = q in hay
+            if matched:
+                if q:
+                    filter_matched += 1
+                mg = matched_groups.setdefault(src, {
+                    "source_file": src, "chunk_count": 0,
+                    "first_heading": "", "titles_sample": [],
+                })
+                mg["chunk_count"] += 1
+                if not mg["first_heading"] and heading:
+                    mg["first_heading"] = heading[:120]
+                if title and title not in mg["titles_sample"] \
+                        and len(mg["titles_sample"]) < 5:
+                    mg["titles_sample"].append(title[:120])
+
+        by_source_full = sorted(all_groups.values(),
+                                 key=lambda x: -x["chunk_count"])
+        # by_source_file historically meant "matched chunks per file";
+        # keep that for backward compatibility, AND add a new
+        # by_source_file_full so agents can see the WHOLE KB structure
+        # even when their filter zero-matches.
+        if q:
+            by_source_filtered = sorted(matched_groups.values(),
+                                         key=lambda x: -x["chunk_count"])
+        else:
+            by_source_filtered = by_source_full
         return {
             "total_chunks": total,
-            "unique_source_files": len(by_source),
-            "by_source_file": by_source,
+            "unique_source_files": len(by_source_full),
+            "by_source_file": by_source_filtered,
+            "by_source_file_full": by_source_full,
             "filter": query or "",
             "filter_matched": filter_matched if q else 0,
         }
