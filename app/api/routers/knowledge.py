@@ -590,18 +590,22 @@ async def create_domain_knowledge_base(
         description = body.get("description", "") or ""
         provider_id = body.get("provider_id", "") or ""
         embedding_model = (body.get("embedding_model") or "").strip()
-        # Empty string = use server default (existing behavior). Otherwise
-        # must be in the curated list OR already cached locally — random
-        # HF model names could be huge, untrusted, or fail to load and
-        # leave the KB in a broken state. Local cache hits are vetted by
-        # the act of downloading itself.
-        if embedding_model and embedding_model not in _allowed_model_ids():
+        # Allow-list only applies to LOCAL sentence-transformers models.
+        # When the KB routes embedding through an LLM provider
+        # (``embedding_provider_id`` set), ``embedding_model`` is just
+        # whatever model id that provider exposes — free text, no gate.
+        _emb_provider_id_pre = (body.get("embedding_provider_id") or "").strip()
+        if (embedding_model
+                and not _emb_provider_id_pre
+                and embedding_model not in _allowed_model_ids()):
             raise HTTPException(
                 400,
                 f"embedding_model not allowed: {embedding_model!r}. "
-                f"GET /domain-kb/embedding-models for the catalog, or "
-                f"pre-download the model into ~/.tudou_claw/hf_cache/ "
-                f"to whitelist it.",
+                f"GET /domain-kb/embedding-models for the catalog, "
+                f"or pre-download into ~/.tudou_claw/hf_cache/. "
+                f"(For LLM-provider embedding, set "
+                f"``embedding_provider_id`` and use the provider's "
+                f"native model id.)",
             )
         reranker_model = (body.get("reranker_model") or "").strip()
         if reranker_model and reranker_model not in _allowed_reranker_ids():
@@ -613,6 +617,26 @@ async def create_domain_knowledge_base(
         tags = body.get("tags") or []
         if not isinstance(tags, list):
             tags = []
+
+        # Optional: route embedding through an existing LLM provider.
+        # When ``embedding_provider_id`` is set, the KB looks up that
+        # provider in app.llm at ingest/search time and POSTs to its
+        # /v1/embeddings endpoint. ``embedding_model`` is then the
+        # model id at that provider (free text — we don't gate it
+        # against the local sentence-transformers allow-list).
+        embedding_provider_id = (body.get("embedding_provider_id") or "").strip()
+        if embedding_provider_id:
+            # When using LLM-provider embedding, the model is whatever
+            # that provider supports — bypass the local allow-list.
+            embedding_model = (body.get("embedding_model") or "").strip()
+            if not embedding_model:
+                raise HTTPException(
+                    400,
+                    "embedding_model is required when "
+                    "embedding_provider_id is set (e.g. "
+                    "'text-embedding-3-small', 'nomic-embed-text', "
+                    "'embedding-2' — depends on which provider).",
+                )
 
         # Prefer hub method if a future version exposes it.
         if hasattr(hub, "create_domain_knowledge_base"):
@@ -632,6 +656,7 @@ async def create_domain_knowledge_base(
             tags=[str(t).strip() for t in tags if str(t).strip()],
             embedding_model=embedding_model,
             reranker_model=reranker_model,
+            embedding_provider_id=embedding_provider_id,
         )
         return {"ok": True, "knowledge_base": kb.to_dict()}
     except HTTPException:

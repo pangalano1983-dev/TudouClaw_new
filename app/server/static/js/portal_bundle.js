@@ -21470,6 +21470,32 @@ function _kmShowCreateDomainKb() {
     +   '<select id="km-dkb-embed-model"><option value="">加载中…</option></select>'
     +   '<div id="km-dkb-embed-note" style="font-size:11px;color:var(--text3);margin-top:4px;line-height:1.4"></div>'
     + '</div>'
+    // ── LLM Provider Embedding bridge (optional) ────────────────
+    // When set, the KB calls THIS provider's /v1/embeddings endpoint
+    // instead of running local sentence-transformers. Useful for
+    // ollama-style local LLM, openai, 智谱, deepseek 等 — anything
+    // that speaks OpenAI-compatible /v1/embeddings.
+    + '<div class="form-group" style="border-top:1px dashed var(--border);padding-top:10px;margin-top:10px">'
+    +   '<label style="display:flex;align-items:center;gap:6px">'
+    +     '<input type="checkbox" id="km-dkb-use-llm-embed" onchange="_kmToggleLlmEmbedSection(this)" style="margin:0">'
+    +     '<span>用 LLM Provider 的 embedding</span>'
+    +     '<span style="font-size:11px;color:var(--text3);font-weight:400">（可选；勾上后覆盖上面的本地模型）</span>'
+    +   '</label>'
+    +   '<div id="km-dkb-llm-embed-section" style="display:none;margin-top:8px;padding:10px;background:var(--surface2);border-radius:6px">'
+    +     '<div class="form-group" style="margin-bottom:8px">'
+    +       '<label style="font-size:12px">LLM Provider</label>'
+    +       '<select id="km-dkb-llm-embed-provider"><option value="">加载中…</option></select>'
+    +     '</div>'
+    +     '<div class="form-group" style="margin-bottom:0">'
+    +       '<label style="font-size:12px">Embedding Model 名称 <span style="font-size:11px;color:var(--text3)">(该 provider 的模型 ID)</span></label>'
+    +       '<input id="km-dkb-llm-embed-model" placeholder="例如 nomic-embed-text / text-embedding-3-small / embedding-2">'
+    +       '<div style="font-size:11px;color:var(--text3);margin-top:4px;line-height:1.4">'
+    +         '此模型必须是该 LLM Provider <code style="font-size:11px">/v1/embeddings</code> 端点支持的 ID。'
+    +         '不知道填什么？看该 provider 的官方文档。'
+    +       '</div>'
+    +     '</div>'
+    +   '</div>'
+    + '</div>'
     // Cross-encoder reranker — optional. Adds latency, big precision win.
     + '<div class="form-group">'
     +   '<label>Reranker 精排模型 <span style="font-size:11px;color:var(--text3);font-weight:400">（可选, 创建后可改）</span></label>'
@@ -21600,6 +21626,44 @@ function _kmShowCreateDomainKb() {
   });
 }
 
+// Toggle the LLM-embedding section in the KB create modal. Called
+// from the checkbox onchange. When enabled, fetches the LLM provider
+// list (once) and disables the local-embedding dropdown so the user
+// sees clearly which path will be used.
+function _kmToggleLlmEmbedSection(checkbox) {
+  var sec = document.getElementById('km-dkb-llm-embed-section');
+  var localEmbedSel = document.getElementById('km-dkb-embed-model');
+  if (!sec) return;
+  if (checkbox.checked) {
+    sec.style.display = '';
+    if (localEmbedSel) {
+      localEmbedSel.disabled = true;
+      localEmbedSel.style.opacity = '0.5';
+    }
+    // Lazy-load LLM provider list (idempotent — only first call hits net).
+    var sel = document.getElementById('km-dkb-llm-embed-provider');
+    if (sel && sel.options.length <= 1) {
+      api('GET', '/api/portal/providers').then(function(data) {
+        var providers = (data && data.providers) || [];
+        sel.innerHTML = '<option value="">— 选择 provider —</option>'
+          + providers.map(function(p) {
+              var label = (p.name || p.id) + ' (' + (p.kind || '?')
+                        + (p.base_url ? ' · ' + p.base_url.slice(0, 30) : '') + ')';
+              return '<option value="' + esc(p.id || '') + '">' + esc(label) + '</option>';
+            }).join('');
+      }).catch(function() {
+        sel.innerHTML = '<option value="">加载失败 — 检查 master 是否在跑</option>';
+      });
+    }
+  } else {
+    sec.style.display = 'none';
+    if (localEmbedSel) {
+      localEmbedSel.disabled = false;
+      localEmbedSel.style.opacity = '';
+    }
+  }
+}
+
 async function _kmSaveDomainKb() {
   var name = (document.getElementById('km-dkb-name')||{}).value||'';
   var desc = (document.getElementById('km-dkb-desc')||{}).value||'';
@@ -21607,6 +21671,17 @@ async function _kmSaveDomainKb() {
   var provider = (document.getElementById('km-dkb-provider')||{}).value||'';
   var embedModel = (document.getElementById('km-dkb-embed-model')||{}).value||'';
   var rerankerModel = (document.getElementById('km-dkb-rerank-model')||{}).value||'';
+  // LLM-provider-as-embedding-source bridge (optional).
+  var useLlmEmbed = !!(document.getElementById('km-dkb-use-llm-embed') || {}).checked;
+  var llmEmbedProvider = '';
+  if (useLlmEmbed) {
+    llmEmbedProvider = (document.getElementById('km-dkb-llm-embed-provider')||{}).value || '';
+    var llmEmbedModel = ((document.getElementById('km-dkb-llm-embed-model')||{}).value || '').trim();
+    if (!llmEmbedProvider) { alert('请选择 LLM Provider'); return; }
+    if (!llmEmbedModel)    { alert('请填写 Embedding Model 名称（该 provider 的模型 ID）'); return; }
+    // When LLM-embedding is on, override embed_model with the provider's model id.
+    embedModel = llmEmbedModel;
+  }
   if (!name.trim()) { alert('名称不能为空'); return; }
   try {
     await api('POST', '/api/portal/domain-kb/create', {
@@ -21615,6 +21690,7 @@ async function _kmSaveDomainKb() {
       tags: tags,
       provider_id: provider,
       embedding_model: embedModel,
+      embedding_provider_id: llmEmbedProvider,
       reranker_model: rerankerModel,
     });
     var m = document.getElementById('km-dkb-modal'); if(m) m.remove();

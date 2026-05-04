@@ -161,6 +161,15 @@ class DomainKnowledgeBase:
     # so it should be locked at creation. ALLOWED_EMBEDDING_MODELS in
     # the API layer enforces a known-good allow-list.
     embedding_model: str = ""
+    # Optional: route embedding through an existing LLM provider's
+    # /v1/embeddings endpoint instead of the local sentence-transformers
+    # path. When set, ``embedding_model`` is interpreted as the model id
+    # at THAT provider (e.g. "text-embedding-3-small" at openai,
+    # "nomic-embed-text" at ollama, "embedding-2" at glm). When empty,
+    # the existing local path runs unchanged.
+    # The actual embedding endpoint URL + auth come from
+    # ``llm.providers.json`` looked up by id at ingest/search time.
+    embedding_provider_id: str = ""
     # Per-KB cross-encoder reranker. Empty = no reranking (vector search
     # results returned as-is). Set to e.g. "BAAI/bge-reranker-v2-m3" to
     # post-process vector candidates: chromadb returns top_k*4, the
@@ -178,6 +187,7 @@ class DomainKnowledgeBase:
             "id": self.id, "name": self.name, "description": self.description,
             "collection": self.collection, "provider_id": self.provider_id,
             "embedding_model": self.embedding_model,
+            "embedding_provider_id": self.embedding_provider_id,
             "reranker_model": self.reranker_model,
             "tags": self.tags, "doc_count": self.doc_count,
             "created_at": self.created_at, "updated_at": self.updated_at,
@@ -192,6 +202,7 @@ class DomainKnowledgeBase:
             collection=d.get("collection", ""),
             provider_id=d.get("provider_id", ""),
             embedding_model=d.get("embedding_model", ""),
+            embedding_provider_id=d.get("embedding_provider_id", ""),
             reranker_model=d.get("reranker_model", ""),
             tags=d.get("tags", []),
             doc_count=d.get("doc_count", 0),
@@ -235,13 +246,15 @@ class DomainKBStore:
     def create(self, name: str, description: str = "", provider_id: str = "",
                tags: list[str] | None = None,
                embedding_model: str = "",
-               reranker_model: str = "") -> DomainKnowledgeBase:
+               reranker_model: str = "",
+               embedding_provider_id: str = "") -> DomainKnowledgeBase:
         kb_id = f"dkb_{uuid.uuid4().hex[:10]}"
         collection = f"domain_{kb_id}"
         kb = DomainKnowledgeBase(
             id=kb_id, name=name, description=description,
             collection=collection, provider_id=provider_id,
             embedding_model=(embedding_model or "").strip(),
+            embedding_provider_id=(embedding_provider_id or "").strip(),
             reranker_model=(reranker_model or "").strip(),
             tags=tags or [],
         )
@@ -258,7 +271,8 @@ class DomainKBStore:
                description: str | None = None,
                tags: list[str] | None = None,
                embedding_model: str | None = None,
-               reranker_model: str | None = None) -> DomainKnowledgeBase | None:
+               reranker_model: str | None = None,
+               embedding_provider_id: str | None = None) -> DomainKnowledgeBase | None:
         """Update one or more KB fields.
 
         ``embedding_model`` and ``reranker_model`` were missing from
@@ -280,6 +294,8 @@ class DomainKBStore:
             kb.embedding_model = embedding_model
         if reranker_model is not None:
             kb.reranker_model = reranker_model
+        if embedding_provider_id is not None:
+            kb.embedding_provider_id = embedding_provider_id
         kb.updated_at = time.time()
         self._save()
         return kb
@@ -546,6 +562,77 @@ class RAGProviderRegistry:
             pass
         return None
 
+    def _resolve_kb_llm_embedding(self, collection: str) -> tuple[str, str] | None:
+        """If the KB bound to ``collection`` routes embedding through an
+        existing LLM provider (``embedding_provider_id`` set), return
+        ``(provider_id, model_id)``. Otherwise None — caller falls
+        back to the local sentence-transformers path.
+        """
+        if not collection or not collection.startswith("domain_"):
+            return None
+        try:
+            store = get_domain_kb_store()
+            kb_id = collection[len("domain_"):]
+            kb = store.get(kb_id)
+            if kb and kb.embedding_provider_id and kb.embedding_model:
+                return (kb.embedding_provider_id, kb.embedding_model)
+        except Exception:
+            pass
+        return None
+
+    def _embed_via_llm_provider(
+        self, llm_provider_id: str, model: str, texts: list[str],
+    ) -> list[list[float]] | None:
+        """Call an LLM provider's ``/v1/embeddings`` endpoint.
+
+        Looks up the LLM provider by id (from ``app.llm`` registry),
+        builds an ad-hoc OpenAI-compat ``RAGProviderEntry``, hands it
+        to ``_embed_via_openai_compat``. Returns None on lookup
+        failure (caller decides whether to surface or fall back).
+        """
+        if not texts:
+            return []
+        try:
+            from .llm import get_provider as _get_llm_provider
+        except Exception:
+            logger.warning("LLM provider registry import failed")
+            return None
+        try:
+            llm = _get_llm_provider(llm_provider_id)
+        except Exception as e:
+            logger.warning("LLM provider %s lookup failed: %s",
+                           llm_provider_id, e)
+            return None
+        if not llm:
+            logger.warning("LLM provider %s not found", llm_provider_id)
+            return None
+        # Build a synthetic RAGProviderEntry that points at the LLM
+        # provider's base_url + api_key, with the embedding endpoint
+        # path conventionally "/v1/embeddings". Some providers (claude
+        # / google) don't speak this protocol — fall back gracefully.
+        base_url = (getattr(llm, "base_url", "") or "").strip()
+        api_key = (getattr(llm, "api_key", "") or "").strip()
+        if not base_url:
+            logger.warning("LLM provider %s has no base_url",
+                           llm_provider_id)
+            return None
+        synth = RAGProviderEntry(
+            id=f"_llm_{llm_provider_id}",
+            name=getattr(llm, "name", llm_provider_id),
+            kind="openai_embedding",
+            base_url=base_url,
+            api_key=api_key,
+            config={"model": model},
+        )
+        try:
+            return self._embed_via_openai_compat(synth, texts)
+        except Exception as e:
+            logger.warning(
+                "Embedding via LLM provider %s/%s failed: %s",
+                llm_provider_id, model, e,
+            )
+            return None
+
     def _resolve_kb_reranker_model(self, collection: str) -> str | None:
         """Same lookup as _resolve_kb_embed_model but for the reranker.
         Returns None when the KB hasn't opted into reranking — caller
@@ -608,6 +695,11 @@ class RAGProviderRegistry:
         raw vector ranking — hybrid does its OWN rerank pass after
         RRF fusion so the cross-encoder sees the merged candidate
         list (vector + BM25), not just the vector half.
+
+        Embedding source:
+          • If KB has ``embedding_provider_id`` set → query embedding
+            comes from that LLM provider's /v1/embeddings endpoint
+          • Otherwise → chroma's built-in (sentence-transformers / bge-m3)
         """
         mm = self._get_memory_manager()
         if not mm:
@@ -621,7 +713,23 @@ class RAGProviderRegistry:
             coll = mm._get_chroma_collection(collection, model_name=self._resolve_kb_embed_model(collection))
             if coll.count() == 0:
                 return []
-            results = coll.query(query_texts=[query], n_results=fetch_n)
+            # If KB binds to an LLM provider, embed query via that endpoint
+            # and pass the precomputed vector to chroma (bypasses chroma's
+            # built-in embedding function entirely).
+            llm_emb = self._resolve_kb_llm_embedding(collection)
+            if llm_emb is not None:
+                vec = self._embed_via_llm_provider(llm_emb[0], llm_emb[1], [query])
+                if vec and len(vec) == 1:
+                    results = coll.query(query_embeddings=vec, n_results=fetch_n)
+                else:
+                    logger.warning(
+                        "LLM provider embedding failed for query — "
+                        "collection=%s falling back to chroma default",
+                        collection,
+                    )
+                    results = coll.query(query_texts=[query], n_results=fetch_n)
+            else:
+                results = coll.query(query_texts=[query], n_results=fetch_n)
             items = []
             if results and results.get("ids") and results["ids"][0]:
                 for i, doc_id in enumerate(results["ids"][0]):
@@ -663,6 +771,12 @@ class RAGProviderRegistry:
         count = 0
         try:
             coll = mm._get_chroma_collection(collection, model_name=self._resolve_kb_embed_model(collection))
+
+            # ── If this KB binds embedding to an LLM provider,
+            # we'll batch-embed via that endpoint and pass the
+            # vectors to coll.upsert explicitly. Detect once up
+            # front so we don't pay the lookup per document.
+            llm_emb = self._resolve_kb_llm_embedding(collection)
 
             # Collect content_hashes already in the collection so we
             # can skip duplicates. ChromaDB's `where` filter handles
@@ -728,8 +842,25 @@ class RAGProviderRegistry:
                 # Boolean flag — ChromaDB accepts bool natively.
                 if doc.get("is_image"):
                     metadata["is_image"] = True
-                coll.upsert(ids=[doc_id], documents=[text],
-                            metadatas=[metadata])
+                if llm_emb is not None:
+                    # Embed via LLM provider — bypass chroma's default
+                    # embedding function. If the call fails, skip this
+                    # doc rather than poison the index with random / zero
+                    # vectors that would make retrieval useless.
+                    vec = self._embed_via_llm_provider(
+                        llm_emb[0], llm_emb[1], [text],
+                    )
+                    if not vec or len(vec) != 1:
+                        logger.warning(
+                            "LLM provider embedding failed — skipping "
+                            "doc %s (collection=%s)", doc_id, collection,
+                        )
+                        continue
+                    coll.upsert(ids=[doc_id], documents=[text],
+                                metadatas=[metadata], embeddings=vec)
+                else:
+                    coll.upsert(ids=[doc_id], documents=[text],
+                                metadatas=[metadata])
                 if content_hash:
                     existing_hashes.add(content_hash)
                 count += 1
@@ -1303,6 +1434,86 @@ class RAGProviderRegistry:
         if secret:
             headers["X-Claw-Secret"] = secret
         return headers
+
+    # ─── OpenAI-compatible embedding helper ──────────────────────────────
+    #
+    # Generic adapter for any embedding endpoint that speaks the OpenAI
+    # ``/v1/embeddings`` shape: ollama, openai, 智谱, deepseek, 阿里通
+    # 义, vLLM, FastChat, LocalAI, etc. — all converge on this protocol.
+    #
+    # When a KB binds to a provider with kind == "openai_embedding",
+    # ingest computes vectors via this helper, then writes them to
+    # local ChromaDB via ``coll.upsert(embeddings=...)``. Search does
+    # the same for the query. ChromaDB's internal embedding function
+    # (sentence-transformers) is bypassed entirely.
+    #
+    # Provider config shape (stored in ``RAGProviderEntry.config``):
+    #   {
+    #     "endpoint":       "/v1/embeddings",   # path under base_url, optional
+    #     "model":          "<server-side model id>",   # required
+    #     "batch_size":     32,                 # max texts per request
+    #     "timeout":        60,
+    #   }
+    def _embed_via_openai_compat(
+        self, provider: "RAGProviderEntry", texts: list[str],
+    ) -> list[list[float]]:
+        """POST texts to an OpenAI-compatible ``/v1/embeddings`` endpoint.
+
+        Returns the list of vectors in the same order as ``texts``.
+        Raises on any HTTP / parsing failure — caller must decide
+        whether to surface or fall back, since we don't want to
+        silently store zero-vectors that would later poison retrieval.
+        """
+        if not texts:
+            return []
+        cfg = provider.config or {}
+        endpoint = (cfg.get("endpoint") or "/v1/embeddings").strip()
+        if not endpoint.startswith("/"):
+            endpoint = "/" + endpoint
+        model = (cfg.get("model") or "").strip()
+        if not model:
+            raise ValueError(
+                f"openai_embedding provider {provider.id} has no model "
+                f"in config — set config.model to the server-side embedding "
+                f"model id (e.g. 'text-embedding-3-small', 'nomic-embed-text', "
+                f"'bge-m3', whatever the endpoint expects).",
+            )
+        batch_size = max(1, int(cfg.get("batch_size") or 32))
+        timeout = float(cfg.get("timeout") or 60)
+        url = f"{provider.base_url.rstrip('/')}{endpoint}"
+        headers = {"Content-Type": "application/json"}
+        if provider.api_key:
+            headers["Authorization"] = f"Bearer {provider.api_key}"
+
+        out: list[list[float]] = []
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+            payload = {"model": model, "input": batch}
+            resp = http_requests.post(
+                url, json=payload, headers=headers, timeout=timeout,
+            )
+            if resp.status_code != 200:
+                raise RuntimeError(
+                    f"embedding endpoint {url} returned "
+                    f"{resp.status_code}: {resp.text[:200]}",
+                )
+            data = resp.json()
+            # OpenAI shape: {"data": [{"embedding": [...]}, ...]}
+            entries = data.get("data") or []
+            if len(entries) != len(batch):
+                raise RuntimeError(
+                    f"embedding endpoint returned {len(entries)} vectors "
+                    f"for {len(batch)} inputs (mismatch)",
+                )
+            for e in entries:
+                vec = e.get("embedding")
+                if not isinstance(vec, list) or not vec:
+                    raise RuntimeError(
+                        f"embedding endpoint returned malformed vector: "
+                        f"{str(e)[:200]}",
+                    )
+                out.append([float(x) for x in vec])
+        return out
 
     def _search_remote(self, provider: RAGProviderEntry, collection: str,
                        query: str, top_k: int = 5) -> list[RAGResult]:
