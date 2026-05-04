@@ -646,13 +646,36 @@ async def search_domain_knowledge_base(
     hub=Depends(get_hub),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Search a domain knowledge base."""
+    """Search a domain knowledge base.
+
+    Body:
+      • ``kb_id``         (required) — target knowledge base
+      • ``query``         (required) — natural-language query
+      • ``top_k``         default 5  — max results to return
+      • ``max_distance``  default 1.0 (no filter) — drop results
+        whose vector distance exceeds this. With bge-m3 + cosine,
+        empirical thresholds (verified 2026-05-04 on docs/ corpus):
+          - relevant queries:   distance ≈ 0.30 - 0.55
+          - irrelevant queries: distance ≈ 0.75 - 0.85
+        So ``max_distance: 0.65`` is a reasonable cutoff to filter
+        out garbage matches on noisy queries.
+      • ``min_rerank_score`` default null — when a reranker is
+        configured, drop results below this cross-encoder score
+        (typical: keep > 0.0).
+
+    Returns: ``{"results": [...], "filtered_count": N}`` — N is the
+    number of raw results dropped by max_distance / min_rerank_score
+    so callers can detect "noisy query → no useful hits".
+    """
     try:
         from ...rag_provider import get_domain_kb_store, get_rag_registry
         store = get_domain_kb_store()
         kb_id = body.get("kb_id", "")
         query = body.get("query", "")
         top_k = int(body.get("top_k", 5))
+        max_distance = float(body.get("max_distance", 1.0))
+        min_rerank_raw = body.get("min_rerank_score")
+        min_rerank = float(min_rerank_raw) if min_rerank_raw is not None else None
         if not kb_id or not query:
             raise HTTPException(400, "Missing kb_id or query")
         kb = store.get(kb_id)
@@ -669,11 +692,25 @@ async def search_domain_knowledge_base(
                 results = reg.search(kb.provider_id, kb.collection, query, top_k)
         else:
             results = reg.search(kb.provider_id, kb.collection, query, top_k)
-        return {"results": [r.to_dict() for r in results]}
+        # Threshold filtering — done AFTER retrieval so callers can
+        # see how many got dropped (signal for "noisy query").
+        before = len(results)
+        if max_distance < 1.0:
+            results = [r for r in results if (r.distance or 0) <= max_distance]
+        if min_rerank is not None:
+            def _rerank_ok(r):
+                rs = (r.metadata or {}).get("rerank_score")
+                return rs is None or rs >= min_rerank
+            results = [r for r in results if _rerank_ok(r)]
+        filtered_count = before - len(results)
+        return {
+            "results": [r.to_dict() for r in results],
+            "filtered_count": filtered_count,
+        }
     except HTTPException:
         raise
     except ImportError:
-        return {"results": []}
+        return {"results": [], "filtered_count": 0}
     except HTTPException:
         raise
     except Exception as e:
@@ -686,16 +723,48 @@ async def update_domain_knowledge_base(
     hub=Depends(get_hub),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Update a domain knowledge base metadata."""
+    """Update a domain knowledge base metadata.
+
+    Accepts: ``name`` / ``description`` / ``tags`` /
+    ``embedding_model`` / ``reranker_model``. Only fields present
+    in the body are touched. Pass ``""`` to clear a model field
+    back to the server default.
+
+    Notes on switching models:
+      • ``embedding_model``: switching invalidates the existing
+        ingested chunks (different vector space). Recommend
+        re-ingest after changing this.
+      • ``reranker_model``: pure inference-time, no re-ingest
+        required. Empty string disables reranking entirely.
+    """
     try:
         from ...rag_provider import get_domain_kb_store
         store = get_domain_kb_store()
         kb_id = body.get("id", "")
+        # Validate model ids against the curated lists (same gate as create)
+        embedding_model = body.get("embedding_model")
+        if embedding_model is not None and embedding_model:
+            if embedding_model not in _allowed_model_ids():
+                raise HTTPException(
+                    400,
+                    f"embedding_model not allowed: {embedding_model!r}. "
+                    f"GET /domain-kb/embedding-models for catalog.",
+                )
+        reranker_model = body.get("reranker_model")
+        if reranker_model is not None and reranker_model:
+            if reranker_model not in _allowed_reranker_ids():
+                raise HTTPException(
+                    400,
+                    f"reranker_model not allowed: {reranker_model!r}. "
+                    f"GET /domain-kb/reranker-models for catalog.",
+                )
         kb = store.update(
             kb_id,
             name=body.get("name"),
             description=body.get("description"),
             tags=body.get("tags"),
+            embedding_model=embedding_model,
+            reranker_model=reranker_model,
         )
         if kb:
             return kb.to_dict()

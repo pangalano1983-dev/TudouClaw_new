@@ -256,7 +256,17 @@ class DomainKBStore:
 
     def update(self, kb_id: str, name: str | None = None,
                description: str | None = None,
-               tags: list[str] | None = None) -> DomainKnowledgeBase | None:
+               tags: list[str] | None = None,
+               embedding_model: str | None = None,
+               reranker_model: str | None = None) -> DomainKnowledgeBase | None:
+        """Update one or more KB fields.
+
+        ``embedding_model`` and ``reranker_model`` were missing from
+        the original signature, so the only way to enable a reranker
+        was to delete + recreate the KB (which loses ingested data).
+        Now passing either keyword updates the field; ``""`` clears
+        it back to the server-side default.
+        """
         kb = self._kbs.get(kb_id)
         if not kb:
             return None
@@ -266,6 +276,10 @@ class DomainKBStore:
             kb.description = description
         if tags is not None:
             kb.tags = tags
+        if embedding_model is not None:
+            kb.embedding_model = embedding_model
+        if reranker_model is not None:
+            kb.reranker_model = reranker_model
         kb.updated_at = time.time()
         self._save()
         return kb
