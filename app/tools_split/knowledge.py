@@ -563,7 +563,9 @@ _KB_LIST_LIMIT = 200
 
 
 def _kb_aggregate(mode: str, query: str, rag_mode: str,
-                  agent_profile: Any, agent_id: str) -> str:
+                  agent_profile: Any, agent_id: str,
+                  source_file: str = "",
+                  heading_pattern: str = "") -> str:
     """Pack v3 — run count / list across every domain KB bound to this
     agent + (for shared/both) the global 'knowledge' collection.
 
@@ -646,6 +648,54 @@ def _kb_aggregate(mode: str, query: str, rag_mode: str,
             ),
         }, ensure_ascii=False, indent=2)
 
+    if mode == "outline":
+        # Per-file structural outline — for "how many sections / test
+        # cases / chapters per document" questions. Uses heading_paths
+        # captured at chunk time (no model call, no embedding).
+        per_kb_outlines = []
+        grand_total_files = 0
+        for pid, coll, label in targets:
+            try:
+                outline = reg.kb_outline(
+                    pid, coll,
+                    source_file=source_file,
+                    heading_pattern=heading_pattern,
+                )
+            except Exception as e:
+                logger.warning("kb_outline failed for %s: %s", label, e)
+                continue
+            outline["kb"] = label
+            outline["collection"] = coll
+            per_kb_outlines.append(outline)
+            grand_total_files += outline.get("total_files", 0)
+        return json.dumps({
+            "status": "success",
+            "mode": "outline",
+            "source_file_filter": source_file or "",
+            "heading_pattern": heading_pattern or "",
+            "grand_total_files": grand_total_files,
+            "per_kb": per_kb_outlines,
+            "usage_guidance": (
+                "Each `headings` row is a UNIQUE heading_path with a "
+                "`chunks` count of how many chunks fall under it. "
+                "Counting test cases / sections per document: \n"
+                " (a) Look at heading_path patterns ('3.1.1 Objective', "
+                "'4.2 Procedure' etc.).\n"
+                " (b) Use `heading_pattern` regex to count only those "
+                "matching your structural marker. For example: \n"
+                "       heading_pattern='Objective' → counts all "
+                "'Objective' subsections per file.\n"
+                "       heading_pattern=r'^\\d+\\.\\d+\\.\\d+' → counts "
+                "third-level numbered sections (typical 'one test case "
+                "= one numbered subsection') format.\n"
+                " (c) `matched_headings` per file is the answer to "
+                "\"how many test cases in this doc?\" given that "
+                "regex.\n"
+                "Drill into one file: pass source_file=\"DataArts...\""
+                " (substring match)."
+            ),
+        }, ensure_ascii=False, indent=2)
+
     # mode == "list"
     per_kb_lists = []
     for pid, coll, label in targets:
@@ -691,12 +741,25 @@ def _tool_knowledge_lookup(query: str = "", entry_id: str = "",
     Modes (Pack v3):
       - mode="search" (default): top-k vector+BM25 retrieval with content.
         Use for normal questions that can be answered from a few chunks.
+        Response now includes a ``coverage`` sidecar showing per-file
+        chunk distribution + KB-wide totals — use it to detect "answer
+        spans many docs, need to widen".
       - mode="count": programmatic scan of ALL chunks in the collection,
         grouped by source_file. Use for aggregate queries ("how many?",
         "总数", "有多少个"). Optional ``query`` filters by substring
-        match in title/heading_path/source_file/content.
+        match. Response carries TWO breakdowns: ``by_source_file``
+        (filter applied) and ``by_source_file_full`` (whole KB) — when
+        filter zero-matches with cross-language input, the _full one
+        still reveals KB structure.
       - mode="list": flat list of chunks' metadata (no content). Use
         when user wants a table of contents / inventory listing.
+      - mode="outline": per-file STRUCTURAL outline — unique heading_paths
+        with chunk counts, optionally filtered by ``source_file``
+        (substring) and / or ``heading_pattern`` (regex). Use when user
+        wants "how many sections / test cases / chapters per document".
+        Example: ``mode="outline", heading_pattern="Objective"`` returns
+        per-file count of "Objective" sections — typical proxy for "test
+        cases per doc". Bypasses retrieval; cheap (metadata-only).
 
     If entry_id is provided, returns that entry's full content from
     shared KB. Otherwise searches / counts / lists by query using the
@@ -772,10 +835,11 @@ def _knowledge_lookup_impl(query: str = "", entry_id: str = "",
             })
 
         mode = (mode or "search").lower().strip()
-        if mode not in ("search", "count", "list"):
+        if mode not in ("search", "count", "list", "outline"):
             return json.dumps({
                 "status": "error",
-                "message": f"Unknown mode '{mode}'. Use search | count | list.",
+                "message": f"Unknown mode '{mode}'. "
+                           f"Use search | count | list | outline.",
             })
 
         # search mode requires query; count / list allow empty query
@@ -799,10 +863,16 @@ def _knowledge_lookup_impl(query: str = "", entry_id: str = "",
                 "message": "RAG is disabled for this agent (rag_mode=none)"
             })
 
-        # --- Pack v3: count / list modes bypass top-k entirely. ---
-        if mode in ("count", "list"):
-            return _kb_aggregate(mode, query, rag_mode, agent_profile,
-                                 agent_id)
+        # --- Pack v3: count / list / outline modes bypass top-k entirely. ---
+        if mode in ("count", "list", "outline"):
+            # Outline mode passes its own kwargs (source_file, heading_pattern)
+            # via the **kw bag that the top-level wrapper hands us — pull
+            # them out so _kb_aggregate doesn't have to dig.
+            return _kb_aggregate(
+                mode, query, rag_mode, agent_profile, agent_id,
+                source_file=str(kw.get("source_file") or ""),
+                heading_pattern=str(kw.get("heading_pattern") or ""),
+            )
 
         results_combined = []
 

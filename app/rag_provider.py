@@ -1144,6 +1144,114 @@ class RAGProviderRegistry:
             "filter": query or "",
         }
 
+    def kb_outline(self, provider_id: str, collection: str,
+                   source_file: str = "",
+                   heading_pattern: str = "",
+                   max_files: int = 100,
+                   max_headings_per_file: int = 200) -> dict:
+        """Return per-file structural outline (deduped heading_paths).
+
+        Filling the gap between top-k retrieval and full document parse:
+        gives the LLM a STRUCTURE map of each file in the KB so it can
+        count "test cases / sections / chapters" without hallucinating.
+
+        Returned shape::
+
+            {
+              "files": [
+                {
+                  "source_file": "DataArts Studio 2.11.1.3 Acceptance Test Guide.docx",
+                  "total_chunks": 343,
+                  "unique_headings": 87,
+                  "headings": [
+                    {"heading_path": "1. Introduction", "chunks": 2},
+                    {"heading_path": "3.1 Workspace Test", "chunks": 4},
+                    {"heading_path": "3.1.1 Objective", "chunks": 1},
+                    ...
+                  ],
+                  "matched_headings": 41   // count after applying heading_pattern
+                },
+                ...
+              ],
+              "total_files": 56,
+              "total_files_returned": 56,
+              "heading_pattern": ""
+            }
+
+        Args:
+          source_file:      restrict to one file (substring match, optional)
+          heading_pattern:  regex applied to heading_path; only counts matching
+                            (e.g. ``r"^\\d+\\.\\d+\\.\\d+"`` to count
+                            third-level numbered sections like "3.1.1 Objective")
+          max_files:        cap files in response (default 100)
+          max_headings_per_file: cap heading list per file (default 200)
+        """
+        import re
+        self._ensure_loaded()
+        if provider_id and provider_id != "local":
+            return {"files": [], "total_files": 0,
+                    "note": "kb_outline only supported for local provider"}
+        mm = self._get_memory_manager()
+        if not mm:
+            return {"files": [], "total_files": 0}
+        try:
+            coll = mm._get_chroma_collection(
+                collection, model_name=self._resolve_kb_embed_model(collection),
+            )
+            probe = coll.get(include=["metadatas"])
+        except Exception as e:
+            logger.debug("kb_outline get failed: %s", e)
+            return {"files": [], "total_files": 0}
+
+        metas = probe.get("metadatas") or []
+        sf_filter = (source_file or "").strip().lower()
+        try:
+            pat = re.compile(heading_pattern) if heading_pattern else None
+        except re.error:
+            pat = None  # bad pattern → silently treat as no pattern
+
+        # source_file → { heading_path → chunk_count }
+        per_file: dict[str, dict[str, int]] = {}
+        per_file_total: dict[str, int] = {}
+        for m in metas:
+            if not isinstance(m, dict):
+                continue
+            src = str(m.get("source_file") or "(unknown)")
+            if sf_filter and sf_filter not in src.lower():
+                continue
+            heading = str(m.get("heading_path") or "(no-heading)")
+            per_file_total[src] = per_file_total.get(src, 0) + 1
+            buckets = per_file.setdefault(src, {})
+            buckets[heading] = buckets.get(heading, 0) + 1
+
+        files_out = []
+        for src in sorted(per_file.keys(),
+                          key=lambda s: -per_file_total.get(s, 0))[:max_files]:
+            buckets = per_file[src]
+            heading_list = [
+                {"heading_path": h, "chunks": c}
+                for h, c in sorted(buckets.items(), key=lambda x: -x[1])
+            ]
+            matched = sum(
+                1 for h in buckets if pat and pat.search(h)
+            ) if pat else None
+            files_out.append({
+                "source_file": src,
+                "total_chunks": per_file_total[src],
+                "unique_headings": len(buckets),
+                "headings": heading_list[:max_headings_per_file],
+                "headings_truncated": len(heading_list) > max_headings_per_file,
+                **({"matched_headings": matched} if pat else {}),
+            })
+
+        return {
+            "files": files_out,
+            "total_files": len(per_file),
+            "total_files_returned": len(files_out),
+            "source_file_filter": source_file or "",
+            "heading_pattern": heading_pattern or "",
+        }
+
     def _create_local_collection(self, name: str, description: str = "") -> RAGCollection:
         mm = self._get_memory_manager()
         if mm:
