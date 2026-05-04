@@ -956,16 +956,42 @@ def _parse_file_bytes_to_text(raw: bytes, file_name: str) -> tuple[str, str]:
             import io as _io
             doc = docx.Document(_io.BytesIO(raw))
             parts = []
+            # Preserve heading STRUCTURE by emitting markdown ``#`` prefixes
+            # for paragraphs whose Word style is Heading N. The downstream
+            # ``_chunk_text_for_rag`` is heading-aware and uses these to
+            # set chunk metadata's ``heading_path`` — without this step,
+            # docx imports lose all section structure and queries like
+            # "how many test cases per service" can't aggregate by
+            # section. Falls back to plain text on any style/parse error.
             for para in doc.paragraphs:
-                if para.text.strip():
-                    parts.append(para.text)
+                txt = para.text.strip()
+                if not txt:
+                    continue
+                lvl = 0
+                try:
+                    style_name = (para.style.name or "").strip()
+                except Exception:
+                    style_name = ""
+                # python-docx exposes "Heading 1" .. "Heading 9" plus
+                # "Title" (treat as level 1) for the cover heading.
+                if style_name == "Title":
+                    lvl = 1
+                elif style_name.startswith("Heading "):
+                    try:
+                        lvl = max(1, min(6, int(style_name.split()[-1])))
+                    except (ValueError, IndexError):
+                        lvl = 0
+                if lvl > 0:
+                    parts.append(f"\n{'#' * lvl} {txt}\n")
+                else:
+                    parts.append(txt)
             for table in doc.tables:
                 for row in table.rows:
                     cells = [c.text.strip() for c in row.cells if c.text.strip()]
                     if cells:
                         parts.append(" | ".join(cells))
             text = "\n\n".join(parts)
-            method = "python-docx"
+            method = "python-docx-headings"
         except Exception:
             text = raw.decode("utf-8", errors="replace")
             method = "raw_decode"
@@ -1770,16 +1796,36 @@ async def parse_file_for_rag(
                 import io
                 doc = docx.Document(io.BytesIO(raw))
                 parts = []
+                # Mirror the import-files docx parser — emit markdown
+                # heading prefixes for paragraphs styled Heading 1..9 /
+                # Title so the chunker can preserve heading_path metadata.
                 for para in doc.paragraphs:
-                    if para.text.strip():
-                        parts.append(para.text)
+                    txt = para.text.strip()
+                    if not txt:
+                        continue
+                    lvl = 0
+                    try:
+                        style_name = (para.style.name or "").strip()
+                    except Exception:
+                        style_name = ""
+                    if style_name == "Title":
+                        lvl = 1
+                    elif style_name.startswith("Heading "):
+                        try:
+                            lvl = max(1, min(6, int(style_name.split()[-1])))
+                        except (ValueError, IndexError):
+                            lvl = 0
+                    if lvl > 0:
+                        parts.append(f"\n{'#' * lvl} {txt}\n")
+                    else:
+                        parts.append(txt)
                 for table in doc.tables:
                     for row in table.rows:
                         cells = [c.text.strip() for c in row.cells if c.text.strip()]
                         if cells:
                             parts.append(" | ".join(cells))
                 text = "\n\n".join(parts)
-                method = "python-docx"
+                method = "python-docx-headings"
             except Exception:
                 text = raw.decode("utf-8", errors="replace")
                 method = "raw_decode"
