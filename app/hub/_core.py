@@ -668,13 +668,50 @@ class Hub:
                 except Exception as _ne:
                     logger.debug("watchdog check_health failed: %s", _ne)
 
-                # Also age out remote_nodes table (hub.py-local)
+                # Also age out remote_nodes table (hub.py-local).
+                # Two thresholds:
+                #   • >2× heartbeat_timeout (~120s default) → mark stale
+                #     and log ONCE (not every tick — that just spams).
+                #   • >1 hour                              → auto-unregister.
+                #     A node missing for an hour is almost certainly
+                #     dead; keeping its entry breaks find_agent_node
+                #     and stuffs the UI with phantom rows.
                 try:
                     now = time.time()
+                    stale_cutoff = self._heartbeat_timeout * 2
+                    autoremove_cutoff = 3600.0  # 1 hour
+                    if not hasattr(self, "_stale_warned"):
+                        self._stale_warned = set()
+                    to_remove = []
                     for rn in list(self.remote_nodes.values()):
-                        if now - rn.last_seen > self._heartbeat_timeout * 2:
-                            logger.info("Remote node %s last_seen %.0fs ago — flagging stale",
-                                        rn.node_id, now - rn.last_seen)
+                        age = now - rn.last_seen
+                        if age > autoremove_cutoff:
+                            to_remove.append(rn.node_id)
+                        elif age > stale_cutoff and rn.node_id not in self._stale_warned:
+                            logger.info("Remote node %s last_seen %.0fs ago — marking stale (will auto-remove after %.0fs)",
+                                        rn.node_id, age, autoremove_cutoff)
+                            try:
+                                rn.status = "stale"
+                            except Exception:
+                                pass
+                            self._stale_warned.add(rn.node_id)
+                        elif age <= stale_cutoff and rn.node_id in self._stale_warned:
+                            # Recovered — clear the warning flag so a
+                            # future stale event logs again.
+                            self._stale_warned.discard(rn.node_id)
+                    for nid in to_remove:
+                        try:
+                            self.remote_nodes.pop(nid, None)
+                            self._stale_warned.discard(nid)
+                            logger.warning("Remote node %s auto-removed (stale > %.0fs)",
+                                           nid, autoremove_cutoff)
+                        except Exception:
+                            pass
+                    if to_remove:
+                        try:
+                            self._save_remote_nodes()
+                        except Exception:
+                            pass
                 except Exception:
                     pass
                 # ── Workflow scheduler tick (P2 #4) ──

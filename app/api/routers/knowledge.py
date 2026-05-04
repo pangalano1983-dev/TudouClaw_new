@@ -682,16 +682,24 @@ async def search_domain_knowledge_base(
         if not kb:
             raise HTTPException(404, "knowledge base not found")
         # RAG v1-B: prefer hybrid (BM25 + vector + RRF) when available.
+        # Both code paths involve sync embedding (bge-m3.encode) which
+        # would block the asyncio event loop — push to threadpool.
+        from starlette.concurrency import run_in_threadpool
         reg = get_rag_registry()
         if hasattr(reg, "hybrid_search"):
             try:
-                results = reg.hybrid_search(
-                    kb.provider_id, kb.collection, query, top_k=top_k
+                results = await run_in_threadpool(
+                    reg.hybrid_search,
+                    kb.provider_id, kb.collection, query, top_k,
                 )
             except Exception:
-                results = reg.search(kb.provider_id, kb.collection, query, top_k)
+                results = await run_in_threadpool(
+                    reg.search, kb.provider_id, kb.collection, query, top_k,
+                )
         else:
-            results = reg.search(kb.provider_id, kb.collection, query, top_k)
+            results = await run_in_threadpool(
+                reg.search, kb.provider_id, kb.collection, query, top_k,
+            )
         # Threshold filtering — done AFTER retrieval so callers can
         # see how many got dropped (signal for "noisy query").
         before = len(results)
@@ -1273,8 +1281,20 @@ async def import_files_into_domain_kb(
                 seen_hashes.add(h)
             deduped.append(c)
 
-        ingest_count = get_rag_registry().ingest(
-            kb.provider_id, kb.collection, deduped,
+        # ── Run ingest in a thread pool ─────────────────────────────────
+        # bge-m3.encode() is sync CPU-heavy (10s+ for 30 chunks on CPU,
+        # longer on first call when the model loads to RAM). Calling it
+        # directly from this async route blocks the asyncio event loop
+        # — every other HTTP request stalls until ingest finishes.
+        # Symptom (reproduced 2026-05-04): user uploads 56 files,
+        # browser tab freezes for minutes, the portal becomes
+        # unreachable, "卡死" complaints in logs.
+        # ``run_in_threadpool`` runs the sync call on a worker thread so
+        # the event loop keeps serving other requests.
+        from starlette.concurrency import run_in_threadpool
+        reg = get_rag_registry()
+        ingest_count = await run_in_threadpool(
+            reg.ingest, kb.provider_id, kb.collection, deduped,
         )
         store.increment_doc_count(kb_id, len(deduped))
 
