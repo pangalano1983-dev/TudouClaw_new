@@ -3176,23 +3176,63 @@ class Hub:
 
     def orchestrate(self, task: str,
                     agent_ids: list[str] | None = None) -> dict:
-        targets = agent_ids or list(self.agents.keys())
-        results = {}
+        """Run ``task`` on N agents in parallel, return per-agent results.
+
+        Multi-node aware: each ``agent_id`` is resolved against:
+          1. ``self.agents`` (local) — runs via ``supervisor.delegate``
+          2. ``self.remote_nodes[*].agents`` — runs via
+             ``proxy_chat_sync`` over X-Hub-Secret to that worker
+          3. unknown → result string mentions "agent not found"
+
+        ``agent_ids=None`` defaults to LOCAL agents only (preserves
+        the single-master invariant — admin operators don't get
+        spammed across the cluster by accident; they have to opt in).
+        """
+        if agent_ids is None:
+            targets = list(self.agents.keys())
+        else:
+            targets = list(agent_ids)
+        results: dict[str, str] = {}
         threads = []
+        results_lock = threading.Lock()
 
         def _work(aid: str):
-            if aid in self.agents:
-                results[aid] = self.supervisor.delegate(
-                    aid, task, from_agent="orchestrator")
+            try:
+                # Local first — fastest path, preserves all state.
+                if aid in self.agents:
+                    out = self.supervisor.delegate(
+                        aid, task, from_agent="orchestrator")
+                    with results_lock:
+                        results[aid] = out
+                    return
+
+                # Remote — find which node hosts this agent.
+                if hasattr(self, "find_agent_node"):
+                    node = self.find_agent_node(aid)
+                    if node and node.url:
+                        try:
+                            out = self.proxy_chat_sync(aid, node, task)
+                            with results_lock:
+                                results[aid] = out
+                            return
+                        except Exception as e:
+                            with results_lock:
+                                results[aid] = f"<remote error on {node.node_id}: {e}>"
+                            return
+
+                with results_lock:
+                    results[aid] = "<agent not found on any node>"
+            except Exception as e:
+                logger.exception("orchestrate worker failed for %s", aid)
+                with results_lock:
+                    results[aid] = f"<error: {e}>"
 
         for aid in targets:
-            t = threading.Thread(target=_work, args=(aid,))
+            t = threading.Thread(target=_work, args=(aid,), name=f"orch-{aid[:8]}")
             t.start()
             threads.append(t)
-
         for t in threads:
             t.join(timeout=300)
-
         return results
 
     # ---- Workflow orchestration ----
