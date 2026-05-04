@@ -9,9 +9,7 @@
 var _ROBOT_PNG_IDS = new Set([
   'ceo','cto','coder','reviewer','researcher','architect','devops',
   'general','marketing','media','meeting','specialist','product_architect',
-  'pm','designer','tester','data',
-  // Reserved — image to be added next:
-  'tech_expert',
+  'pm','designer','tester','data','tech_expert',
 ]);
 
 // Accepts: 'robot_general' / 'general' / 'robot_general.png' / undefined.
@@ -12935,7 +12933,7 @@ function eaRenderExtraLlms() {
 // — when adding a new icon, also append the role id here so it shows
 // up in the create / edit modal's avatar grid.
 var _AVATAR_ROLES = [
-  'ceo','cto','coder','reviewer','researcher','architect','devops',
+  'ceo','cto','coder','tech_expert','reviewer','researcher','architect','devops',
   'product_architect','marketing','media','meeting','specialist',
   'pm','designer','tester','data',
   'general'

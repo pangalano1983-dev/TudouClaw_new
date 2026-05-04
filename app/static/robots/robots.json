@@ -145,6 +145,15 @@
       "role": "specialist"
     },
     {
+      "id": "tech_expert",
+      "name": "Tech Expert",
+      "title": "Senior Technical Specialist",
+      "description": "Pixel-art deep-knowledge specialist with technical reference book and glowing terminal — senior IC tech authority",
+      "filename": "robot_tech_expert.png",
+      "color": "#1E90FF",
+      "role": "specialist"
+    },
+    {
       "id": "general",
       "name": "General",
       "title": "Generic AI Agent",
