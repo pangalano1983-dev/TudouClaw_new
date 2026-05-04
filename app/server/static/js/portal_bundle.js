@@ -12927,7 +12927,16 @@ function eaRenderExtraLlms() {
 }
 
 // ── Robot Avatar picker ──────────────────────────────────
-var _AVATAR_ROLES = ['ceo','cto','coder','reviewer','researcher','architect','pm','designer','tester','devops','data','general'];
+// Order: PNG-backed roles first (richer pixel-art icons), then svg
+// fallbacks, then "general" as the closing default. Mirrors robots.json
+// — when adding a new icon, also append the role id here so it shows
+// up in the create / edit modal's avatar grid.
+var _AVATAR_ROLES = [
+  'ceo','cto','coder','reviewer','researcher','architect','devops',
+  'product_architect','marketing','media','meeting','specialist',
+  'pm','designer','tester','data',
+  'general'
+];
 window._caSelectedAvatar = '';
 window._eaSelectedAvatar = '';
 
