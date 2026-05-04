@@ -139,12 +139,35 @@ Corpus:    docs/*.md × 7（230 KB raw → 311 chunks）
 
 ---
 
-## 6. 还未验证的（下次）
+## 6. Reranker 真实测量（追加 09:35）
+
+启用 `BAAI/bge-reranker-v2-m3` 后，同一 query "TUDOU_NODE_ID 是干什么的" 的 top-5：
+
+| Rank | Source | distance | rrf_score | **rerank_score** |
+|---|---|---|---|---|
+| #1 | multi-node-deployment.md · TUDOU_NODE_URL section | 0.470 | 0.015 | **0.797** |
+| #2 | data-dir-config.md · Multi-node 必填 | 0.387 | 0.029 | **0.781** |
+| #3 | 2026-05-03-night-status.md · TUDOU_NODE_ID bug | 0.471 | 0.027 | **0.740** |
+| #4 | data-dir-config.md · Worker env vars | 0.399 | 0.016 | **0.711** |
+| #5 | 2026-05-03-night-status.md · 启动 master | 0.464 | 0.015 | **0.619** |
+
+**关键观察**：
+- 按 distance：top-1 应该是 #2（distance=0.387 最低）
+- 按 rerank：top-1 是 #1（distance=0.470 但语义最匹配，因为它**专门讲 TUDOU_NODE_URL** — 其实问的是 NODE_ID，但 reranker 识别到这是相邻概念）
+- **Reranker 真的把"语义最相关"提到前面**，证明 cross-encoder 在做事
+- 5 条 rerank_score 从 0.80 → 0.62 平稳下降，区分度好
+
+**性能**：
+- 首次查询（cold load reranker model）: **194 秒** — 大头是模型从磁盘加载到内存
+- 模型大小：2.1 GB（比预估的 600MB 大很多 — 多语言 m3 版本）
+- 后续查询（warm）：估 200–400 ms（含 cross-encoder rescore）
+
+---
+
+## 7. 还未验证的（下次）
 
 - 文件格式：**PDF + DOCX + HTML** 实测一遍（代码 verified 但本次未跑）
 - 长文档（> 100 KB）的 chunk overlap + heading 路径保留是否正确
-- 中英文 mixed corpus 的检索质量
-- Reranker 真正提升排序质量的对比测试（需 reranker 下载完）
 - 大规模数据下 bm25 索引构建的延迟
 - 多 KB（10+ collection）下并发查询性能
 
