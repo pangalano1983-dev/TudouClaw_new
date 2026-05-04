@@ -157,7 +157,8 @@ def _build_tool_call_state(agent, tool_name: str, current_query: str) -> str:
 
 
 def _check_turn_dedup(agent, tool_name: str, query: str,
-                       threshold: float = 0.45) -> str | None:
+                       threshold: float = 0.45,
+                       mode: str = "") -> str | None:
     """If ``query`` is >threshold similar to a prior query of the same
     tool in the current turn, return the cached result string (with a
     note prepended). Also enforces _MAX_SAME_TOOL_PER_TURN hard cap —
@@ -177,18 +178,43 @@ def _check_turn_dedup(agent, tool_name: str, query: str,
     bucket = cache.setdefault(tool_name, [])
 
     # Strict one-shot tools: memory_recall / knowledge_lookup must be
-    # called EXACTLY ONCE per turn. Second call always refuses regardless
-    # of query similarity — LLM must reuse first result or move on.
+    # called EXACTLY ONCE per turn — UNLESS the next call uses a
+    # genuinely different ``mode`` (search / count / list / outline).
+    # Different modes return structurally different data (top-k chunks
+    # vs whole-KB stats vs structural outline), so re-calling them is
+    # information-positive, not token-burning.
+    #
+    # We track which modes have been used this turn under a parallel
+    # cache key. If the new call's mode is one we haven't seen yet, it
+    # passes the one-shot gate (still subject to MAX_SAME_TOOL_PER_TURN
+    # hard cap below). Same-mode re-calls remain blocked.
     if tool_name in _STRICT_ONE_SHOT and len(bucket) >= 1:
-        prev_q, prev_result = bucket[0]
-        return (
-            f"[ONE_SHOT_VIOLATION — {tool_name} 本轮已调用 1 次,不允许再调]\n"
-            f"**规则**: memory_recall / knowledge_lookup 一轮只能调一次,"
-            f"第一次就必须用**最广的分词关键词**(把所有相关词拼在一起)。\n"
-            f"你第一次的查询是: {prev_q!r}\n"
-            f"如果当时没想全,只能基于已有结果继续;不要再调。\n\n"
-            f"--- 首次查询结果(必须复用) ---\n{prev_result}"
-        )
+        modes_seen = cache.setdefault("_modes_" + tool_name, set())
+        if mode and mode not in modes_seen:
+            # Different mode → allow. The mode gets registered AFTER the
+            # call succeeds so concurrent invokes don't slip through;
+            # _cache_turn_result will add it. For now we just don't reject.
+            pass
+        else:
+            prev_q, prev_result = bucket[0]
+            mode_hint = ""
+            if tool_name == "knowledge_lookup":
+                modes_left = ", ".join(sorted({"search","count","list","outline"} - modes_seen))
+                if modes_left:
+                    mode_hint = (
+                        f"\n💡 想再调一次?换不同的 ``mode`` "
+                        f"(已用 {sorted(modes_seen) or ['search']},还可以用 {modes_left})。"
+                        f"不同 mode 返回不同数据,不算重复。"
+                    )
+            return (
+                f"[ONE_SHOT_VIOLATION — {tool_name} 本轮已用 mode={mode!r} 调过]\n"
+                f"**规则**: 同一 mode 一轮只能调一次。同 mode 重复调用"
+                f"不会带来新数据,只会烧 token。\n"
+                f"你第一次的查询是: {prev_q!r}\n"
+                f"如果当时关键词没想全,只能基于已有结果继续;不要换近义词重试。"
+                f"{mode_hint}\n\n"
+                f"--- 首次查询结果(必须复用) ---\n{prev_result}"
+            )
 
     # Hard cap: other read-only tools called too many times this turn.
     if len(bucket) >= _MAX_SAME_TOOL_PER_TURN:
@@ -216,7 +242,8 @@ def _check_turn_dedup(agent, tool_name: str, query: str,
     return None
 
 
-def _cache_turn_result(agent, tool_name: str, query: str, result: str):
+def _cache_turn_result(agent, tool_name: str, query: str, result: str,
+                        mode: str = ""):
     """Record (query, result) in this turn's bucket."""
     if agent is None or not query:
         return
@@ -232,6 +259,11 @@ def _cache_turn_result(agent, tool_name: str, query: str, result: str):
     # Cap per-tool bucket to avoid unbounded growth
     if len(bucket) > 10:
         del bucket[:-10]
+    # Track which modes have been used this turn — enables "same tool,
+    # different mode" to bypass the one-shot lock.
+    if mode:
+        modes_seen = cache.setdefault("_modes_" + tool_name, set())
+        modes_seen.add(mode)
 
 
 def _wrap_with_state(agent, tool_name: str, query: str, result: str) -> str:
@@ -767,12 +799,18 @@ def _tool_knowledge_lookup(query: str = "", entry_id: str = "",
     """
     # Per-turn dedup (same as memory_recall): avoid near-identical
     # query variants hitting the RAG pipeline in a single turn.
+    # Mode-aware: re-calling with a DIFFERENT mode (search→count→outline)
+    # is allowed since each mode returns structurally different data.
     _caller_id = kw.get("_caller_agent_id") or agent_id or ""
     _hub = _get_hub()
     _kl_agent = _hub.get_agent(_caller_id) if _hub and _caller_id else None
     _q_str = (query or "").strip()
+    _mode_for_dedup = (mode or "search").lower().strip()
     if _q_str and not entry_id:
-        _dup = _check_turn_dedup(_kl_agent, "knowledge_lookup", _q_str)
+        _dup = _check_turn_dedup(
+            _kl_agent, "knowledge_lookup", _q_str,
+            mode=_mode_for_dedup,
+        )
         if _dup is not None:
             return _dup
 
@@ -809,7 +847,10 @@ def _tool_knowledge_lookup(query: str = "", entry_id: str = "",
 
     if _q_str and not entry_id:
         try:
-            _cache_turn_result(_kl_agent, "knowledge_lookup", _q_str, _result)
+            _cache_turn_result(
+                _kl_agent, "knowledge_lookup", _q_str, _result,
+                mode=_mode_for_dedup,
+            )
             _result = _wrap_with_state(_kl_agent, "knowledge_lookup", _q_str, _result)
         except Exception:
             pass
