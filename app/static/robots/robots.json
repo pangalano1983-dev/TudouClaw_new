@@ -4,8 +4,8 @@
       "id": "ceo",
       "name": "CEO",
       "title": "Chief Executive Officer",
-      "description": "Gold crown robot - authoritative leadership presence",
-      "filename": "robot_ceo.svg",
+      "description": "Pixel-art executive with vision compass — authoritative leadership presence",
+      "filename": "robot_ceo.png",
       "color": "#FFD700",
       "role": "executive"
     },
@@ -13,8 +13,8 @@
       "id": "cto",
       "name": "CTO",
       "title": "Chief Technology Officer",
-      "description": "Blue tech robot with antenna - technology visionary",
-      "filename": "robot_cto.svg",
+      "description": "Pixel-art senior tech leader with microchip and gear halo — technology visionary",
+      "filename": "robot_cto.png",
       "color": "#4169E1",
       "role": "executive"
     },
@@ -22,8 +22,8 @@
       "id": "coder",
       "name": "Coder",
       "title": "Software Engineer",
-      "description": "Green robot with code brackets - development expert",
-      "filename": "robot_coder.svg",
+      "description": "Pixel-art developer with round glasses and keyboard — development expert",
+      "filename": "robot_coder.png",
       "color": "#32CD32",
       "role": "engineer"
     },
@@ -31,8 +31,8 @@
       "id": "reviewer",
       "name": "Reviewer",
       "title": "Code Reviewer",
-      "description": "Purple robot with magnifying glass - quality assurance",
-      "filename": "robot_reviewer.svg",
+      "description": "Pixel-art inspector with magnifying glass and red ink pen — quality assurance",
+      "filename": "robot_reviewer.png",
       "color": "#9370DB",
       "role": "engineer"
     },
@@ -40,8 +40,8 @@
       "id": "researcher",
       "name": "Researcher",
       "title": "Research Scientist",
-      "description": "Teal robot with book - knowledge and research",
-      "filename": "robot_researcher.svg",
+      "description": "Pixel-art scholar with thin-rim spectacles and open book — knowledge and research",
+      "filename": "robot_researcher.png",
       "color": "#20B2AA",
       "role": "specialist"
     },
@@ -49,8 +49,8 @@
       "id": "architect",
       "name": "Architect",
       "title": "System Architect",
-      "description": "Orange robot with blueprint grid - design and planning",
-      "filename": "robot_architect.svg",
+      "description": "Pixel-art planner with rolled-up blueprint and hard-hat — design and planning",
+      "filename": "robot_architect.png",
       "color": "#FF8C00",
       "role": "engineer"
     },
@@ -58,8 +58,8 @@
       "id": "devops",
       "name": "DevOps",
       "title": "DevOps Engineer",
-      "description": "Red robot with gear - infrastructure and operations",
-      "filename": "robot_devops.svg",
+      "description": "Pixel-art operator with headset and tablet — infrastructure and operations",
+      "filename": "robot_devops.png",
       "color": "#DC143C",
       "role": "engineer"
     },
@@ -67,7 +67,7 @@
       "id": "designer",
       "name": "Designer",
       "title": "UI/UX Designer",
-      "description": "Pink robot with paintbrush - creative design",
+      "description": "Pink robot with paintbrush — creative design",
       "filename": "robot_designer.svg",
       "color": "#FF69B4",
       "role": "specialist"
@@ -76,16 +76,25 @@
       "id": "pm",
       "name": "PM",
       "title": "Product Manager",
-      "description": "Navy robot with clipboard - product leadership",
+      "description": "Navy robot with clipboard — product leadership",
       "filename": "robot_pm.svg",
       "color": "#000080",
+      "role": "manager"
+    },
+    {
+      "id": "product_architect",
+      "name": "Product Architect",
+      "title": "Product Architect",
+      "description": "Pixel-art hybrid PM-architect with blueprint and sticky-note swarm — bridging product + engineering",
+      "filename": "robot_product_architect.png",
+      "color": "#7B68EE",
       "role": "manager"
     },
     {
       "id": "tester",
       "name": "Tester",
       "title": "QA Engineer",
-      "description": "Lime green robot with checkmark - quality testing",
+      "description": "Lime green robot with checkmark — quality testing",
       "filename": "robot_tester.svg",
       "color": "#ADFF2F",
       "role": "engineer"
@@ -94,17 +103,53 @@
       "id": "data",
       "name": "Data Engineer",
       "title": "Data Engineer",
-      "description": "Cyan robot with chart - data and analytics",
+      "description": "Cyan robot with chart — data and analytics",
       "filename": "robot_data.svg",
       "color": "#00CED1",
       "role": "engineer"
     },
     {
+      "id": "marketing",
+      "name": "Marketing",
+      "title": "Marketing Manager",
+      "description": "Pixel-art marketer with megaphone and chart-up — brand voice and growth",
+      "filename": "robot_marketing.png",
+      "color": "#FF6347",
+      "role": "manager"
+    },
+    {
+      "id": "media",
+      "name": "Media",
+      "title": "Media / Reporter",
+      "description": "Pixel-art reporter with vintage microphone and press-tag bag — public communications and storytelling",
+      "filename": "robot_media.png",
+      "color": "#FF4500",
+      "role": "specialist"
+    },
+    {
+      "id": "meeting",
+      "name": "Meeting Assistant",
+      "title": "Meeting Assistant",
+      "description": "Pixel-art note-taker with stenographer pen and floating speech-bubbles — captures discussions",
+      "filename": "robot_meeting.png",
+      "color": "#5F9EA0",
+      "role": "assistant"
+    },
+    {
+      "id": "specialist",
+      "name": "Specialist",
+      "title": "Domain Specialist",
+      "description": "Pixel-art expert with thin headset and color-coded folders — niche-domain depth",
+      "filename": "robot_specialist.png",
+      "color": "#9ACD32",
+      "role": "specialist"
+    },
+    {
       "id": "general",
       "name": "General",
       "title": "Generic AI Agent",
-      "description": "Gray/silver classic robot - universal AI helper",
-      "filename": "robot_general.svg",
+      "description": "Pixel-art chibi assistant — universal AI helper",
+      "filename": "robot_general.png",
       "color": "#A9A9A9",
       "role": "general"
     }
